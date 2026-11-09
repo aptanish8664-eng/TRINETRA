@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { AlertTriangle, Battery, BatteryWarning, CheckCircle2, Compass, Link2, MapPin, Radio, Satellite, ShieldAlert, WifiOff } from 'lucide-react'
 import { api, ApiError } from '../services/api'
 import type { Px4TelemetrySnapshot, Px4TelemetryStreamSnapshot, Px4TelemetryVehicle } from '../types'
@@ -125,18 +125,20 @@ export function Px4MissionControl() {
     () => vehicles.find(vehicle => vehicle.id === selectedId) ?? vehicles[0] ?? null,
     [vehicles, selectedId],
   )
+  const vehiclesRef = useRef(vehicles)
+  vehiclesRef.current = vehicles
   const selectedModel = selectedGazeboModel ?? (selected ? gazeboModelForSystemId(selected.system_id) : null)
-  const selectPx4Vehicle = (vehicleId: string) => {
-    const vehicle = vehicles.find(candidate => candidate.id === vehicleId)
+  const selectPx4Vehicle = useCallback((vehicleId: string) => {
+    const vehicle = vehiclesRef.current.find(candidate => candidate.id === vehicleId)
     setSelectedId(vehicleId)
     setSelectedGazeboModel(vehicle ? gazeboModelForSystemId(vehicle.system_id) : null)
-  }
-  const selectGazeboModel = (modelName: string) => {
+  }, [])
+  const selectGazeboModel = useCallback((modelName: string) => {
     setSelectedGazeboModel(modelName)
     const systemId = systemIdForGazeboModel(modelName)
-    const vehicle = systemId === null ? null : vehicles.find(candidate => candidate.system_id === systemId)
+    const vehicle = systemId === null ? null : vehiclesRef.current.find(candidate => candidate.system_id === systemId)
     if (vehicle) setSelectedId(vehicle.id)
-  }
+  }, [])
   const connectedCount = vehicles.filter(vehicle => vehicle.status === 'connected').length
   const staleCount = vehicles.filter(vehicle => vehicle.status === 'stale' || vehicle.status === 'disconnected').length
   const batteryCount = vehicles.filter(vehicle => vehicle.battery?.remaining_percent !== null && vehicle.battery?.remaining_percent !== undefined).length
@@ -183,7 +185,7 @@ export function Px4MissionControl() {
     </div>
 
     <div className="px4-lower-grid">
-    <section className="panel px4-capability-panel"><div className="panel-heading"><div><span className="eyebrow">SECURITY MONITORING</span><h3><ShieldAlert size={16}/> Threat analysis</h3></div></div><p>PX4 raw GPS and IMU packets are collected when the autopilot publishes them. The existing detector was validated only against the abstract research simulator, so this page does not label live PX4 data as spoofed or assign a threat score.</p><div className="px4-capability-status"><span>GPS spoof detection</span><b>NOT VALIDATED FOR PX4</b></div><div className="px4-capability-status"><span>Independent navigation estimate</span><b>NOT IMPLEMENTED</b></div><div className="px4-capability-status"><span>Native Gazebo world/video</span><b>NOT STREAMED</b></div><p>The read-only Gazebo pose mirror above displays live X500 poses using the PX4 mesh. Gazebo world geometry, lighting, camera/video and physics overlays are not streamed. The Cesium layer below uses MAVLink geospatial positions; Gazebo local XYZ poses are shown separately.</p></section>
+    <section className="panel px4-capability-panel"><div className="panel-heading"><div><span className="eyebrow">SECURITY MONITORING</span><h3><ShieldAlert size={16}/> Threat analysis</h3></div></div><p>PX4 raw GPS and IMU packets are collected when the autopilot publishes them. The existing detector was validated only against the abstract research simulator, so this page does not label live PX4 data as spoofed or assign a threat score.</p><div className="px4-capability-status"><span>GPS spoof detection</span><b>NOT VALIDATED FOR PX4</b></div><div className="px4-capability-status"><span>Independent navigation estimate</span><b>NOT CONNECTED TO LIVE PX4</b></div><div className="px4-capability-status"><span>Native Gazebo world/video</span><b>NOT STREAMED</b></div><p>The read-only Gazebo pose mirror above displays live X500 poses using the PX4 mesh. Gazebo world geometry, lighting, camera/video and physics overlays are not streamed. The Cesium layer below uses MAVLink geospatial positions; Gazebo local XYZ poses are shown separately.</p></section>
       <section className="panel px4-capability-panel"><div className="panel-heading"><div><span className="eyebrow">MISSION COORDINATION</span><h3><Link2 size={16}/> PX4 mission state</h3></div></div>{selected?.mission ? <><p>{selected.mission.mission_state === 1 ? 'PX4 reports no mission loaded.' : 'Mission-current data received from PX4. This is the autopilot sequence state and is not yet linked to TRINETRA task assignments.'}</p><div className="px4-capability-status"><span>{selected.mission.mission_state === 1 ? 'Mission status' : 'Current waypoint'}</span><b>{selected.mission.mission_state === 1 ? 'NO MISSION LOADED' : selected.mission.total_sequence !== null && selected.mission.total_sequence > 0 ? `${selected.mission.current_sequence + 1} / ${selected.mission.total_sequence}` : 'NOT REPORTED'}</b></div><div className="px4-capability-status"><span>Task reassignment</span><b>NOT LINKED TO LIVE PX4</b></div></> : <p>No MAVLink mission-current message has been received. Mission progress and task reassignment remain unavailable for this live vehicle.</p>}</section>
     </div>
   </section>
@@ -204,14 +206,22 @@ function Px4VehicleDetails({ vehicle }: { vehicle: Px4TelemetryVehicle }) {
       <TelemetryDatum icon={<Radio size={13}/>} label="PX4 FLIGHT MODE" value={vehicle.heartbeat?.flight_mode ?? 'NOT REPORTED'}/>
       <TelemetryDatum icon={<MapPin size={13}/>} label="POSITION · WGS84" value={position ? `${position.latitude.toFixed(6)}, ${position.longitude.toFixed(6)}` : 'NO VALID POSITION'}/>
       <TelemetryDatum icon={<Compass size={13}/>} label="ALTITUDE · MSL / RELATIVE" value={position ? `${displayNumber(position.altitude_m, 1, ' m')} / ${displayNumber(position.relative_altitude_m, 1, ' m')}` : '—'}/>
-      <TelemetryDatum icon={<Compass size={13}/>} label="HEADING · ROLL · PITCH" value={`${displayNumber(position?.heading_deg, 0, 'Â°')} / ${displayNumber(vehicle.attitude?.roll_rad, 2, ' rad')} / ${displayNumber(vehicle.attitude?.pitch_rad, 2, ' rad')}`}/>
+      <TelemetryDatum icon={<Compass size={13}/>} label="PX4 ATTITUDE · ROLL / PITCH / YAW" value={vehicle.attitude ? `${displayNumber(vehicle.attitude.roll_rad, 2, ' rad')} / ${displayNumber(vehicle.attitude.pitch_rad, 2, ' rad')} / ${displayNumber(vehicle.attitude.yaw_rad, 2, ' rad')}` : 'ATTITUDE NOT REPORTED'}/>
+      <TelemetryDatum icon={<Compass size={13}/>} label="TRACK HEADING" value={displayNumber(position?.heading_deg, 0, 'Â°')}/>
       <TelemetryDatum icon={<Radio size={13}/>} label="GROUND / VERTICAL SPEED" value={vehicle.velocity ? `${displayNumber(vehicle.velocity.ground_speed_m_s, 2, ' m/s')} / ${displayNumber(vehicle.velocity.down_m_s, 2, ' m/s down')}` : '—'}/>
       <TelemetryDatum icon={vehicle.battery?.remaining_percent !== null && vehicle.battery?.remaining_percent !== undefined ? <Battery size={13}/> : <BatteryWarning size={13}/>} label="BATTERY · VOLTAGE" value={vehicle.battery ? `${displayNumber(vehicle.battery.remaining_percent, 0, '%')} / ${displayNumber(vehicle.battery.voltage_v, 2, ' V')}` : 'NOT REPORTED'}/>
       <TelemetryDatum icon={<Satellite size={13}/>} label="GPS FIX · SATELLITES" value={vehicle.gps_raw ? `${vehicle.gps_raw.fix_type} / ${vehicle.gps_raw.satellites_visible ?? '—'}` : 'GPS_RAW_INT NOT REPORTED'}/>
+      <TelemetryDatum icon={<Satellite size={13}/>} label="GPS HORIZONTAL / VERTICAL ACCURACY" value={vehicle.gps_raw ? `${displayNumber(vehicle.gps_raw.eph_m, 1, ' m')} / ${displayNumber(vehicle.gps_raw.epv_m, 1, ' m')}` : 'NOT REPORTED'}/>
+      <TelemetryDatum icon={<Radio size={13}/>} label="RAW INPUT STATUS · NOT A HEALTH SCORE" value={`GPS ${vehicle.gps_raw?.valid ? 'VALID FIX' : vehicle.gps_raw ? 'NO VALID FIX' : 'NOT REPORTED'} / IMU ${vehicle.imu_raw ? 'RECEIVED' : 'NOT REPORTED'}`}/>
       <TelemetryDatum icon={<WifiOff size={13}/>} label="LAST HEARTBEAT" value={vehicle.heartbeat_age_seconds === null ? 'NEVER RECEIVED' : `${vehicle.heartbeat_age_seconds.toFixed(1)} s ago`}/>
       <TelemetryDatum icon={<CheckCircle2 size={13}/>} label="MISSION SEQUENCE" value={vehicle.mission ? `${vehicle.mission.current_sequence + 1} / ${vehicle.mission.total_sequence || '—'}` : 'NOT REPORTED'}/>
     </div>
-    <div className="px4-imu-summary"><span>RAW IMU ACCELERATION</span>{vehicle.imu_raw ? <><b>{vehicle.imu_raw.acceleration_m_s2.map(value => displayNumber(value, 2)).join(' / ')} m/sÂ²</b><small>Received {vehicle.imu_raw.received_at}</small></> : <b>HIGHRES_IMU NOT RECEIVED</b>}</div>
+    <div className="px4-imu-summary"><strong>RAW HIGHRES_IMU · NO INDEPENDENT FUSION APPLIED</strong>{vehicle.imu_raw ? <>
+      <div className="px4-imu-vector"><span>ACCELERATION · M/S²</span><b>{vehicle.imu_raw.acceleration_m_s2.map(value => displayNumber(value, 2)).join(' / ')}</b></div>
+      <div className="px4-imu-vector"><span>ANGULAR RATE · RAD/S</span><b>{vehicle.imu_raw.angular_rate_rad_s.map(value => displayNumber(value, 3)).join(' / ')}</b></div>
+      <div className="px4-imu-vector"><span>MAGNETIC FIELD · GAUSS</span><b>{vehicle.imu_raw.magnetic_field_gauss.map(value => displayNumber(value, 3)).join(' / ')}</b></div>
+      <small>Fields updated 0x{vehicle.imu_raw.fields_updated.toString(16)} · source {vehicle.imu_raw.source_time_usec} µs · received {vehicle.imu_raw.received_at}</small>
+    </> : <b>HIGHRES_IMU NOT RECEIVED</b>}</div>
     <div className="px4-source-foot">Latest message {vehicle.last_message_at} Â· {vehicle.flight_trail.length} trail samples retained</div>
   </div>
 }

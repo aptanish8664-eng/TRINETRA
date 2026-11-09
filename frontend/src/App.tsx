@@ -9,6 +9,7 @@ import { Map2D } from './components/Map2D'
 import { AccessPortal, type AccessPage } from './components/AccessPortal'
 import { CommandDecisionPanel } from './components/CommandDecisionPanel'
 import { DetectorStatus } from './components/DetectorStatus'
+import { GeographicMissionPlanner } from './components/GeographicMissionPlanner'
 import { MissionAssistant } from './components/MissionAssistant'
 import { Px4MissionControl } from './components/Px4MissionControl'
 import { ScenarioWorkspace } from './components/ScenarioWorkspace'
@@ -73,7 +74,7 @@ function Overview({ onNavigate, onCreate }: { onNavigate: (tab: Tab) => void; on
   }, [])
   return <div className="overview-page" ref={story}>
     <section className="hero">
-      <div className="hero-image" aria-hidden="true"><picture><source srcSet="/images/qilian-aerial.webp" type="image/webp"/><img src="/images/terrain-horizon.svg" alt="" fetchPriority="high" /></picture></div>
+      <div className="hero-image" aria-hidden="true"><picture><source srcSet="/images/qilian-aerial.webp" type="image/webp"/><img src="/images/terrain-horizon.svg" alt="" /></picture></div>
       <div className="hero-shade" />
       <motion.div className="hero-content" initial={{ opacity: 0, y: 18 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: .8, ease: 'easeOut' }}>
         <div className="hero-kicker"><span className="live-dot" /> CYBER-RESILIENT MULTI-UAV RESEARCH PLATFORM</div>
@@ -105,6 +106,7 @@ function App() {
   )
   const [operatorSession, setOperatorSession] = useState<UserSession | null>(null)
   const [config, setConfig] = useState<Config>(initialConfig)
+  const [sharedScenarioId, setSharedScenarioId] = useState<string | null>(null)
   const [runId, setRunId] = useState<string | null>(null)
   const [state, setState] = useState<MissionState | null>(null)
   const [trajectory, setTrajectory] = useState<MissionState[]>([])
@@ -415,11 +417,31 @@ function App() {
         </>}
       </>}
 
-      {tab === 'Mission Planner' && <MissionAssistant key={`${operatorSession?.user.id ?? 'anonymous'}:${operatorSession?.user.role ?? 'none'}`} signedIn={Boolean(operatorSession)} userId={operatorSession?.user.id ?? ''} role={operatorSession?.user.role ?? 'OPERATOR'} config={config} runId={runId} state={currentState} onManualPlanning={() => changeTab('Scenario Lab')}/>}
+      {tab === 'Mission Planner' && <GeographicMissionPlanner
+        key={`${operatorSession?.user.id ?? 'anonymous'}:${operatorSession?.user.role ?? 'none'}`}
+        signedIn={Boolean(operatorSession)}
+        canManage={canCreateMission}
+        userId={operatorSession?.user.id ?? ''}
+        sharedScenarioId={sharedScenarioId}
+        onScenarioSelected={setSharedScenarioId}
+        onLoadConfig={setConfig}
+      >
+        <details className="legacy-planner-details">
+          <summary>EXISTING ABSTRACT SIMULATOR AI WORKFLOW</summary>
+          <p>Separate from geographic mission planning; this workflow produces abstract simulator scenarios and does not support geographic coordinates.</p>
+          <MissionAssistant key={`${operatorSession?.user.id ?? 'anonymous'}:${operatorSession?.user.role ?? 'none'}`} signedIn={Boolean(operatorSession)} userId={operatorSession?.user.id ?? ''} role={operatorSession?.user.role ?? 'OPERATOR'} config={config} runId={runId} state={currentState} sharedScenarioId={sharedScenarioId} onManualPlanning={scenarioId => {
+            if (scenarioId) setSharedScenarioId(scenarioId)
+            changeTab('Scenario Lab')
+          }}/>
+        </details>
+      </GeographicMissionPlanner>}
 
       {tab === 'Scenario Lab' && <ScenarioWorkspace
         config={config}
         onLoadConfig={setConfig}
+        sharedScenarioId={sharedScenarioId}
+        onScenarioSelected={setSharedScenarioId}
+        onEditGeographicMission={() => changeTab('Mission Planner')}
         canManage={operatorSession?.permissions.includes('scenario.create') ?? false}
         onRunCreated={(id, next) => {
           setRunId(id)

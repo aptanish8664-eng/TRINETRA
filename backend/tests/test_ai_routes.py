@@ -12,7 +12,7 @@ from openai import AsyncOpenAI as SDKAsyncOpenAI
 from sqlalchemy import update
 
 from app.ai.provider import AIProviderFailure, ProviderResult, get_ai_provider
-from app.ai.schemas import MissionProposalContent
+from app.ai.schemas import GeographicMissionProposalContent, MissionProposalContent
 from app.main import app
 from app.persistence.database import MissionProposalRecord, SessionLocal, utcnow_naive
 
@@ -60,6 +60,15 @@ class MockProvider:
         self.assessment_input = None
         self.description = None
         self.conversation_messages = None
+        self.geographic_context = None
+        self.geographic_plan = GeographicMissionProposalContent.model_validate({
+            "summary": "Distribute the requested advisory tasks among the listed aircraft.",
+            "assignments": [{
+                "uav_id": "px4-7", "role": "area_survey",
+                "task": "Survey the named zone", "zone_id": "zone-1",
+            }],
+            "missing_information": [], "constraints": [], "warnings": [],
+        })
 
     async def propose_mission(self, description, context):
         self.proposal_calls += 1
@@ -74,6 +83,13 @@ class MockProvider:
         if self.error:
             raise self.error
         return ProviderResult(self.proposal, "mock-response-conversation", 35, 42)
+
+    async def propose_geographic_mission(self, description, context):
+        self.description = description
+        self.geographic_context = context
+        if self.error:
+            raise self.error
+        return ProviderResult(self.geographic_plan, "mock-response-geographic", 35, 42)
 
     async def assess_mission(self, evidence):
         self.assessment_calls += 1
@@ -103,6 +119,81 @@ def test_proposal_requires_auth_and_calls_provider_only_after_authorization(mock
     guest = TestClient(app)
     assert guest.post("/api/ai/proposals", json=proposal_payload()).status_code == 401
     assert mock_ai.proposal_calls == 0
+
+
+def test_geographic_ai_plan_uses_only_current_aircraft_ids_and_omits_coordinates(operator_client, mock_ai, monkeypatch):
+    from app import main
+
+    class TelemetryStore:
+        def snapshot(self):
+            return {"vehicles": [{
+                "id": "px4-7", "status": "connected",
+                "position": {"valid": True},
+            }]}
+
+    monkeypatch.setattr(main, "px4_udp_transport", object())
+    monkeypatch.setattr(main, "px4_telemetry_store", TelemetryStore())
+    operator, _ = operator_client
+    response = operator.post("/api/ai/geographic-mission-plan", json={
+        "objective": "area_survey",
+        "description": "Survey the northern section and monitor its edge.",
+        "zones": [{"id": "zone-1", "name": "Northern section"}],
+    })
+
+    assert response.status_code == 200, response.text
+    assert response.json()["assignments"][0]["uav_id"] == "px4-7"
+    assert mock_ai.geographic_context["available_aircraft_ids"] == ["px4-7"]
+    assert mock_ai.geographic_context["zones"] == [{"id": "zone-1", "name": "Northern section"}]
+    assert "latitude" not in str(mock_ai.geographic_context).lower()
+    assert "longitude" not in str(mock_ai.geographic_context).lower()
+
+
+def test_geographic_ai_plan_rejects_coordinates_and_provider_aircraft_invention(operator_client, mock_ai, monkeypatch):
+    from app import main
+
+    class TelemetryStore:
+        def snapshot(self):
+            return {"vehicles": [{
+                "id": "px4-7", "status": "connected",
+                "position": {"valid": True},
+            }]}
+
+    monkeypatch.setattr(main, "px4_udp_transport", object())
+    monkeypatch.setattr(main, "px4_telemetry_store", TelemetryStore())
+    operator, _ = operator_client
+    coordinate_request = operator.post("/api/ai/geographic-mission-plan", json={
+        "objective": "area_survey",
+        "description": "Survey 37.7749, -122.4194.",
+        "zones": [],
+    })
+    assert coordinate_request.status_code == 422
+
+    mock_ai.geographic_plan = GeographicMissionProposalContent.model_validate({
+        "summary": "Assign the mission.",
+        "assignments": [{
+            "uav_id": "px4-99", "role": "area_survey",
+            "task": "Survey the zone", "zone_id": None,
+        }],
+        "missing_information": [], "constraints": [], "warnings": [],
+    })
+    invented_aircraft = operator.post("/api/ai/geographic-mission-plan", json={
+        "objective": "area_survey",
+        "description": "Survey the named zone.",
+        "zones": [],
+    })
+    assert invented_aircraft.status_code == 502
+
+    mock_ai.geographic_plan = GeographicMissionProposalContent.model_validate({
+        "summary": "Start at 37.7749, -122.4194.",
+        "assignments": [],
+        "missing_information": [], "constraints": [], "warnings": [],
+    })
+    fabricated_coordinates = operator.post("/api/ai/geographic-mission-plan", json={
+        "objective": "area_survey",
+        "description": "Survey the named zone.",
+        "zones": [],
+    })
+    assert fabricated_coordinates.status_code == 502
 
 
 def test_general_independently_approves_operator_proposal(general_client, operator_client, mock_ai):
@@ -389,6 +480,55 @@ def test_ai_conversation_persists_clarification_and_transfers_validated_config(o
     repeated = operator.post(f"/api/ai/conversations/{state['conversation_id']}/scenario")
     assert repeated.status_code == 200
     assert repeated.json()["id"] == saved.json()["id"]
+
+
+def test_ai_conversation_updates_the_selected_scenario_without_creating_a_duplicate(operator_client, mock_ai):
+    operator, _ = operator_client
+    config = proposal_payload()["operator_config"]
+    intent = {
+        "mission_objectives": ["Existing manual objective"],
+        "proposed_tasks": [], "uav_role_suggestions": [],
+        "operating_area_notes": "Existing abstract area note",
+        "environment_notes": "", "constraints": ["Keep this constraint"],
+        "geographic_mission": None,
+        "uav_fault_assignments": [
+            {"uav_id": "UAV-01", "fault_type": "none", "spoof_start": 0, "spoof_duration": 1, "spoof_magnitude": 0.0},
+            {"uav_id": "UAV-02", "fault_type": "none", "spoof_start": 0, "spoof_duration": 1, "spoof_magnitude": 0.0},
+        ],
+    }
+    created = operator.post("/api/scenarios", json={
+        "title": "Shared draft", "config": config, "intent": intent,
+    })
+    assert created.status_code == 201, created.text
+    scenario_id = created.json()["id"]
+
+    started = operator.post("/api/ai/conversations", json={
+        "message": "Plan a repeatable abstract simulator scenario.",
+        "operator_config": config,
+    })
+    assert started.status_code == 201
+    conversation_id = started.json()["conversation_id"]
+    saved = operator.post(
+        f"/api/ai/conversations/{conversation_id}/scenario",
+        json={"scenario_id": scenario_id},
+    )
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["id"] == scenario_id
+    assert len(saved.json()["versions"]) == 2
+    latest = saved.json()["versions"][0]
+    assert {key: latest["config"][key] for key in config} == config
+    assert latest["intent"]["operating_area_notes"] == "Existing abstract area note"
+    assert latest["intent"]["constraints"][0] == "Keep this constraint"
+    assert any("unverified advisory text" in item for item in latest["intent"]["constraints"])
+    assert latest["intent"]["uav_fault_assignments"] == intent["uav_fault_assignments"]
+
+    repeated = operator.post(
+        f"/api/ai/conversations/{conversation_id}/scenario",
+        json={"scenario_id": scenario_id},
+    )
+    assert repeated.status_code == 200
+    assert repeated.json()["id"] == scenario_id
+    assert len(repeated.json()["versions"]) == 2
 
 
 def test_conversation_rejects_coordinates_and_protects_owner_scope(operator_client, mock_ai):

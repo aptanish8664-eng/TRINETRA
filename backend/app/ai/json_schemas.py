@@ -13,6 +13,22 @@ _string = {"type": "string"}
 _nullable_string = {"type": ["string", "null"]}
 _integer = {"type": "integer"}
 
+GEOGRAPHIC_MISSION_JSON_SCHEMA = _object({
+    "summary": _string,
+    "assignments": _array(_object({
+        "uav_id": _string,
+        "role": {"type": "string", "enum": [
+            "area_survey", "perimeter_monitoring", "inspection",
+            "search_observation", "communication_relay",
+        ]},
+        "task": _string,
+        "zone_id": _nullable_string,
+    }, ["uav_id", "role", "task", "zone_id"]), 0, 20),
+    "missing_information": _array(_string, 0, 12),
+    "constraints": _array(_string, 0, 12),
+    "warnings": _array(_string, 0, 12),
+}, ["summary", "assignments", "missing_information", "constraints", "warnings"])
+
 PROPOSAL_JSON_SCHEMA = _object({
     "mission_objectives": _array(_string, 1, 8),
     "required_information": _array(_string, 0, 12),
@@ -46,4 +62,3 @@ ASSESSMENT_JSON_SCHEMA = _object({
         "type": "string", "enum": ["continue_monitoring", "pause_simulation", "stop_simulation"],
     }, 0, 3),
 }, ["summary", "findings", "suggested_responses"])
-

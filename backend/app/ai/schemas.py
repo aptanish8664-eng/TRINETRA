@@ -75,6 +75,36 @@ class MissionConversationTurnRequest(StructuredOutput):
     message: str = Field(min_length=1, max_length=2000)
 
 
+class MissionConversationScenarioTransferRequest(StructuredOutput):
+    scenario_id: Optional[str] = Field(default=None, min_length=1, max_length=64)
+
+
+class GeographicZoneLabel(StructuredOutput):
+    id: str = Field(min_length=1, max_length=40)
+    name: str = Field(min_length=1, max_length=60)
+
+
+class GeographicMissionPlanningRequest(StructuredOutput):
+    objective: Literal["area_survey", "perimeter_monitoring", "inspection", "search_observation", "communication_relay"]
+    description: str = Field(min_length=1, max_length=2000)
+    zones: list[GeographicZoneLabel] = Field(max_length=20)
+
+
+class GeographicAssignmentSuggestion(StructuredOutput):
+    uav_id: str = Field(min_length=5, max_length=16)
+    role: Literal["area_survey", "perimeter_monitoring", "inspection", "search_observation", "communication_relay"]
+    task: str = Field(min_length=1, max_length=300)
+    zone_id: Optional[str] = Field(max_length=40)
+
+
+class GeographicMissionProposalContent(StructuredOutput):
+    summary: str = Field(min_length=1, max_length=500)
+    assignments: list[GeographicAssignmentSuggestion] = Field(max_length=20)
+    missing_information: list[str] = Field(max_length=12)
+    constraints: list[str] = Field(max_length=12)
+    warnings: list[str] = Field(max_length=12)
+
+
 class ConversationMessage(StructuredOutput):
     role: Literal["user", "assistant"]
     content: str = Field(min_length=1, max_length=2000)

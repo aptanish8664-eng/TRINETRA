@@ -4,8 +4,8 @@ import json
 from dataclasses import dataclass
 from typing import Any, Generic, Protocol, TypeVar
 
-from .schemas import MissionAssessmentContent, MissionProposalContent
-from .json_schemas import ASSESSMENT_JSON_SCHEMA, PROPOSAL_JSON_SCHEMA
+from .schemas import GeographicMissionProposalContent, MissionAssessmentContent, MissionProposalContent
+from .json_schemas import ASSESSMENT_JSON_SCHEMA, GEOGRAPHIC_MISSION_JSON_SCHEMA, PROPOSAL_JSON_SCHEMA
 from ..config import AI_MAX_OUTPUT_TOKENS, AI_TIMEOUT_SECONDS, OPENAI_API_KEY, OPENAI_MODEL
 
 
@@ -39,6 +39,8 @@ class MissionAIProvider(Protocol):
     async def propose_mission(self, description: str, context: dict[str, Any]) -> ProviderResult[MissionProposalContent]: ...
 
     async def continue_mission_conversation(self, messages: list[dict[str, str]], context: dict[str, Any]) -> ProviderResult[MissionProposalContent]: ...
+
+    async def propose_geographic_mission(self, description: str, context: dict[str, Any]) -> ProviderResult[GeographicMissionProposalContent]: ...
 
     async def assess_mission(self, evidence: dict[str, Any]) -> ProviderResult[MissionAssessmentContent]: ...
 
@@ -80,6 +82,21 @@ class OpenAIResponsesProvider:
         return await self._parse(
             MissionProposalContent, PROPOSAL_JSON_SCHEMA, instructions,
             {"conversation": messages, "simulator_context": context}, "mission conversation",
+        )
+
+    async def propose_geographic_mission(self, description: str, context: dict[str, Any]) -> ProviderResult[GeographicMissionProposalContent]:
+        instructions = (
+            "Prepare a non-executable geographic mission planning suggestion for TRINETRA. "
+            "Use only the operator request and the supplied objective, named zones, and current available PX4 aircraft IDs. "
+            "Do not invent aircraft, locations, coordinates, vehicle capabilities, waypoints, route geometry, or feasibility. "
+            "Coordinates are deliberately omitted; the map selections are authoritative and must not be reconstructed. "
+            "Suggest only aircraft IDs explicitly listed as available. Assign advisory roles and concise tasks to those IDs. "
+            "If the information does not support a recommendation, return missing_information and warnings. "
+            "All suggestions require operator review; do not claim approval, execution, or flight readiness."
+        )
+        return await self._parse(
+            GeographicMissionProposalContent, GEOGRAPHIC_MISSION_JSON_SCHEMA, instructions,
+            {"operator_request": description, "mission_context": context}, "geographic mission plan",
         )
 
     async def assess_mission(self, evidence: dict[str, Any]) -> ProviderResult[MissionAssessmentContent]:
@@ -139,4 +156,3 @@ class OpenAIResponsesProvider:
 
 def get_ai_provider() -> MissionAIProvider:
     return OpenAIResponsesProvider()
-

@@ -30,10 +30,12 @@ The database was not changed. Do not run first-General bootstrap, legacy rebuild
 
 - Password hashing and session token storage use Argon2id and SHA-256 token digests, respectively. Session records are revocable and expire.
 - Origin checks, credentialed CORS allowlisting, CSRF, backend permission checks, owner checks, input bounds, and structured HTTP request logging are present in inspected source.
-- Audit reads are restricted to `AUDIT_READ`; General has that permission. The API supports pagination. CSV export currently caps output to 200 rows (D-02).
+- Audit reads are restricted to `AUDIT_READ`; General has that permission. The API supports pagination. CSV export now streams the complete filtered result in bounded keyset batches; an isolated regression exported 450 matching rows with filtering and CSV escaping (D-02 fixed).
 - None of the 169 canonical historical audit rows had `actor_role` in metadata (D-03). Current actor role fields are not retroactively reconstructed.
 - Login and registration throttles are in-process and are not shared across multiple workers. MFA is not implemented.
 - Environment overrides for the active backend were not inspected, so current process-to-file selection is unconfirmed. Keep production credentials and environment contents out of audit logs.
+
+The latest full backend suite passed **140 tests** using isolated test databases. Controlled browser authentication/registration acceptance used a separate temporary database. Neither result involved a write to the canonical file.
 
 ## Safe next steps
 

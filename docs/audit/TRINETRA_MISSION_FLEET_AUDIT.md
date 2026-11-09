@@ -24,9 +24,11 @@ There is no validated geographic origin/frame, waypoint registry, actual geograp
 
 - Source contains the abstract mission/fleet workflow and resource-aware reassignment.
 - Frontend tests passed for app routing, command-decision UI, and other page modules; they use mocked API responses.
-- No authenticated live browser mission was created during this audit. The canonical DB was kept read-only.
+- Controlled browser acceptance created and deployed an authenticated abstract simulation on a separate temporary SQLite database; its simulation WebSocket delivered live abstract state. No mission/vehicle command was sent to PX4, and the canonical DB was kept read-only.
 - Historical docs report three disarmed SITL systems and telemetry identities, but no complete flight, verified independent movement, or three/five vehicle resource acceptance.
 - Adaptive response is not applied to actual PX4. Do not equate abstract UAV rows or a Gazebo mesh with live coordinated vehicles.
+
+The latest browser health check reports the abstract simulator available and PX4/Gazebo not integrated; WSL has no currently running distribution. Earlier PX4/Gazebo smoke observations are historical and do not establish current telemetry. No synthetic sensor estimate or ML assessment is connected to mission reassignment or vehicle commands.
 
 ## Follow-up
 

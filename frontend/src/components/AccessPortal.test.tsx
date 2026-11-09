@@ -59,6 +59,7 @@ describe('registration receipt and status', () => {
     fireEvent.click(screen.getByRole('button', { name: /SUBMIT REGISTRATION/ }))
 
     expect(await screen.findByText('application-123')).toBeTruthy()
+    expect(apiMock.register).toHaveBeenCalledWith(expect.objectContaining({ email: null }))
     expect(screen.getByText('YOUR REGISTRATION ID')).toBeTruthy()
     expect(screen.getByText(/STATUS:/).textContent).toContain('PENDING')
     expect((screen.getByRole('textbox', { name: 'Application ID' }) as HTMLInputElement).value).toBe('application-123')

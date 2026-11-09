@@ -781,6 +781,178 @@ def test_scenario_intent_validation_and_approval_hash_cover_intent(general_clien
     ).status_code == 403
 
 
+def test_per_uav_fault_profiles_are_versioned_and_multi_profile_runs_are_blocked(operator_client):
+    operator, _ = operator_client
+    config = {
+        "uav_count": 4, "task_count": 10, "seed": 21, "duration": 30,
+        "spoofing_type": "none", "target_uav": "UAV-01", "spoof_start": 0,
+        "spoof_duration": 10, "spoof_magnitude": 1.0, "response_policy": "adaptive",
+        "detector_threshold": None,
+    }
+    intent = {
+        "mission_objectives": ["Compare software-only fault profiles"],
+        "proposed_tasks": [], "uav_role_suggestions": [],
+        "operating_area_notes": "", "environment_notes": "", "constraints": [],
+        "uav_fault_assignments": [
+            {"uav_id": "UAV-01", "fault_type": "sudden", "spoof_start": 2, "spoof_duration": 8, "spoof_magnitude": 1.5},
+            {"uav_id": "UAV-02", "fault_type": "noise", "spoof_start": 3, "spoof_duration": 9, "spoof_magnitude": 0.0},
+            {"uav_id": "UAV-03", "fault_type": "none", "spoof_start": 0, "spoof_duration": 1, "spoof_magnitude": 0.0},
+        ],
+    }
+    created = operator.post("/api/scenarios", json={"title": "Per-UAV fault profiles", "config": config, "intent": intent})
+    assert created.status_code == 201, created.text
+    scenario = created.json()
+    version = scenario["versions"][0]
+    assert version["intent"]["uav_fault_assignments"] == intent["uav_fault_assignments"]
+    sandbox = operator.post(
+        f"/api/scenarios/{scenario['id']}/versions/{version['id']}/sandbox",
+    )
+    assert sandbox.status_code == 409
+    assert "only one active GPS fault at a time" in sandbox.json()["detail"]
+    execution = operator.post(
+        f"/api/scenarios/{scenario['id']}/execute", json={"version_id": version["id"]},
+    )
+    assert execution.status_code == 409
+    assert "only one active GPS fault at a time" in execution.json()["detail"]
+
+    invalid = {**intent, "uav_fault_assignments": [{
+        "uav_id": "UAV-05", "fault_type": "sudden", "spoof_start": 0,
+        "spoof_duration": 1, "spoof_magnitude": 1.0,
+    }]}
+    rejected = operator.post("/api/scenarios", json={"title": "Invalid fault target", "config": config, "intent": invalid})
+    assert rejected.status_code == 422
+
+
+def test_geographic_mission_is_versioned_and_never_runs_in_abstract_simulator(
+    general_client, operator_client, monkeypatch,
+):
+    general, _ = general_client
+    operator, _ = operator_client
+    from app import main
+
+    class TelemetryStore:
+        def snapshot(self):
+            return {"vehicles": [{
+                "id": "px4-7", "status": "connected",
+                "position": {"valid": True},
+            }]}
+
+    monkeypatch.setattr(main, "px4_udp_transport", object())
+    monkeypatch.setattr(main, "px4_telemetry_store", TelemetryStore())
+    config = {
+        "uav_count": 4, "task_count": 10, "seed": 21, "duration": 30,
+        "spoofing_type": "none", "target_uav": "UAV-02", "spoof_start": 15,
+        "spoof_duration": 35, "spoof_magnitude": 3.0, "response_policy": "adaptive",
+        "detector_threshold": None,
+    }
+    intent = {
+        "mission_objectives": ["Area surveying"],
+        "proposed_tasks": [], "uav_role_suggestions": [],
+        "operating_area_notes": "", "environment_notes": "", "constraints": [],
+        "geographic_mission": {
+            "objective": "area_survey",
+            "start_location": {"latitude": 12.9716, "longitude": 77.5946},
+            "destination": None,
+            "survey_zones": [{
+                "id": "zone-1", "name": "North survey",
+                "vertices": [
+                    {"latitude": 13.0, "longitude": 77.6},
+                    {"latitude": 13.1, "longitude": 77.6},
+                    {"latitude": 13.05, "longitude": 77.7},
+                ],
+            }],
+            "uav_assignments": [{
+                "uav_id": "px4-7", "role": "area_survey",
+                "task": "Survey North survey", "zone_id": None,
+                "zone_ids": ["zone-1"],
+                "start_location": {"latitude": 12.98, "longitude": 77.59},
+                "destination": {"latitude": 13.02, "longitude": 77.62},
+                "waypoints": [{"latitude": 13.0, "longitude": 77.61}],
+            }],
+            "constraints": [], "ai_recommendations": [],
+        },
+    }
+    created = operator.post("/api/scenarios", json={"title": "Geographic test", "config": config, "intent": intent})
+    assert created.status_code == 201, created.text
+    scenario = created.json()
+    version_one = scenario["versions"][0]
+    assert version_one["intent"]["geographic_mission"]["start_location"] == intent["geographic_mission"]["start_location"]
+    assignment = version_one["intent"]["geographic_mission"]["uav_assignments"][0]
+    assert assignment["start_location"] == intent["geographic_mission"]["uav_assignments"][0]["start_location"]
+    assert assignment["destination"] == intent["geographic_mission"]["uav_assignments"][0]["destination"]
+    assert assignment["waypoints"] == intent["geographic_mission"]["uav_assignments"][0]["waypoints"]
+    assert operator.post(
+        f"/api/scenarios/{scenario['id']}/versions/{version_one['id']}/sandbox",
+    ).status_code == 409
+
+    updated_config = {**config, "seed": 22}
+    updated = operator.put(
+        f"/api/scenarios/{scenario['id']}",
+        json={"title": "Geographic test", "config": updated_config},
+    )
+    assert updated.status_code == 200
+    version_two = updated.json()["versions"][0]
+    assert version_two["intent"]["geographic_mission"] == version_one["intent"]["geographic_mission"]
+    submitted = operator.post(
+        f"/api/scenarios/{scenario['id']}/versions/{version_two['id']}/submit",
+    )
+    assert submitted.status_code == 200
+    decision = general.post(
+        f"/api/general/scenario-approvals/{submitted.json()['id']}/decision",
+        json={"decision": "approve", "reason": "Geographic intent reviewed."},
+    )
+    assert decision.status_code == 200
+    assert operator.post(
+        f"/api/scenarios/{scenario['id']}/execute",
+        json={"version_id": version_two["id"]},
+    ).status_code == 409
+
+
+def test_geographic_mission_rejects_self_intersecting_zone(operator_client, monkeypatch):
+    from app import main
+
+    class TelemetryStore:
+        def snapshot(self):
+            return {"vehicles": [{
+                "id": "px4-7", "status": "connected",
+                "position": {"valid": True},
+            }]}
+
+    monkeypatch.setattr(main, "px4_udp_transport", object())
+    monkeypatch.setattr(main, "px4_telemetry_store", TelemetryStore())
+    operator, _ = operator_client
+    config = {
+        "uav_count": 4, "task_count": 10, "seed": 21, "duration": 30,
+        "spoofing_type": "none", "target_uav": "UAV-02", "spoof_start": 15,
+        "spoof_duration": 35, "spoof_magnitude": 3.0, "response_policy": "adaptive",
+        "detector_threshold": None,
+    }
+    intent = {
+        "mission_objectives": ["Area surveying"],
+        "proposed_tasks": [], "uav_role_suggestions": [],
+        "operating_area_notes": "", "environment_notes": "", "constraints": [],
+        "geographic_mission": {
+            "objective": "area_survey",
+            "start_location": {"latitude": 12.0, "longitude": 77.0},
+            "survey_zones": [{
+                "id": "zone-1", "name": "Crossed boundary",
+                "vertices": [
+                    {"latitude": 12.0, "longitude": 77.0},
+                    {"latitude": 13.0, "longitude": 78.0},
+                    {"latitude": 12.0, "longitude": 78.0},
+                    {"latitude": 13.0, "longitude": 77.0},
+                ],
+            }],
+            "uav_assignments": [{
+                "uav_id": "px4-7", "role": "area_survey",
+                "task": "Survey zone", "zone_id": "zone-1",
+            }],
+        },
+    }
+    response = operator.post("/api/scenarios", json={"title": "Invalid geography", "config": config, "intent": intent})
+    assert response.status_code == 422
+
+
 def test_audit_filtering_and_csv_export(general_client, operator_client):
     general, _ = general_client
     operator, _ = operator_client
@@ -797,6 +969,53 @@ def test_audit_filtering_and_csv_export(general_client, operator_client):
     assert "mission_created" in exported.text
     assert "actor_role" in exported.text.splitlines()[0]
     assert "OPERATOR" in exported.text
+
+
+def test_audit_csv_exports_all_filtered_rows_with_csv_escaping(general_client, operator_client):
+    import csv
+    import io
+    from datetime import datetime, timedelta
+
+    general, general_user = general_client
+    operator, _ = operator_client
+    created_at = datetime(2025, 1, 1)
+    reason = 'csv export, "complete"\nwith a second line'
+    with SessionLocal() as db:
+        db.add_all([
+            AuditLogRecord(
+                id=f"audit-csv-{index:04d}-{uuid.uuid4().hex}",
+                actor_user_id=general_user.id,
+                actor_name=general_user.full_name,
+                event_type="audit_csv_export_test",
+                target_type="test",
+                target_id=f"target-{index}",
+                outcome="success",
+                reason=reason,
+                request_id=f"audit-csv-request-{index}",
+                metadata_json='{"actor_role":"GENERAL"}',
+                created_at=created_at + timedelta(seconds=index // 3),
+            )
+            for index in range(450)
+        ])
+        db.commit()
+
+    exported = general.get(
+        "/api/general/audit.csv",
+        params={
+            "event_type": "audit_csv_export_test",
+            "search": "csv export",
+            "outcome": "success",
+            "username": general_user.username,
+            "since": "2025-01-01T00:00:00Z",
+            "until": "2025-01-01T00:02:29Z",
+        },
+    )
+    assert exported.status_code == 200
+    rows = list(csv.DictReader(io.StringIO(exported.text)))
+    assert len(rows) == 450
+    assert rows[0]["actor_role"] == "GENERAL"
+    assert rows[0]["reason"] == reason
+    assert operator.get("/api/general/audit.csv").status_code == 403
 
 
 def test_first_general_bootstrap_is_explicit_and_one_time():

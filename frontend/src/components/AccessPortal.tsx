@@ -96,7 +96,7 @@ function LoginForm({ onPageChange, onAuthenticated }: Pick<AccessPortalProps, 'o
 }
 
 function RegistrationForm({ onPageChange }: Pick<AccessPortalProps, 'onPageChange'>) {
-  const [application, setApplication] = useState<RegistrationApplication & { confirmPassword: string }>({
+  const [application, setApplication] = useState<Omit<RegistrationApplication, 'email'> & { email: string; confirmPassword: string }>({
     full_name: '', username: '', email: '', password: '', confirmPassword: '',
     requested_role: 'OPERATOR', justification: '',
   })
@@ -145,7 +145,11 @@ function RegistrationForm({ onPageChange }: Pick<AccessPortalProps, 'onPageChang
     setBusy(true)
     setMessage('')
     try {
-      const { confirmPassword: _confirmation, ...payload } = application
+      const { confirmPassword: _confirmation, ...applicationPayload } = application
+      const payload = {
+        ...applicationPayload,
+        email: applicationPayload.email.trim() || null,
+      }
       const receipt = await api.register(payload)
       setApplicationId(receipt.application_id)
       setStatus({

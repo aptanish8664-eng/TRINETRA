@@ -116,8 +116,12 @@ describe('Mission Control routing', () => {
     render(<App />)
 
     expect(await screen.findByText('TRINETRA General · GENERAL')).toBeTruthy()
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined)
     fireEvent.click(screen.getByRole('button', { name: 'RETURN TO HOME' }))
     expect(await screen.findByRole('heading', { name: /See the signal/ })).toBeTruthy()
     expect(window.location.pathname).toBe('/')
+    expect(document.querySelector('.hero-image img')?.getAttribute('fetchpriority')).toBeNull()
+    expect(consoleError.mock.calls.flat().join(' ')).not.toContain('fetchPriority')
+    consoleError.mockRestore()
   })
 })

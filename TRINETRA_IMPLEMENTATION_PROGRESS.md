@@ -1,6 +1,6 @@
 # TRINETRA Implementation Progress and Handoff Checkpoint
 
-Updated: 2026-11-08 (live PX4/Gazebo bridge and full regression recheck)
+Updated: 2026-11-09 (shared scenario workflow and geographic conversation recheck)
 
 ## Workspace and current application state
 
@@ -335,6 +335,40 @@ Set-Location D:\TRINETRA\backend
 - Default isolated SQLite backend tests from `D:\TRINETRA\backend`: `..\.venv\Scripts\python.exe -m pytest -q tests`.
 - Frontend tests/build from `D:\TRINETRA\frontend`: `npm.cmd test` then `npm.cmd run build`.
 - PostgreSQL migration/test requires a dedicated, separately running PostgreSQL test database, server-side `DATABASE_URL` for Alembic, and `TRINETRA_TEST_DATABASE_URL` for pytest. The pytest URL must name exactly `trinetra_test`. Migration commands from `backend`: `..\.venv\Scripts\python.exe -m alembic upgrade head`, `..\.venv\Scripts\python.exe -m alembic current`, and `..\.venv\Scripts\python.exe -m alembic check`. Do not point these commands at the populated local DB or unknown cloud databases.
+
+## Geographic Mission Planner milestone (2026-11-09)
+
+### Scope and implementation status
+
+- Implemented a WGS84 Cesium planning view inside the existing Mission Planner route: map-selected/movable/clearable start and destination markers, multiple drawn zones, draggable/removable polygon vertices, per-aircraft proposed connections, objective/task/constraint fields, mission preview, and local geometry/availability validation.
+- Fleet cards use the authenticated PX4 telemetry endpoint only. Connected aircraft with valid current position can be assigned; stale, disconnected, invalid, and missing telemetry remain visible as unavailable. The backend rechecks assignment IDs against current telemetry before create/update.
+- Geographic intent is stored in the existing immutable `scenario_version_intent` JSON and covered by the version integrity hash; no migration or schema-column change was made. Existing General approval remains the review path. Geographic plans are explicitly rejected by abstract sandbox/execution routes.
+- Added `/api/ai/geographic-mission-plan` using the existing provider adapter, request quota, redaction, and audit. Only the natural-language description, objective, zone IDs/names, and current available PX4 IDs are supplied; exact coordinates are omitted. AI output is checked against current IDs/zones and coordinate-like text, remains advisory, and is never saved or executed automatically.
+- The existing abstract simulator AI workflow remains available in a clearly separated collapsible section. Scenario Lab preserves geographic intent and disables its abstract sandbox/execution actions for geographic missions.
+- CRS: WGS84 latitude/longitude in degrees. No transformation to PX4/Gazebo local coordinates, altitude model, feasible route, or flight execution is implemented. Dashed route lines are labeled as illustrative direct connectors only.
+
+### Files changed
+
+- Backend: `backend/app/schemas.py`, `backend/app/persistence/database.py`, `backend/app/scenario_routes.py`, new `backend/app/telemetry/planning.py`, `backend/app/ai/schemas.py`, `backend/app/ai/json_schemas.py`, `backend/app/ai/provider.py`, `backend/app/ai/routes.py`, `backend/tests/test_api.py`, and `backend/tests/test_ai_routes.py`.
+- Frontend: `frontend/src/App.tsx`, `frontend/src/services/auth.ts`, `frontend/src/services/ai.ts`, `frontend/src/services/api.ts`, `frontend/src/components/ScenarioWorkspace.tsx`, `frontend/src/components/ScenarioWorkspace.test.tsx`, new `frontend/src/components/GeographicMissionPlanner.tsx`, `MissionPlannerMap.tsx`, `missionPlanning.ts`, `mission-planner.css`, `GeographicMissionPlanner.test.tsx`, and `missionPlanning.test.ts`.
+- Documentation: this checkpoint, `TRINETRA_API_CONTRACT.md`, `TRINETRA_COMPLETE_ARCHITECTURE.md`, `TRINETRA_DATA_DICTIONARY.md`, `TRINETRA_IMPLEMENTATION_ROADMAP.md`, `TRINETRA_TEST_STRATEGY.md`, and `docs/PROJECT_STATUS.md`.
+- No database files, PX4/Gazebo configuration, or credentials were modified. No package/dependency manifest changed.
+
+### Verification
+
+- Backend, from `D:\TRINETRA\backend`: `..\.venv\Scripts\python.exe -m pytest -q tests` — **144 passed** in 167.36 s, exit code 0. The suite uses its isolated SQLite database; `backend/trinetra.db` was not the test target.
+- Frontend, from `D:\TRINETRA\frontend`: `npm.cmd test` — **12 files / 38 tests passed** in 53.83 s. jsdom reports unsupported canvas and `scrollTo()` notices; these did not fail tests.
+- Production build: `npm.cmd run build` — **passed**, TypeScript and Vite; 4,219 modules transformed and 342 static assets copied. Vite retains its Cesium chunk-size warning (5,011.16 kB minified / 1,382.61 kB gzip).
+- Browser: opened `http://127.0.0.1:5173/mission-planner`; the app redirected to the sign-in gate and session calls returned 401. No credentials were used, so Cesium browser interaction was not tested. No live AI provider request was made.
+- The initial focused backend run had one failed test because its assertion treated the words “latitude/longitude” in non-coordinate CRS metadata as transmitted coordinates. The metadata was narrowed to `WGS84; exact coordinate values are omitted`, then the focused and full backend suites passed.
+- The initial production build found TypeScript errors: route indices were strings from `Map.forEach`, and strict checks flagged optional scenario/test values. Iteration now uses numeric array indices and optional fields are guarded; the final build passed.
+
+### Blockers and next exact step
+
+- Public `GET /api/health` returned `ai_provider.status=not_configured`; live AI availability therefore requires an operator-provided server-side `OPENAI_API_KEY`. No frontend key or fallback response is used.
+- Browser acceptance requires an authorized disposable session and a running backend configured to receive PX4 telemetry. The current unauthenticated browser reached the login gate; no credentials were requested or used.
+- Before any future route execution, define and validate a geographic-to-local PX4/Gazebo frame transform and route-feasibility/safety checks. Until then, geographic mission drafts are save/review-only and cannot enter abstract execution.
+- Last successful action: full backend suite, full frontend suite, and production build all passed. Resume with authenticated browser acceptance on an isolated database and real configured PX4 telemetry; do not use or alter `backend/trinetra.db`.
 - PX4 simulator is unavailable until Phase 1 user-run setup. In the verified WSL Ubuntu shell, after installing the documented pinned toolchain: `cd ~/PX4-Autopilot && HEADLESS=1 make px4_sitl gz_x500`. This is an external simulator command, not a current TRINETRA app command, and must not be claimed successful until observed.
 - Required server-side config: optional `DATABASE_URL` (SQLite default when unset; PostgreSQL example in `.env.example`), optional `TRINETRA_DB_PATH`, `TRINETRA_ALLOWED_ORIGINS`, `TRINETRA_SESSION_COOKIE_SECURE`, and server-only `OPENAI_API_KEY` for live AI. No secret values are recorded here. Dependencies are in `backend/requirements.txt`; local frontend dependencies are in `frontend/package.json` and `package-lock.json`.
 
@@ -679,6 +713,39 @@ First open the existing authenticated Mission Control page at http://127.0.0.1:5
 The three systems are disarmed: live REST showed near-zero PX4 speed and static Gazebo poses over three seconds. Do not treat small GPS coordinate variation as flight. After visual acceptance, the owner must perform one safe X500 SITL flight. Only then continue dependent raw sensor/independent-estimate consistency, software-only fault validation, PX4-derived dataset and ML validation, then three-UAV followed by five-UAV tests and adaptive response. Keep current abstract-only threat/reassignment claims clearly separated from live PX4. Continue the remaining phases from the dependency-ordered table in the progress file. Run relevant tests and update the progress checkpoint with actual results after each meaningful change; prepare another handoff if session limits approach.
 ```
 
+## 2026-11-09 Mission Planner imagery and search addition
+
+### Findings and implementation
+
+- The previous planner map used only Cesium's bundled `Assets/Textures/NaturalEarthII` low-resolution overview raster, an ellipsoid, and no search or style controls. This explains the lack of street-level detail.
+- `MissionPlannerMap.tsx` now offers Street, Satellite, Hybrid, and 3D terrain styles using Esri World Street Map, World Imagery, World Boundaries and Places labels, and ArcGIS WorldElevation3D/Terrain3D. Cesium-supplied layer credits remain enabled. Current public endpoints worked without credentials; no API key or token was added.
+- Hybrid overlays place/boundary labels over imagery. The terrain option uses Cesium's `ArcGISTiledElevationTerrainProvider`, with ellipsoid fallback and a visible error if the service fails. Provider errors are surfaced, including an access/credential hint for HTTP 401/403/token/key failures.
+- Added explicit-submit city/address/landmark search through Komoot's Photon demo service. The UI displays Photon and OpenStreetMap attribution, sends no automatic/autocomplete requests, and spaces repeated requests. The demo has no availability guarantee and may throttle/block extensive use; larger-scale deployment requires a self-hosted or contracted geocoder.
+- Style changes replace only the tracked imagery layers and terrain provider; mission entities remain in the viewer. Search camera movement does not edit mission coordinates.
+
+### Verification
+
+- From `D:\TRINETRA\frontend`, `npm.cmd test` -> **13 files / 42 tests passed**. Includes provider-style/entity preservation and Photon-result/camera behavior tests. Existing jsdom `scrollTo()` and canvas notices remain.
+- From `D:\TRINETRA\frontend`, `npm.cmd run build` -> **passed**; 4,219 modules transformed and 342 Cesium static assets copied. Existing non-fatal Cesium bundle warning remains (5,011.16 kB minified / 1,382.61 kB gzip).
+- Direct public service checks returned valid JPEG/PNG image tiles: streets at levels 2, 12, and 18; imagery at levels 2 and 14; labels at level 12. The ArcGIS elevation provider loaded a level-8 tile at 77.5946 E, 12.9716 N without a token.
+- In the attached authenticated planner browser, switching Street/Satellite/Hybrid/3D terrain initiated provider tile requests (observed HTTP 200 for street, imagery, labels, and elevation; no provider HTTP failures). A direct browser fetch to Photon returned HTTP 200 with CORS and one Bengaluru result.
+- **Visual acceptance failed:** screenshots after style switching still showed a black globe rather than geography. Provider HTTP success is not proof of rendering. No claim that the imagery visually works is made.
+- Mission overlay persistence is verified by `MissionPlannerMap.test.tsx`: start marker and polygon-vertex entity IDs remain unchanged through a switch to Hybrid. The live browser draft had no mission drawings at the time of screenshot.
+
+### Errors, failed operations, blockers, and stopping point
+
+- **Resolved test-fixture error:** The first `MissionPlannerMap.test.tsx` run failed because the mocked `EllipsoidTerrainProvider` was not constructable. The exact runtime message was `() => cesiumMock.imageryProvider("ellipsoid") is not a constructor`. Replaced the mock with a constructable class; focused map tests then passed.
+- **Resolved test timeout:** A combined focused run timed out the style-switch test at Vitest's 5-second default. Increased the asynchronous test allowance; targeted run passed (3 files / 10 tests), followed by the full 13-file / 42-test pass.
+- **Unresolved map rendering defect:** Browser screenshot operation after selecting all styles showed black globe/starfield; after the first rendering attempt (explicit downward camera orientation) it still showed a black surface. A second informed attempt explicitly enabled the globe, set a fallback globe color, and requested a scene render; the subsequent screenshot remained black. No JavaScript error or provider HTTP failure was surfaced. Root cause remains unidentified; likely within the Cesium scene/layer/render path, not endpoint availability. This blocks the user's required visible imagery acceptance. Per the retry limit, stop further attempts on this exact defect until a new diagnostic/approach is available.
+- **Unresolved browser search interaction:** Initial Playwright `SEARCH` click timed out after 10 seconds waiting for the button to remain stable. One forced-click retry then timed out after 15 seconds waiting for results; the DOM had no results or inline error. The source of instability is unconfirmed (the page also logged recurring 503 telemetry polls). Direct Photon browser fetch and the frontend search interaction unit test passed, but interactive browser acceptance remains unverified. Stop repeating the same browser action.
+- **Next exact step:** With a new diagnostic approach, inspect the Cesium live scene's globe visibility, camera/frustum, imagery-layer collection, provider readiness/error events, and actual rendered frame in an interactive browser. Verify visible street tiles and labels, satellite texture, hybrid credits, terrain, and a pre-existing marker/polygon surviving style changes. Separately reproduce the Photon search through the actual button in a stable browser session. Keep all work in `D:\TRINETRA`; do not change PX4, Gazebo, telemetry, mission persistence, or credentials.
+
+### Updated continuation prompt
+
+```text
+Continue TRINETRA exclusively in D:\TRINETRA. Read AGENTS.md and the latest TRINETRA_IMPLEMENTATION_PROGRESS.md entry. The 2026-11-09 Mission Planner imagery/search code is present and the frontend suite (13 files/42 tests) and build pass. Public Esri imagery/labels/elevation endpoints returned valid tiles without credentials; Photon browser fetch returned a result. However, the attached planner browser remained a black globe after two rendering attempts, and an interactive SEARCH click could not be verified after two attempts. Do not claim visible imagery or browser search acceptance. Respect the recorded retry limit: do not repeat those failed approaches; use new diagnostic evidence before touching the Cesium render path. Continue only the relevant imagery/search issue. Preserve mission entities and all user data. Do not modify PX4, Gazebo, telemetry, mission persistence, backend/trinetra.db, credentials, or unrelated modules. Run frontend tests/build after changes and update this checkpoint with exact evidence.
+```
+
 ## 2026-11-08 MAVLink mission-state sentinel handling
 
 ### Live evidence and implementation
@@ -808,3 +875,99 @@ Latest tests: backend 117 passed; frontend 10 files/27 tests passed; production 
 - Findings documented: likely Cesium/Gazebo viewer lifecycle churn from changing callbacks (source-supported, not live-reproduced); General audit CSV limit of 200 rows; all 169 inspected historical audit rows lack actor-role metadata; React `fetchPriority` warning; Cesium bundle size warning. No remediation was performed.
 - A selected isolated backend test batch exceeded seven minutes and was stopped after 50 progress dots with no final result; it is inconclusive, not a pass. Full authenticated account acceptance and current PX4/Gazebo integration remain unverified.
 - Exact report entry point: `docs/audit/TRINETRA_COMPLETE_PRODUCT_AUDIT.md`. Next exact step: if further testing is requested, run focused backend tests in an environment where the isolated suite completes normally; continue only with owner-authorized verification and preserve the canonical database and unknown simulator processes.
+
+## 2026-11-09 D-01/D-02/D-04 remediation milestone
+
+- D-01: `Px4MissionControl` now keeps PX4/Gazebo selection callbacks stable using `useCallback` and reads the latest vehicle list through a ref. `CesiumLiveMap` and `GazeboPoseMirror` keep current callbacks in refs, so callback identity no longer tears down their initialization effects. The focused component regression delivered repeated live snapshot updates, verified stable callbacks, and exercised PX4/Gazebo selection. Actual WebGL construction/disposal counts and authenticated browser/SITL lifecycle remain **not tested**.
+- D-02: General audit CSV now streams all filtered records in deterministic keyset batches of 200 (`created_at DESC, id DESC`), avoiding the prior 200-row truncation and unbounded result materialization. The isolated API regression verified 450 matching events, tied timestamps, search/outcome/username/date filters, CSV comma/quote/newline escaping, General access, and Operator 403 denial. Historical actor-role metadata was not backfilled.
+- D-04: Removed the nonessential hero-image `fetchPriority` prop. The App regression verifies the rendered hero has no lowercase `fetchpriority` attribute and emits no matching React console warning.
+- Changed source/tests: `backend/app/security.py`, `backend/app/auth_routes.py`, `backend/tests/test_api.py`, `frontend/src/components/Px4MissionControl.tsx`, `frontend/src/components/CesiumLiveMap.tsx`, `frontend/src/components/GazeboPoseMirror.tsx`, `frontend/src/components/Px4MissionControl.test.tsx`, `frontend/src/App.tsx`, and `frontend/src/App.test.tsx`. Updated `docs/audit/TRINETRA_DEFECT_REGISTER.md` and `docs/audit/TRINETRA_REMEDIATION_ROADMAP.md`.
+- Focused backend command from `D:\TRINETRA\backend`: `..\.venv\Scripts\python.exe -m pytest -q tests/test_api.py::test_audit_filtering_and_csv_export tests/test_api.py::test_audit_csv_exports_all_filtered_rows_with_csv_escaping` — **2 passed** in 12.55 s.
+- Full backend command from `D:\TRINETRA\backend`: `..\.venv\Scripts\python.exe -m pytest -q tests` — **120 passed** in 59.46 s. `tests/conftest.py` directed the run to a fresh temporary SQLite DB; canonical `backend/trinetra.db` was not used or modified.
+- Focused frontend command from `D:\TRINETRA\frontend`: `npm.cmd test -- --run src/components/Px4MissionControl.test.tsx src/App.test.tsx` — **2 files / 8 tests passed** in 4.63 s. Full frontend `npm.cmd test` — **10 files / 30 tests passed** in 13.35 s. Existing jsdom canvas/scrollTo notices remain.
+- Frontend production build `npm.cmd run build` passed (`tsc -b`, 4,215 modules, 342 copied assets, 21.40 s). Existing Cesium bundle warning remains: 5,011.16 kB minified / 1,382.61 kB gzip, above Vite's 600 kB threshold.
+- No Git/GitHub operation was performed. No runtime service, PX4/Gazebo process/configuration, canonical database, account, credential, or historical audit record was changed. Original-account manual acceptance and combined authenticated live telemetry remain unverified; see the remediation roadmap for remaining gates.
+
+## 2026-11-09 PX4 raw IMU validity-mask hardening
+
+- Source inspection confirmed the adapter decodes `HIGHRES_IMU` accelerometer (m/s²), gyro (rad/s), magnetic field (gauss), temperature, `fields_updated`, `time_usec`, and receive time. It also exposes `ATTITUDE` Euler radians with `time_boot_ms`, GPS raw fields with `time_usec`, and `GLOBAL_POSITION_INT` velocity/position with `time_boot_ms`.
+- Corrected `backend/app/telemetry/px4.py` to honor each MAVLink `HIGHRES_IMU.fields_updated` bit. Acceleration, gyro, magnetometer, and temperature values whose bit is not set are now `null` rather than potentially stale values. Non-finite values remain null. Added a decoder regression that independently checks mask behavior and keeps existing full-mask conversion coverage.
+- First focused test run found only a test assertion's exact comparison against a float32-decoded gyro value (`0.10000000149` vs `0.1`); changed the assertion to use `pytest.approx`, then `..\.venv\Scripts\python.exe -m pytest -q tests/test_px4_telemetry.py` passed **11 tests** in 4.63 s.
+- Full isolated backend rerun: from `D:\TRINETRA\backend`, `..\.venv\Scripts\python.exe -m pytest -q tests` — **121 passed** in 50.95 s. Tests use the fresh temporary SQLite DB configured by `backend/tests/conftest.py`; the canonical database was not used.
+- Updated `TRINETRA_DATA_DICTIONARY.md`, `TRINETRA_IMPLEMENTATION_ROADMAP.md`, and the telemetry/test/product/frontend audit reports to distinguish actually decoded raw sensor fields from the unimplemented synchronized fusion envelope.
+- Sensor-fusion implementation remains **blocked/not started**: the adapter's sensor families use different source timestamp fields (`time_usec` vs `time_boot_ms`), expose latest values rather than synchronized samples, do not encode a validated common frame transform, and `ATTITUDE` is PX4-provided. No independent estimate, IMU bias model, covariance, or SITL sensor validation is present. Adding an estimator before these contracts are validated would fabricate timing/frame assumptions. PX4 remains read-only; no simulator/configuration was changed.
+
+### Exact current stopping point and next action
+
+- **Last successful action:** full isolated backend suite passed **121 tests** after the raw IMU update-mask fix; the preceding full frontend suite passed **30 tests**, targeted D-01/D-04 frontend regressions passed **8 tests**, and the production build passed with the existing large-Cesium warning.
+- **Completed in this continuation:** D-01 callback stability mitigation, D-02 complete streamed audit CSV, D-04 removal of the React hero-image warning, and HIGHRES_IMU update-mask correctness. Related audit, data dictionary, roadmap, and progress documents now reflect current evidence.
+- **No current code tests are known failing.** Frontend jsdom canvas/scrollTo notices and the Cesium bundle-size warning remain pre-existing/non-blocking. The earlier failed test attempts were assertion/test-double mismatches and were corrected; final focused/full runs passed.
+- **Remaining owner/environment acceptance:** original General credentials and live registration workflow in an authorized browser; authenticated combined PX4/Cesium/Gazebo lifecycle acceptance; current simulator/process state where sandbox permits read-only inspection; one complete software-only SITL validation sequence; synchronized IMU/GPS/attitude timing/frame contract before estimator work; expanded sensor-grounded dataset/ML validation. Do not write to the canonical DB or test unknown real credentials.
+- **Next exact step:** obtain/verify the sensor timestamp origin and body/world coordinate-frame contract from the supported PX4 SITL message stream and documented MAVLink/PX4 configuration, using read-only observation. Only then specify synchronized sample buffering and an independently labeled experimental estimator; add deterministic tests before connecting any output to threat detection/UI. Separately, owner can verify the original General login manually without changing credentials or database rows.
+- **Safe verification commands:** from `D:\TRINETRA\backend`, `..\.venv\Scripts\python.exe -m pytest -q tests`; from `D:\TRINETRA\frontend`, `npm.cmd test` and `npm.cmd run build`. These use isolated test fixtures/build output and do not require starting, stopping, or reconfiguring PX4/Gazebo.
+- **Continuation prompt:** “Resume from the 2026-11-09 remediation checkpoint in `TRINETRA_IMPLEMENTATION_PROGRESS.md`. Preserve the canonical database, accounts, Git metadata, and existing simulator configuration. First establish a read-only, evidence-backed PX4 sensor timestamp/frame contract; do not implement fusion until those assumptions are verified.”
+
+## 2026-11-09 synthetic sensor research, controlled acceptance, and verification refresh
+
+### Completed implementation and evidence
+
+- Implemented the separate research-only sensor pipeline in `backend/app/research/sensor_fusion.py`, `sensor_dataset.py`, `sensor_models.py`, `sensor_pipeline.py`, and `sensor_threat.py`. It includes quaternion complementary attitude estimation; a 3D local-ENU position/velocity/accelerometer-bias EKF with covariance propagation, GPS measurement updates, innovation gates, stale/outlier rejection, and three-fix outage reacquisition; deterministic synthetic fault generation; grouped model evaluation; plots; and offline explainable assessments.
+- Added `backend/tests/test_sensor_fusion.py`, `test_sensor_dataset.py`, `test_sensor_models.py`, and `test_sensor_threat.py`. The focused research test run passed **19 tests**. The latest full backend suite below includes these tests.
+- Generated held-out synthetic dataset `f982e0fd018d6eb5dc67b4c509ac49ab9c5c3ba9a59a932debf9d0e1bfa84c88`: 26,130 rows, ten seed groups (6 train / 2 validation / 2 test), and 13 fault/normal/recovery profiles. Random Forest held-out metrics: precision 0.905, recall 0.639, F1 0.749, FPR 0.048, ROC-AUC 0.899; EKF 3D position RMSE 2.4627 m vs raw GPS 3.1503 m; attitude yaw RMSE 0.0652 rad. The generated `critical-analysis.md` documents scenario-level limitations. These are same-generator synthetic results, not PX4/field evidence.
+- The new pipeline is not connected to the runtime API, live PX4 telemetry, threat pipeline, or adaptive response. Synthetic samples use aligned ENU streams; live source clock/frame contracts remain unverified. Joblib models are local research artifacts under ignored `backend/research-data/`, not runtime models.
+- Controlled authentication acceptance from the isolated browser run used only disposable General/Operator accounts and the temporary database `C:\Users\DELL\AppData\Local\Temp\trinetra-browser-acceptance-20261109-121641.db`: General login/session refresh, pending registration, approval, approved Operator login/refresh, General-only API 403, authenticated simulation WebSocket, rejection/audit, rejected-account login 401, and logout/session 401 were verified. The UI registration path with blank optional email returned 201/PENDING after the frontend began sending `null`. No original credentials or canonical rows were used. The prompt-driven rejection button was not directly completed because the browser harness lacks `window.prompt()`; its authenticated REST workflow was exercised.
+- Updated the PX4 telemetry panel to distinguish PX4 attitude from track heading and show available GPS accuracy, raw IMU vectors, source/receive times, and the `HIGHRES_IMU.fields_updated` mask. Raw values are not an independent estimate or sensor-health score.
+- Registration/UI files carried through this verification: `frontend/src/services/auth.ts`, `frontend/src/components/AccessPortal.tsx`, `frontend/src/components/AccessPortal.test.tsx`, `frontend/src/components/Px4MissionControl.tsx`, `frontend/src/components/px4-mission-control.css`, and `frontend/src/components/Px4MissionControl.test.tsx`. The form now keeps local email state non-nullable while sending `null` for a blank optional email.
+
+### Latest verification
+
+- Backend from `D:\TRINETRA\backend`: `..\.venv\Scripts\python.exe -m pytest -q tests` — **140 passed** in 62.11 s, exit code 0; isolated pytest SQLite, not `backend/trinetra.db`.
+- Frontend from `D:\TRINETRA\frontend`: `npm.cmd test` — **10 files / 31 tests passed** in 14.32 s; jsdom canvas/`scrollTo()` notices only.
+- Frontend build: `npm.cmd run build` — first attempt found TypeScript errors because the registration form state inherited nullable API email. Narrowed form state to `email: string` while preserving `string | null` for the request payload. Rerun `npm.cmd test` passed **31 tests** and rerun `npm.cmd run build` passed `tsc -b` and Vite (4,215 modules, 342 copied assets). Existing Cesium bundle warning remains (5,011.16 kB minified / 1,382.61 kB gzip).
+- Integrated browser page `http://127.0.0.1:5173/login` rendered. Backend `GET http://127.0.0.1:8000/api/health` returned ready: SQLite healthy, one managed abstract simulation (zero running), heuristic detector, PX4/Gazebo `not_integrated`. The health response does not reveal the selected SQLite path. The current isolated acceptance service must not be assumed to use the canonical DB.
+- `wsl.exe --list --running` reported no running distributions (Ubuntu is installed). `Get-NetTCPConnection` returned PID 0 for port 8000 and no result for 5173 even though HTTP/browser responses succeeded; Windows process ownership remains unknown. No service, PX4/Gazebo process/configuration, canonical database, account, Git metadata, or backup was changed. No Git operation was performed.
+
+### Documentation updated
+
+- Research/data/architecture/roadmap/status: `TRINETRA_DATA_DICTIONARY.md`, `TRINETRA_COMPLETE_ARCHITECTURE.md`, `TRINETRA_IMPLEMENTATION_ROADMAP.md`, `TRINETRA_TEST_STRATEGY.md`, `TRINETRA_RISK_REGISTER.md`, `README.md`, and `docs/PROJECT_STATUS.md`.
+- Acceptance/audit: all eleven reports under `docs/audit/` were reviewed; updated reports include `TRINETRA_AUTH_ROLE_AUDIT.md`, `TRINETRA_BACKEND_API_AUDIT.md`, `TRINETRA_COMPLETE_PRODUCT_AUDIT.md`, `TRINETRA_DATABASE_SECURITY_AUDIT.md`, `TRINETRA_TEST_COVERAGE_AUDIT.md`, `TRINETRA_FRONTEND_AUDIT.md`, `TRINETRA_AI_ML_AUDIT.md`, `TRINETRA_SIMULATION_TELEMETRY_AUDIT.md`, `TRINETRA_MISSION_FLEET_AUDIT.md`, `TRINETRA_DEFECT_REGISTER.md`, and `TRINETRA_REMEDIATION_ROADMAP.md`.
+- The 59-capability inventory now reports **16 Tested / 15 Implemented / 19 Partial / 7 Blocked / 2 Proposed** (31/59 = 52.5%, unweighted). This is not a claim of overall project completion.
+
+### Remaining blockers and exact next step
+
+- Original General credentials and canonical-account workflow have not been tested; keep the canonical database and records unchanged and let the owner perform any original-account acceptance. Historical audit rows without actor-role metadata remain unknown and must not be backfilled.
+- Live PX4/Gazebo cannot be validated while no WSL distribution is running. No completed SITL flight, current sensor frames/timestamps, live estimator, PX4-specific threat scoring, live adaptive reassignment, or three/five-vehicle acceptance is claimed. Do not start or reconfigure the simulator automatically.
+- OpenAI provider credentials, Supabase/cloud connectivity, hosted deployment, Docker image build, hosted cookie/CSRF/WebSocket behavior, security/load, and accessibility acceptance remain unverified.
+- **Next exact step:** owner resumes the already-configured SITL when available and authorizes read-only collection of PX4/Gazebo source timestamps, units, coordinate frames, and ground-truth alignment. Verify that contract before any live estimator integration. Separately, owner may test the original General account through the normal browser flow. Preserve `backend/trinetra.db` and all simulator configuration.
+
+## 2026-11-09 shared planner and Scenario Lab conversation workflow
+
+### Implementation
+
+- Mission Planner and Scenario Lab share the selected scenario through `App.tsx`. Geographic edits and abstract AI transfer use the selected scenario's existing immutable-version workflow; the AI transfer appends a version to an owned scenario and preserves its config and pre-existing intent.
+- Geographic Mission Planner AI now supports a browser-session transcript keyed by signed-in user, up to eight operator turns, restore-shape/size validation, multi-turn prompts within the 2,000-character provider bound, explicit reset, and visible storage/provider errors. AI recommendations with unresolved required information cannot be applied.
+- Applying geographic AI suggestions merges the advisory role/task/zone suggestions into the editable draft while retaining manually selected per-aircraft start, destination, waypoint, and existing zones. A suggested zone is added rather than replacing the operator's prior zone assignment.
+- Geographic/fault intent remains versioned and advisory. The deterministic simulator still supports only one active GPS fault at a time; incompatible per-UAV fault profiles remain blocked from sandbox/execution by client and server checks. No database migration or simulator behavior change was introduced in this milestone.
+- Relevant implementation surfaces include `frontend/src/App.tsx`, `frontend/src/components/GeographicMissionPlanner.tsx`, `frontend/src/components/ScenarioWorkspace.tsx`, `frontend/src/components/MissionAssistant.tsx`, their related tests/styles/services, `backend/app/ai/routes.py`, `backend/app/scenario_routes.py`, `backend/app/persistence/database.py`, `backend/app/schemas.py`, and AI/scenario tests. Documentation updated: this progress file, `TRINETRA_COMPLETE_ARCHITECTURE.md`, and `TRINETRA_IMPLEMENTATION_ROADMAP.md`.
+
+### Verification
+
+- From `D:\TRINETRA\frontend`: `npm.cmd test -- src/components/GeographicMissionPlanner.test.tsx src/components/ScenarioWorkspace.test.tsx src/components/MissionAssistant.test.tsx` — **3 files / 14 tests passed**, exit code 0.
+- From `D:\TRINETRA\frontend`: `npm.cmd run build` — **passed**; TypeScript check passed, 4,219 modules transformed and 342 Cesium static assets copied. Vite emitted its existing non-fatal chunk warning: Cesium JavaScript is 5,011.16 kB minified / 1,382.61 kB gzip.
+- From `D:\TRINETRA\backend`: `..\.venv\Scripts\python.exe -m pytest -q tests/test_ai_routes.py tests/test_api.py` — **60 passed**, exit code 0. Tests use the isolated test database; `backend/trinetra.db` was not the test target.
+- The frontend tests cover first-turn request shape, follow-up conversation construction, eight-turn stopping, browser-session restore/reset, gating an incomplete proposal, and retaining a manually set per-aircraft start when applying AI advice. Backend tests cover owner-scoped scenario transfer, immutable versioning, retained configuration/intent, and unsupported execution combinations.
+
+### Errors, failed operations, and unresolved issues
+
+- **Resolved command-location failures:** The first `npm.cmd test` and `npm.cmd run build` attempts were launched from `D:\TRINETRA`, where `package.json` does not exist (`ENOENT`, path `D:\TRINETRA\package.json`). The first backend test attempt was also launched from the repository root and failed because `..\.venv\Scripts\python.exe` was not a command there. Reran from the documented `frontend` and `backend` directories; all final commands above passed. No dependency installation was needed.
+- **Resolved frontend expectation mismatch:** The initial geographic planner test expected the first prompt to be sent verbatim, but the new conversation formatter sent `Operator: Survey the north area.`. Changed first-turn requests to send the entered text directly and reserve role labels for continued transcripts; the final focused suite passed.
+- **Resolved stale backend test assertion:** The initial related backend run produced 59 passes and one failure because the transfer test expected only `["Keep this constraint"]`, while the existing proposal sanitizer also adds mandatory advisory constraints. Updated the assertion to verify the existing constraint is retained and the safety advisory remains present. The complete related backend suite then passed 60 tests.
+- **Unresolved Cesium visual blocker:** The latest documented authenticated-map attempt still showed a black globe after two rendering attempts despite successful provider responses. Cause remains unidentified; this prevents claiming visible imagery, label, terrain, or in-page style-switch acceptance. The same issue is already at its recorded retry limit; do not repeat the prior camera/globe toggling attempts without a new diagnostic approach.
+- **Unresolved browser search acceptance:** The previous actual-button Photon search attempts timed out twice; direct Photon response and component tests passed, but interactive browser search is not verified. Do not retry the same browser action.
+- **Unresolved live provider acceptance:** `OPENAI_API_KEY` is not configured. Mocked tests pass, but no live AI request, provider rendering, or credential configuration was tested or changed.
+- **Non-fatal build warning:** The existing Cesium chunk exceeds Vite's 600 kB advisory threshold; build exit code was 0. No unrelated bundle-splitting change was made.
+
+### Current status and next exact step
+
+- The shared scenario workflow, bounded geographic conversation, manual-map-data preservation, and related regression tests are implemented. The current frontend/build/backend test evidence above is verified. Geographic mission intent remains save/review-only; no route transform or flight execution is implemented.
+- Next exact step: use a new, evidence-led Cesium scene/render diagnostic in an authorized stable browser session; verify visible Street/Satellite/Hybrid/Terrain imagery, geographical labels, a map-style switch, actual Photon form interaction, and retained pre-existing drawings before claiming imagery acceptance. Separately, live AI provider acceptance requires an owner-configured server-side key. Keep PX4/Gazebo, telemetry, mission persistence, and `backend/trinetra.db` unchanged.

@@ -23,6 +23,7 @@ from .persistence.database import (
 from .schemas import ScenarioCreateRequest, ScenarioExecutionRequest, ScenarioIntent, ScenarioReviewRequest, ScenarioUpdateRequest
 from .security import AuthContext
 from .simulation.engine import SimulationConfig
+from .telemetry.planning import current_planning_aircraft
 
 
 router = APIRouter()
@@ -52,7 +53,11 @@ def _simulation_config(config: dict) -> SimulationConfig:
     return candidate
 
 
-def _validated_intent(intent: ScenarioIntent | None, config: SimulationConfig) -> dict | None:
+def _validated_intent(
+    intent: ScenarioIntent | None,
+    config: SimulationConfig,
+    available_aircraft_ids: set[str] | None = None,
+) -> dict | None:
     if intent is None:
         return None
     content = intent.model_dump(mode="json")
@@ -73,6 +78,10 @@ def _validated_intent(intent: ScenarioIntent | None, config: SimulationConfig) -
             match = re.fullmatch(r"UAV-(\d{2})", uav_id)
             if not match or not 1 <= int(match.group(1)) <= config.uav_count:
                 raise ValueError("Mission intent contains an invalid UAV reference")
+    for fault in content["uav_fault_assignments"]:
+        match = re.fullmatch(r"UAV-(\d{2})", fault["uav_id"])
+        if not match or not 1 <= int(match.group(1)) <= config.uav_count:
+            raise ValueError("Fault assignments must identify an abstract simulator UAV in the configured fleet")
 
     from .ai.service import redact_operator_text
 
@@ -80,9 +89,57 @@ def _validated_intent(intent: ScenarioIntent | None, config: SimulationConfig) -
     text_values += [item["description"] for item in content["proposed_tasks"]]
     text_values += [item["rationale"] for item in content["uav_role_suggestions"]]
     text_values += [content["operating_area_notes"], content["environment_notes"]]
+    geographic_mission = content["geographic_mission"]
+    if geographic_mission is not None:
+        if geographic_mission["start_location"] is None:
+            raise ValueError("A geographic mission requires a starting location")
+        if geographic_mission["objective"] != "area_survey" and geographic_mission["destination"] is None:
+            raise ValueError("This geographic mission requires a destination")
+        if not geographic_mission["uav_assignments"]:
+            raise ValueError("A geographic mission requires at least one aircraft assignment")
+        if available_aircraft_ids is None:
+            raise RuntimeError("PX4 telemetry is unavailable for mission assignment validation")
+        if any(assignment["uav_id"] not in available_aircraft_ids for assignment in geographic_mission["uav_assignments"]):
+            raise ValueError("Mission assignments must use connected PX4 aircraft with valid position telemetry")
+        text_values += geographic_mission["constraints"] + geographic_mission["ai_recommendations"]
+        text_values += [zone["name"] for zone in geographic_mission["survey_zones"]]
+        text_values += [assignment["task"] for assignment in geographic_mission["uav_assignments"]]
     if any(redact_operator_text(value)[1] for value in text_values):
-        raise ValueError("Geographic coordinates are unsupported by the abstract simulator")
+        if geographic_mission is None:
+            raise ValueError("Geographic coordinates are unsupported by the abstract simulator")
+        raise ValueError("Enter geographic locations on the map, not in free-text fields")
     return content
+
+
+def _fault_execution_issue(config: dict, intent: dict) -> str | None:
+    assignments = intent.get("uav_fault_assignments", [])
+    if not assignments:
+        return None
+    active = [item for item in assignments if item["fault_type"] != "none"]
+    if len(active) > 1:
+        return (
+            "This version records multiple per-UAV fault profiles, but the deterministic simulator "
+            "supports only one active GPS fault at a time."
+        )
+    if not active:
+        if config["spoofing_type"] != "none":
+            return "The per-UAV fault assignments do not match the simulator configuration."
+        return None
+    fault = active[0]
+    if (
+        fault["uav_id"] != config["target_uav"]
+        or fault["fault_type"] != config["spoofing_type"]
+        or fault["spoof_start"] != config["spoof_start"]
+        or fault["spoof_duration"] != config["spoof_duration"]
+        or fault["spoof_magnitude"] != config["spoof_magnitude"]
+    ):
+        return "The per-UAV fault assignment does not match the simulator configuration."
+    return None
+
+
+def _planning_aircraft_ids() -> set[str] | None:
+    aircraft = current_planning_aircraft()
+    return None if aircraft is None else {item["id"] for item in aircraft}
 
 
 @router.get("/api/scenarios")
@@ -100,10 +157,13 @@ def create_scenario_route(
 ) -> dict:
     try:
         config = _simulation_config(payload.config.model_dump())
-        intent = _validated_intent(payload.intent, config)
+        available_aircraft = _planning_aircraft_ids() if payload.intent and payload.intent.geographic_mission else None
+        intent = _validated_intent(payload.intent, config, available_aircraft)
         scenario = create_scenario(context.user.id, payload.title, config.__dict__, intent)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail="PX4 telemetry is unavailable; geographic aircraft assignments cannot be validated.") from exc
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail="Scenario configuration is invalid.") from exc
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     _audit(request, context, "scenario_created", "scenario", scenario["id"], "User created a scenario draft.")
     return scenario
 
@@ -130,12 +190,19 @@ def update_scenario(
 ) -> dict:
     try:
         config = _simulation_config(payload.config.model_dump())
-        intent = _validated_intent(payload.intent, config) if "intent" in payload.model_fields_set else None
+        available_aircraft = (
+            _planning_aircraft_ids()
+            if payload.intent and payload.intent.geographic_mission
+            else None
+        )
+        intent = _validated_intent(payload.intent, config, available_aircraft) if "intent" in payload.model_fields_set else None
         scenario = save_scenario_version(
             scenario_id, context.user.id, payload.title, config.__dict__, intent,
         )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail="PX4 telemetry is unavailable; geographic aircraft assignments cannot be validated.") from exc
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail="Scenario configuration is invalid.") from exc
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     if scenario is None:
         raise HTTPException(status_code=404, detail="Scenario not found.")
     latest = scenario["versions"][0]
@@ -251,6 +318,11 @@ def run_scenario_sandbox(
     ) if scenario else None
     if version is None:
         raise HTTPException(status_code=404, detail="Scenario version not found.")
+    if version["intent"].get("geographic_mission") is not None:
+        raise HTTPException(status_code=409, detail="Geographic mission drafts are not executable in the abstract simulator.")
+    fault_issue = _fault_execution_issue(version["config"], version["intent"])
+    if fault_issue:
+        raise HTTPException(status_code=409, detail=fault_issue)
     try:
         config = _simulation_config(version["config"])
     except ValueError as exc:
@@ -275,6 +347,17 @@ async def execute_approved_scenario(
     context: AuthContext = Depends(require_permission(Permission.SCENARIO_EXECUTE)),
     _csrf: AuthContext = Depends(require_csrf),
 ) -> dict:
+    scenario = get_scenario(scenario_id, context.user.id)
+    version = next(
+        (item for item in scenario["versions"] if item["id"] == payload.version_id),
+        None,
+    ) if scenario else None
+    if version and version["intent"].get("geographic_mission") is not None:
+        raise HTTPException(status_code=409, detail="Geographic missions require a future validated route-execution workflow.")
+    if version:
+        fault_issue = _fault_execution_issue(version["config"], version["intent"])
+        if fault_issue:
+            raise HTTPException(status_code=409, detail=fault_issue)
     config_json = approved_scenario_config(scenario_id, payload.version_id)
     if config_json is None:
         add_audit_event(

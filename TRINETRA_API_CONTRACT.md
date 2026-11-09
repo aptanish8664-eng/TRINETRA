@@ -40,14 +40,15 @@ This is a route inventory of the current FastAPI application, not an OpenAPI dum
 
 | Method and path | Purpose / access |
 |---|---|
-| `GET/POST /api/scenarios` | List owned scenarios / create immutable version 1 with optional validated advisory mission intent. |
-| `GET/PUT/DELETE /api/scenarios/{scenario_id}` | Read/update by creating a new immutable version (simulator config and/or mission intent); clients omitting intent preserve the current intent. Delete eligible draft. |
+| `GET/POST /api/scenarios` | List owned scenarios / create immutable version 1 with optional validated advisory intent. Geographic mission coordinates, zones, and PX4 assignments are stored in the separate `geographic_mission` intent object and included in the version hash. |
+| `GET/PUT/DELETE /api/scenarios/{scenario_id}` | Read/update by creating a new immutable version; clients omitting intent preserve the current intent. Geographic assignments are checked against currently connected PX4 telemetry. Geographic drafts cannot use the abstract sandbox or execution endpoints. Delete eligible draft. |
 | `POST /api/scenarios/{scenario_id}/versions/{version_id}/submit` | Submit exact version for review. |
 | `GET /api/scenarios/my-approval-requests` | Own review requests. |
 | `GET /api/general/scenario-approvals`, `POST /api/general/scenario-approvals/{request_id}/decision` | General review queue/decision. |
 | `POST /api/scenarios/{scenario_id}/versions/{version_id}/sandbox` | Run draft sandbox without approval. |
 | `POST /api/scenarios/{scenario_id}/execute` | Execute backend-verified approved version; starts ready, not running. |
 | `GET /api/ai/status`, `POST /api/ai/proposals` | Authenticated provider/quota status and structured advisory proposal. |
+| `POST /api/ai/geographic-mission-plan` | Authenticated + CSRF; returns an advisory structured plan using the configured provider, current connected PX4 IDs, objective, and zone names. Exact map coordinates are omitted from the AI request; suggestions are checked against known IDs/zones and are never saved or executed by this endpoint. |
 | `POST /api/ai/conversations` | Authenticated + CSRF; starts a persisted, bounded multi-turn planning conversation with an operator-selected simulator config. |
 | `POST /api/ai/conversations/{conversation_id}/turn`, `GET /api/ai/conversations/{conversation_id}` | Owner-scoped turn submission and resume; conversations expire after seven days, allow at most eight user turns and configured input limits. |
 | `POST /api/ai/conversations/{conversation_id}/scenario` | Owner + scenario-create permission + CSRF; transfers a completed, validated simulator config plus advisory objectives/tasks/roles/constraints into an idempotent Scenario Lab draft. |
@@ -66,9 +67,9 @@ Simulation state returns abstract simulator coordinates and, when the optional m
 - The API has no PX4 process lifecycle or MAVSDK control. The optional read-only MAVLink receiver includes raw GPS and HIGHRES_IMU fields only when those messages are published; no independent navigation estimate, validated PX4 threat score, or telemetry persistence is implemented. It has no standalone dataset/training/inference routes; optional model inference is reflected in authoritative abstract simulation state and paired experiment records.
 - `GET /api/health` probes the database and reports in-process component/configuration and receiver state. `websocket.status=available` means the application route is present; `active_clients` is an in-process aggregate. `ai_provider.status=configured` only means a server-side key is present, not that the provider is reachable. PX4/Gazebo status and per-vehicle freshness describe received data, not process supervision, flight, or movement acceptance.
 - PostgreSQL is supported through `DATABASE_URL` and Alembic migrations; Supabase credentials/connectivity and cloud operations are not configured or validated. Schema upgrades are an operator-run CLI step, not an API route.
-- Current simulation request schema is abstract (uav count, task count, seed, duration, spoofing type/target/window/magnitude, response policy, optional threshold). Resource metadata (payload requirement/capacity, capabilities, communication availability, endurance/battery budgets) is generated inside the simulator and is not a configurable mission or flight contract; geographic routes, altitude, and IMU remain unsupported.
-- Mission intent is advisory narrative stored separately from executable simulator config; approved execution verifies a hash over both. Area notes are not georeferenced, and task/role suggestions do not control the simulation. Coordinates, geographic routes, altitude, and configurable or physical payload/vehicle parameters remain unsupported.
-- AI provider behavior is mock-tested only. Live provider, browser E2E, and populated-database schema creation are untested.
+- Current simulation request schema remains abstract (uav count, task count, seed, duration, spoofing type/target/window/magnitude, response policy, optional threshold). Geographic mission coordinates use WGS84 latitude/longitude degrees and remain separate from local simulation coordinates. No geographic-to-PX4/Gazebo frame transform, altitude model, route feasibility, or flight execution is implemented.
+- `scenario_version_intent.geographic_mission` is advisory geographic mission data bound into the immutable version hash. PX4 IDs are validated against currently connected telemetry with valid positions. General approval does not start a flight, and geographic drafts are explicitly rejected by abstract sandbox/execution routes.
+- AI provider behavior is mock-tested only. Live provider use remains blocked until a server-side `OPENAI_API_KEY` is configured; browser map interaction and populated-database operation were not verified in this milestone.
 
 
 ## PX4 and Gazebo telemetry endpoints (implemented; browser acceptance partial)

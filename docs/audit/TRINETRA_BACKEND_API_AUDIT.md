@@ -1,6 +1,6 @@
 # TRINETRA Backend and API Audit
 
-**Status:** source-inspected; endpoint inventory extracted statically; full API integration test execution did not complete during the audit window.
+**Status:** source-inspected; endpoint inventory extracted statically; the latest full backend suite passed 140 tests. Original-account and canonical-database API acceptance were not performed.
 
 ## Architecture
 
@@ -24,15 +24,18 @@ The three WebSockets are the owner-scoped abstract run stream and authenticated 
 
 ## Gaps and risks
 
-- The backend test batch (`test_database.py`, `test_simulation.py`, `test_research_dataset.py`, `test_research_model.py`, `test_px4_telemetry.py`, `test_gazebo_telemetry.py`) remained active beyond the initial 180-second wait. Results are reported only after the process completes; no API test result is inferred from this.
-- Prior documented API/TestClient runs include historical successful suites, but they are not current-run evidence. Authentication and protected API workflows were not exercised in this audit against existing credentials or the populated canonical DB.
-- `GET /api/general/audit.csv` returns only the first 200 newest filtered records; it ignores the total count and offers no truncation indication. A General account can paginate the API history, but the export is not a complete-history export once more than 200 rows match (D-02, medium).
+- The original audit's selected backend batch was inconclusive; it is superseded by the latest full backend run (**140 passed**) against isolated test databases.
+- Original credentials and the populated canonical DB were not used. Controlled browser acceptance against a temporary database exercised General/Operator login/session restore, approval/rejection, General-only 403, authenticated simulation WebSocket, audit writes, rejected-account 401, and logout/session 401.
+- `GET /api/general/audit.csv` now streams all filtered records in bounded keyset batches. The regression exported 450 matching events and covered tied timestamps, search/outcome/username/date filters, CSV escaping, General access, and Operator 403 (D-02 fixed).
 - Operational health and telemetry UI remain separate evidence: a ready health response does not imply a live WebSocket or PX4/Gazebo feed.
 - The default persistence configuration points to `backend/trinetra.db`, but environment overrides were not disclosed/read from the active service. The browser’s backend-online indicator does not establish which path the running backend opened.
 
 ## Recommended API follow-up
 
-1. Make audit CSV completeness explicit: stream all filtered entries or expose a deliberate paginated export protocol; include a regression proving that a matching history larger than 200 entries is fully exported or clearly labeled.
-2. Complete isolated API/auth/role/CSRF/WebSocket tests on the current checkout and capture the final command outcome.
-3. Add a safe health acceptance contract distinguishing configured, reachable, and data-fresh states for optional adapters.
-4. Add WebSocket load/reconnect tests before making throughput or availability claims.
+1. Preserve the isolated auth/API regressions; owner may separately verify original-account access without changing credentials or database rows.
+2. Keep health labels explicit: configured, reachable, and data-fresh states are distinct for optional adapters.
+3. Add WebSocket load/reconnect tests before making throughput or availability claims.
+
+## Latest verification supplement (2026-11-09)
+
+The backend suite command `..\\.venv\\Scripts\\python.exe -m pytest -q tests` passed **140 tests** in 62.11 seconds. The frontend passed **31 tests** and its TypeScript/Vite build succeeded. Current `/api/health` returned ready with SQLite healthy and an abstract simulator; PX4/Gazebo were `not_integrated`. WSL had no running distributions. Health did not reveal the selected SQLite path. See [TRINETRA_TEST_COVERAGE_AUDIT.md](./TRINETRA_TEST_COVERAGE_AUDIT.md).

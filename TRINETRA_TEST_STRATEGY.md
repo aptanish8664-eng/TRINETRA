@@ -192,3 +192,25 @@ The frontend has no dedicated lint/typecheck script; `npm.cmd run build` include
 - Network-independent backend regressions: database/simulator/dataset/model modules **41 passed**; PX4/Gazebo bridge/parser/store selection **19 passed, 5 deselected**. See the 2026-11-09 entry in `TRINETRA_IMPLEMENTATION_PROGRESS.md` for exact commands.
 - The full 118-test backend run is **not verified in the current sandbox**. A focused reproduction traced the hang to AnyIO/asyncio's Windows event-loop `socketpair()` used by Starlette `TestClient`, blocked at `socket.py:293 accept` under the sandbox's disabled local-network policy. No code failure was observed; do not report the full suite as passing. API/auth/WebSocket tests should be rerun when sandbox loopback access is available.
 - Local browser visual acceptance is likewise **not tested**: the integrated browser timed out connecting to the temporary Vite server, and WSL status inspection returned `Wsl/E_ACCESSDENIED`. No PX4/Gazebo service was restarted or modified.
+
+## Latest regression, browser, and sensor research verification (2026-11-09)
+
+The results in this section supersede earlier totals and blockers where they conflict:
+
+- Backend: from `D:\TRINETRA\backend`, `..\.venv\Scripts\python.exe -m pytest -q tests` — **140 passed** in 62.11 s, exit code 0. `tests/conftest.py` uses isolated SQLite; canonical `backend/trinetra.db` was not the test target.
+- Frontend: from `D:\TRINETRA\frontend`, `npm.cmd test` — **10 files / 31 tests passed** in 14.32 s. jsdom reports unsupported canvas and `scrollTo()` notices.
+- Build: `npm.cmd run build` — **passed** TypeScript and Vite, 4,215 modules transformed and 342 static assets copied. Existing Cesium output (5,011.16 kB minified / 1,382.61 kB gzip) exceeds Vite's 600 kB warning threshold.
+- The production build initially caught a TypeScript nullability issue in the optional-email form after its API type became `string | null`. The local form state was narrowed to `email: string`; tests and build were rerun and passed. Request payload remains `string | null`.
+- Browser page `http://127.0.0.1:5173/login` rendered. Backend `GET http://127.0.0.1:8000/api/health` returned ready with SQLite healthy, one managed abstract simulation (not running), heuristic detection, and PX4/Gazebo `not_integrated`. The path to the selected SQLite file is not exposed.
+- Separate controlled browser acceptance used a temporary SQLite DB and disposable accounts. General/Operator login and refresh, approval/rejection, General-only API 403, authenticated abstract simulation WebSocket, rejected-account login 401, registration/decision audit entries, and logout/session 401 were verified. The canonical DB and original credentials were not used.
+- Four synthetic sensor research test modules passed **19 focused tests**, also included in the full 140-test run. Dataset generation/model evaluation is software-only and does not establish synchronized live PX4 frames, timing, detection, or response.
+- `wsl.exe --list --running` reports no running distributions. Earlier three-X500/Gazebo observations are historical. No service or PX4/Gazebo configuration was started, stopped, or changed. `Get-NetTCPConnection` did not reliably report listener ownership; successful HTTP/browser requests are the direct current availability evidence.
+
+Still not verified: original-account acceptance, current PX4/Gazebo data, SITL flight and staged fleet scale, live sensor fusion/threat/response, PostgreSQL after the final hash change, Supabase/cloud, hosted deployment, load, and accessibility. Git was not used.
+
+## Geographic Mission Planner milestone (2026-11-09)
+
+- Backend: `..\.venv\Scripts\python.exe -m pytest -q tests` — **144 passed** in 167.36 s. Includes WGS84/polygon/availability validation, immutable scenario intent, abstract execution blocking, structured AI-provider response validation, and coordinate omission/redaction. Tests use the isolated pytest database; `backend/trinetra.db` was not modified.
+- Frontend: `npm.cmd test` — **12 files / 38 tests passed** in 53.83 s. Includes planner validation, map-driven form flow (Cesium event surface mocked), PX4 fleet errors, advisory AI review, and geographic data preservation in Scenario Lab. jsdom reports unsupported canvas and `scrollTo()` notices.
+- Build: `npm.cmd run build` — TypeScript and Vite passed, 4,219 modules transformed and 342 static assets copied. Vite reports the Cesium chunk at 5,011.16 kB minified / 1,382.61 kB gzip, above its 600 kB warning threshold.
+- Browser: `/mission-planner` reached the authentication gate; the session API returned 401, so no map interaction was performed. No credentials were used. Live AI was not tested because no `OPENAI_API_KEY` is configured. No geographic route-feasibility, local-frame transform, or flight-execution test exists.

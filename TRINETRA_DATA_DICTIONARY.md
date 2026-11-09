@@ -1,6 +1,6 @@
 # TRINETRA Data Dictionary
 
-Current code is authoritative for this dictionary. Target PX4/sensor fields are not implemented and are marked proposed.
+Current code is authoritative for this dictionary. Raw PX4 sensor messages are decoded read-only. A separate quaternion/3D EKF research implementation operates only on deterministic synthetic ENU samples; it is not connected to the live PX4 stream or threat-response API.
 
 ## Persistent tables
 
@@ -18,7 +18,7 @@ All ORM records are declared in `backend/app/persistence/database.py`; SQLite is
 | `audit_logs` | Actor snapshot/FK, event/outcome/reason, target, request ID, metadata JSON, time. |
 | `scenarios` | Owner, title, created/updated time. |
 | `scenario_versions` | Scenario FK, unique version number, immutable config JSON/hash, creator, optional sandbox run, time. |
-| `scenario_version_intent` | Optional advisory mission objectives, proposed task notes/assignments, UAV role suggestions, non-geographic area/environment notes, and constraints, keyed by immutable scenario version. Included in integrity hash when present. |
+| `scenario_version_intent` | Optional advisory intent keyed by immutable version. Existing narrative objectives/tasks/roles/constraints remain; `geographic_mission` separately stores a WGS84 start/destination, survey-zone polygons, actual PX4-ID assignments, constraints, and reviewed AI notes. Geographic data is included in the integrity hash when present. |
 | `scenario_approval_requests` | Exact version, submitter/reviewer, constrained status/reason/timestamps. |
 | `command_decisions` | Requester/reviewer, run, command, payload JSON, decision/reason/time. |
 | `mission_proposals` | Operator, structured proposal/config/validation JSON, approval state, expiry, run link. Original prompt is not stored. |
@@ -28,6 +28,8 @@ All ORM records are declared in `backend/app/persistence/database.py`; SQLite is
 The read-only SQLite database audit on 2026-11-07 found 34 runs, 615 snapshots, 352 events, 10 experiments, 2 users, 18 sessions, 0 scenarios, 0 scenario versions, and 153 audit logs. Integrity check was `ok`; foreign-key check had no violations. That snapshot predates `ai_conversations` and `scenario_version_intent`; SQLite startup creates missing tables without rewriting existing rows. No account identity was inspected. These figures are a dated snapshot, not a promised current count. PostgreSQL startup instead requires its Alembic revision to match the checked-in migration head and does not create schema automatically.
 
 `scenario_versions.config_json` stores the executable abstract simulator settings. Optional advisory mission intent is kept in `scenario_version_intent`, keyed by version so editing intent creates a new immutable version. Legacy versions without an intent row are returned with an empty intent and retain their original configuration-only integrity hash. For new versions with intent, the integrity hash covers both settings and intent. An old client update that omits `intent` preserves the latest stored intent.
+
+Geographic mission coordinates are stored as WGS84 latitude/longitude in degrees inside the versioned intent JSON; they are not local ENU, PX4, or Gazebo coordinates. Polygon boundaries and assigned PX4 identifiers are validated before save. A currently connected aircraft with a valid PX4 position is required for each assignment. No database migration is needed because the versioned intent is serialized JSON. Geographic intent cannot be executed or sandboxed by the abstract simulator; a future reviewed frame transformation and route-validation design is required before geographic execution.
 
 ## Current API/state fields
 
@@ -47,7 +49,27 @@ The generator `backend/app/research/dataset.py` writes versioned `samples.csv` a
 
 The trainer writes a separate JSON decision-tree artifact under `backend/research-data/models/`. Its metadata links the dataset ID, feature schema, train/validation/test seeds, threshold, and metrics. V1 and v2 model schemas load without pickle and are validated by content hash before inference. `TRINETRA_ML_MODEL_PATH` opts into the configured runtime model; unset remains heuristic. Model files are research artifacts, not ORM rows.
 
-## Proposed sensor envelope (not implemented)
+## Current read-only PX4 sensor fields and fusion boundary
+
+The in-memory PX4 telemetry adapter exposes only fields received from source-filtered MAVLink:
+
+- `HIGHRES_IMU`: acceleration in m/s², angular rate in rad/s, magnetic field in gauss, temperature in °C, the message `fields_updated` mask, `time_usec`, source message, and receive time. A field is `null` unless its MAVLink update-mask bit is set or its value is non-finite.
+- `ATTITUDE`: PX4-provided roll, pitch, and yaw in radians, with `time_boot_ms` and receive time. This is the PX4 attitude estimate, not an independent TRINETRA attitude solution.
+- `GPS_RAW_INT`: WGS84 latitude/longitude, altitude, fix type, accuracy fields where available, `time_usec`, and receive time. `GLOBAL_POSITION_INT` separately supplies position and north/east/down velocity with `time_boot_ms`.
+
+The message families use different source timestamp fields and the receiver does not yet align them into a common clock or validate sensor coordinate-frame conventions. Do not feed these latest-value fields directly into the synthetic estimator as synchronized samples. The raw stream remains in-memory only and no high-frequency persistence is implemented.
+
+## Simulation-only sensor research pipeline (implemented; not a PX4 estimator)
+
+`backend/app/research/sensor_fusion.py` implements a quaternion complementary attitude filter and a three-dimensional local-ENU position/velocity/accelerometer-bias EKF. The EKF propagates covariance, performs GPS measurement updates, records innovations, applies a chi-square and absolute-residual gate, rejects out-of-sequence GPS samples, and requires three consistent fixes after a prolonged outage before research-state reinitialization. Attitude correction and sensor bias estimation are covered by deterministic unit tests.
+
+`backend/app/research/sensor_dataset.py` generates a content-addressed CSV/JSON bundle with timestamps, seed-group split, scenario/UAV IDs, raw synthetic accelerometer/gyro/magnetometer/GPS fields, quaternion and navigation estimates, covariance/residual features, generated truth, and fault labels. Profiles include normal, GPS jump/drift/outage, accelerometer and gyro bias, IMU noise/spikes/missing samples, delayed GPS, GPS/IMU disagreement, combined faults, and recovery. The checked-in generator is deterministic for the recorded Python/NumPy versions; the local output is ignored under `backend/research-data/`.
+
+`backend/app/research/sensor_models.py` compares a threshold baseline, Isolation Forest (fit only on fault-free training rows), Random Forest, and Gradient Boosting. Thresholds are selected on validation seeds with a 5% false-positive-rate cap; test outputs include precision, recall, F1, false-positive rate, confusion matrices, ROC-AUC, per-profile metrics, and scenario detection latency. Correlation CSV/SVG and time-series SVG are generated. An offline threat-assessment CSV combines model scores and sensor residual explanations; its severity mapping is an uncalibrated research heuristic. No joblib model, estimator output, or threat assessment is loaded by the runtime API or wired to PX4/adaptive response.
+
+The research frame is synthetic local ENU metres, not WGS84 and not a validated PX4 body/world transform. Delayed measurements are rejected rather than fixed-lag-replayed. Generated results are not flight evidence; see the emitted `critical-analysis.md` for exact held-out metrics and limitations.
+
+## Proposed live sensor envelope (not implemented)
 
 Every future telemetry envelope needs `uav_id`, UTC/source timestamp, receive timestamp, source, monotonically increasing sequence, coordinate frame, units, validity/freshness, and mission/run ID. Keep these sibling objects separate:
 

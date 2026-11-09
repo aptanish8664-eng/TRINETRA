@@ -8,7 +8,7 @@ import uuid
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Deque
+from typing import Deque, Iterator
 
 from argon2 import PasswordHasher, exceptions as argon2_exceptions
 from fastapi import Request
@@ -519,46 +519,92 @@ def audit_history(
     username: str | None = None, since: datetime | None = None, until: datetime | None = None,
 ) -> tuple[list[dict], int]:
     with SessionLocal() as db:
-        query = select(AuditLogRecord)
-        if event_type:
-            query = query.where(AuditLogRecord.event_type == event_type)
-        if outcome:
-            query = query.where(AuditLogRecord.outcome == outcome)
-        if since:
-            query = query.where(AuditLogRecord.created_at >= since)
-        if until:
-            query = query.where(AuditLogRecord.created_at <= until)
-        if search:
-            pattern = f"%{search.strip()}%"
-            query = query.where(or_(
-                AuditLogRecord.event_type.ilike(pattern),
-                AuditLogRecord.reason.ilike(pattern),
-                AuditLogRecord.target_id.ilike(pattern),
-                AuditLogRecord.actor_name.ilike(pattern),
-            ))
-        if username:
-            query = query.join(UserRecord, AuditLogRecord.actor_user_id == UserRecord.id).where(
-                UserRecord.username == username.casefold()
-            )
+        query = _audit_history_query(
+            search=search, event_type=event_type, outcome=outcome, username=username,
+            since=since, until=until,
+        )
         total = db.scalar(select(func.count()).select_from(query.subquery())) or 0
         rows = db.scalars(
-            query.order_by(AuditLogRecord.created_at.desc()).offset(offset).limit(limit)
+            query.order_by(AuditLogRecord.created_at.desc(), AuditLogRecord.id.desc())
+            .offset(offset).limit(limit)
         ).all()
-        events = []
-        for row in rows:
-            metadata = json.loads(row.metadata_json)
-            events.append({
-                "id": row.id,
-                "created_at": row.created_at.isoformat() + "Z",
-                "actor_user_id": row.actor_user_id,
-                "actor_name": row.actor_name,
-                "actor_role": metadata.get("actor_role"),
-                "event_type": row.event_type,
-                "target_type": row.target_type,
-                "target_id": row.target_id,
-                "outcome": row.outcome,
-                "reason": row.reason,
-                "request_id": row.request_id,
-                "metadata": metadata,
-            })
-        return events, total
+        return [_audit_history_entry(row) for row in rows], total
+
+
+def iter_audit_history(
+    *, batch_size: int = 200, search: str | None = None,
+    event_type: str | None = None, outcome: str | None = None,
+    username: str | None = None, since: datetime | None = None, until: datetime | None = None,
+) -> Iterator[dict]:
+    if batch_size < 1:
+        raise ValueError("Audit history batch size must be positive")
+    with SessionLocal() as db:
+        query = _audit_history_query(
+            search=search, event_type=event_type, outcome=outcome, username=username,
+            since=since, until=until,
+        )
+        cursor_created_at: datetime | None = None
+        cursor_id: str | None = None
+        while True:
+            page_query = query
+            if cursor_created_at is not None and cursor_id is not None:
+                page_query = page_query.where(or_(
+                    AuditLogRecord.created_at < cursor_created_at,
+                    (AuditLogRecord.created_at == cursor_created_at) & (AuditLogRecord.id < cursor_id),
+                ))
+            rows = db.scalars(
+                page_query.order_by(AuditLogRecord.created_at.desc(), AuditLogRecord.id.desc())
+                .limit(batch_size)
+            ).all()
+            if not rows:
+                return
+            for row in rows:
+                yield _audit_history_entry(row)
+            cursor_created_at = rows[-1].created_at
+            cursor_id = rows[-1].id
+
+
+def _audit_history_query(
+    *, search: str | None, event_type: str | None, outcome: str | None,
+    username: str | None, since: datetime | None, until: datetime | None,
+):
+    query = select(AuditLogRecord)
+    if event_type:
+        query = query.where(AuditLogRecord.event_type == event_type)
+    if outcome:
+        query = query.where(AuditLogRecord.outcome == outcome)
+    if since:
+        query = query.where(AuditLogRecord.created_at >= since)
+    if until:
+        query = query.where(AuditLogRecord.created_at <= until)
+    if search:
+        pattern = f"%{search.strip()}%"
+        query = query.where(or_(
+            AuditLogRecord.event_type.ilike(pattern),
+            AuditLogRecord.reason.ilike(pattern),
+            AuditLogRecord.target_id.ilike(pattern),
+            AuditLogRecord.actor_name.ilike(pattern),
+        ))
+    if username:
+        query = query.join(UserRecord, AuditLogRecord.actor_user_id == UserRecord.id).where(
+            UserRecord.username == username.casefold()
+        )
+    return query
+
+
+def _audit_history_entry(row: AuditLogRecord) -> dict:
+    metadata = json.loads(row.metadata_json)
+    return {
+        "id": row.id,
+        "created_at": row.created_at.isoformat() + "Z",
+        "actor_user_id": row.actor_user_id,
+        "actor_name": row.actor_name,
+        "actor_role": metadata.get("actor_role"),
+        "event_type": row.event_type,
+        "target_type": row.target_type,
+        "target_id": row.target_id,
+        "outcome": row.outcome,
+        "reason": row.reason,
+        "request_id": row.request_id,
+        "metadata": metadata,
+    }

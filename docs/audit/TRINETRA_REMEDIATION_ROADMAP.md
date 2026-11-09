@@ -1,6 +1,6 @@
 # TRINETRA Remediation and Acceptance Roadmap
 
-**Disposition:** prioritized follow-up recommendations only. This audit did not implement fixes.
+**Disposition:** prioritized follow-up recommendations with remediation status updated after the 2026-11-09 regression milestone.
 
 ## P0 — Preserve data and current runtime
 
@@ -11,27 +11,29 @@
 
 ## P1 — Stabilize and verify live-view lifecycle
 
-1. Stabilize callback identity or separate viewer setup from selection handling in the PX4 parent/Cesium/Gazebo component boundary.
-2. Add a focused regression that delivers repeated telemetry updates and asserts the Cesium/Three viewer is initialized once and disposed only on component unmount or deliberate mode change.
+1. **Implemented:** stabilize parent callback identity and use callback refs so Cesium/Three setup is independent of callback changes.
+2. **Partially verified:** repeated telemetry updates preserve selection callback identity and PX4/Gazebo selection works in the component regression. The test does not count actual WebGL viewer construction/disposal.
 3. Validate with an authorized browser session and read-only SITL/Gazebo streams. Confirm no viewer churn, asset reload loop, stale-state recovery, and cleanup.
 4. Keep telemetry authority in backend REST/WebSocket data; do not add frontend fake telemetry.
 
 ## P1 — Make audit exports complete
 
-1. Define and document CSV behavior for large histories.
-2. Implement all-row streamed export or explicit pagination with a visible row count/truncation notice.
-3. Test filter parity between on-screen history and exported rows with more than 200 matching events, including oldest/newest ordering.
+1. **Implemented:** General audit CSV streams all matching records in 200-row keyset batches, ordered by timestamp and ID descending.
+2. **Verified:** isolated API regression exports 450 filtered records, including rows sharing timestamps and correctly escaped comma, quotes, and newline content.
+3. Filter parameters are shared with audit history; Operator export remains denied with 403.
 4. Preserve historical `actor_role` as unknown; add role metadata only for new events where the actor’s role is available.
 
 ## P2 — Complete account workflow in isolation
 
-Using a separate temporary/test database and owner-authorized controlled accounts, verify Operator registration, pending status, General approval and rejection, role-scoped access, refresh/navigation, CSRF, logout/revocation, 401 vs 403, REST and WebSocket denial, and audit event correlation. Do not exercise these mutation paths against the canonical DB without explicit authorization and safeguards.
+- **Controlled workflow verified:** disposable Operator registration/pending state, General approval and rejection, role-scoped navigation/API 403, refresh, authenticated abstract WebSocket, rejection/login denial, audit correlation, and logout/session 401 were exercised against a separate temporary database. The prompt-driven reject button was not directly invoked because the browser harness lacks `window.prompt()`; its authenticated REST path was exercised.
+- Backend tests cover unauthenticated REST and WebSocket denial for telemetry, and the complete 140-test isolated suite passed. Frontend tests cover the 401-versus-403 client behavior.
+- Original General credentials, the canonical database, and canonical user/audit rows were not used. Original-account acceptance and confirmation of the running service's SQLite file path remain owner/runtime-only gaps; do not alter canonical data to close them.
 
 ## P2 — Complete current repository test evidence
 
-- The selected audit backend run was stopped after more than seven minutes without a final result. Do not count it as a pass; run focused isolated backend tests only when the environment can complete them normally.
-- Run full backend suite only if targeted results justify it; ensure pytest continues to use the isolated temporary DB.
-- Preserve the passing frontend 29-test and build results as current evidence. Add tests for D-01 and D-02 when code remediation is authorized.
+- The prior selected audit backend run was inconclusive; it is superseded by the completed isolated full backend suite recorded in `TRINETRA_IMPLEMENTATION_PROGRESS.md`.
+- The 2026-11-09 regression milestone passed the full backend and frontend suites and the frontend production build. Pytest uses the temporary test DB configured by `backend/tests/conftest.py`; the canonical database was not used.
+- Remaining acceptance gaps are original-account live browser acceptance, actual Cesium/Three initialization counters, and authorized read-only live SITL/Gazebo browser validation.
 
 ## P3 — Validate software telemetry in dependency order
 

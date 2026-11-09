@@ -9,12 +9,23 @@ vi.mock('../services/api', () => ({
   api: { px4Telemetry: vi.fn(), px4TelemetrySocket: vi.fn() },
 }))
 
+const selectionCallbacks = vi.hoisted(() => ({
+  px4: [] as Array<(id: string) => void>,
+  gazebo: [] as Array<(name: string) => void>,
+}))
+
 vi.mock('./CesiumLiveMap', () => ({
-  CesiumLiveMap: ({ vehicles }: { vehicles: Array<{ id: string }> }) => <div data-testid="cesium-live-map">{vehicles.map(vehicle => vehicle.id).join(',')}</div>,
+  CesiumLiveMap: ({ vehicles, onSelect }: { vehicles: Array<{ id: string }>; onSelect: (id: string) => void }) => {
+    selectionCallbacks.px4.push(onSelect)
+    return <><div data-testid="cesium-live-map">{vehicles.map(vehicle => vehicle.id).join(',')}</div><button onClick={() => onSelect('px4-2')}>Select PX4 2</button></>
+  },
 }))
 
 vi.mock('./GazeboPoseMirror', () => ({
-  GazeboPoseMirror: ({ selectedModel, onSelect }: { selectedModel: string | null; onSelect: (name: string) => void }) => <div data-testid="gazebo-pose-mirror"><span>Gazebo live pose mirror</span><span data-testid="gazebo-selected-model">{selectedModel}</span><button onClick={() => onSelect('x500_1')}>Select Gazebo x500_1</button></div>,
+  GazeboPoseMirror: ({ selectedModel, onSelect }: { selectedModel: string | null; onSelect: (name: string) => void }) => {
+    selectionCallbacks.gazebo.push(onSelect)
+    return <div data-testid="gazebo-pose-mirror"><span>Gazebo live pose mirror</span><span data-testid="gazebo-selected-model">{selectedModel}</span><button onClick={() => onSelect('x500_1')}>Select Gazebo x500_1</button></div>
+  },
 }))
 
 const apiMock = vi.mocked(api)
@@ -41,6 +52,8 @@ function snapshot(systemIds: number[]): Px4TelemetrySnapshot {
 
 describe('PX4 mission telemetry view', () => {
   beforeEach(() => {
+    selectionCallbacks.px4.length = 0
+    selectionCallbacks.gazebo.length = 0
     socket = { onopen: null, onmessage: null, onerror: null, onclose: null, close: vi.fn() }
     apiMock.px4Telemetry.mockResolvedValue(snapshot([1]))
     apiMock.px4TelemetrySocket.mockReturnValue(socket as unknown as WebSocket)
@@ -82,6 +95,21 @@ describe('PX4 mission telemetry view', () => {
     expect(screen.getByText('12.971900, 77.594600')).toBeTruthy()
   })
 
+  it('keeps viewer selection callbacks stable across live telemetry updates', async () => {
+    render(<Px4MissionControl />)
+
+    expect(await screen.findByText('12.971700, 77.594600')).toBeTruthy()
+    await waitFor(() => expect(apiMock.px4TelemetrySocket).toHaveBeenCalledOnce())
+    act(() => socket.onmessage?.({ data: JSON.stringify(snapshot([1, 2])) } as MessageEvent))
+    act(() => socket.onmessage?.({ data: JSON.stringify(snapshot([1, 2, 3])) } as MessageEvent))
+
+    expect(new Set(selectionCallbacks.px4).size).toBe(1)
+    expect(new Set(selectionCallbacks.gazebo).size).toBe(1)
+    fireEvent.click(screen.getByRole('button', { name: 'Select PX4 2' }))
+    expect(screen.getByText('12.971800, 77.594600')).toBeTruthy()
+    expect(screen.getByTestId('gazebo-selected-model').textContent).toBe('x500_1')
+  })
+
   it('does not display the MAVLink no-mission sentinel as a waypoint count', async () => {
     const noMission = snapshot([1])
     noMission.vehicles[0].mission = {
@@ -96,5 +124,28 @@ describe('PX4 mission telemetry view', () => {
     expect(await screen.findByText('PX4 reports no mission loaded.')).toBeTruthy()
     expect(screen.getByText('NO MISSION LOADED')).toBeTruthy()
     expect(screen.queryByText('1 / 65535')).toBeNull()
+  })
+
+  it('labels PX4 attitude and renders only the reported raw sensor fields', async () => {
+    const withSensors = snapshot([1])
+    withSensors.vehicles[0].imu_raw = {
+      acceleration_m_s2: [0.1, -0.2, 9.8],
+      angular_rate_rad_s: [0.01, 0.02, -0.03],
+      magnetic_field_gauss: [0.2, 0.1, -0.4],
+      temperature_c: 24,
+      fields_updated: 7,
+      source_time_usec: 123456,
+      received_at: '2026-11-08T00:00:01Z',
+    }
+    apiMock.px4Telemetry.mockResolvedValue(withSensors)
+    render(<Px4MissionControl />)
+
+    expect(await screen.findByText('0.00 rad / 0.00 rad / 1.20 rad')).toBeTruthy()
+    expect(screen.getByText('0.10 / -0.20 / 9.80')).toBeTruthy()
+    expect(screen.getByText('0.010 / 0.020 / -0.030')).toBeTruthy()
+    expect(screen.getByText('0.200 / 0.100 / -0.400')).toBeTruthy()
+    expect(screen.getByText(/Fields updated 0x7 · source 123456/)).toBeTruthy()
+    expect(screen.getByText(/GPS VALID FIX \/ IMU RECEIVED/)).toBeTruthy()
+    expect(screen.getByText('NOT CONNECTED TO LIVE PX4')).toBeTruthy()
   })
 })

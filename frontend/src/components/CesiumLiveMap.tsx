@@ -25,6 +25,8 @@ export function CesiumLiveMap({ vehicles, selected, onSelect }: Props) {
   const hostRef = useRef<HTMLDivElement>(null)
   const viewerRef = useRef<Viewer | null>(null)
   const lastFocusedVehicleIdRef = useRef<string | null>(null)
+  const onSelectRef = useRef(onSelect)
+  onSelectRef.current = onSelect
   const [viewerReady, setViewerReady] = useState(false)
   const [mapError, setMapError] = useState('')
 
@@ -65,7 +67,7 @@ export function CesiumLiveMap({ vehicles, selected, onSelect }: Props) {
       clickHandler.setInputAction((event: import('cesium').ScreenSpaceEventHandler.PositionedEvent) => {
         const picked = viewer?.scene.pick(event.position)
         const entity = picked?.id as Entity | undefined
-        if (entity?.id && typeof entity.id === 'string' && entity.id.startsWith('px4-')) onSelect(entity.id)
+        if (entity?.id && typeof entity.id === 'string' && entity.id.startsWith('px4-')) onSelectRef.current(entity.id)
       }, Cesium.ScreenSpaceEventType.LEFT_CLICK)
       setViewerReady(true)
     })().catch(() => {
@@ -79,7 +81,7 @@ export function CesiumLiveMap({ vehicles, selected, onSelect }: Props) {
       viewerRef.current = null
       setViewerReady(false)
     }
-  }, [onSelect])
+  }, [])
 
   useEffect(() => {
     const viewer = viewerRef.current

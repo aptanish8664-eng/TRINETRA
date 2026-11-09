@@ -28,6 +28,7 @@ from .security import (
     create_session,
     decide_registration,
     get_auth_context,
+    iter_audit_history,
     list_users,
     login_is_throttled,
     note_login_failure,
@@ -318,23 +319,29 @@ def export_audit_history(
         until_dt = datetime.fromisoformat(until.replace("Z", "+00:00")).replace(tzinfo=None) if until else None
     except ValueError as exc:
         raise HTTPException(status_code=422, detail="Audit dates must be ISO 8601 timestamps") from exc
-    entries, _ = audit_history(
-        limit=200, offset=0, search=search, event_type=event_type, outcome=outcome,
-        username=username, since=since_dt, until=until_dt,
+    fieldnames = (
+        "created_at", "actor_user_id", "actor_name", "actor_role", "event_type",
+        "target_type", "target_id", "outcome", "reason", "request_id",
     )
-    buffer = io.StringIO(newline="")
-    writer = csv.DictWriter(
-        buffer,
-        fieldnames=(
-            "created_at", "actor_user_id", "actor_name", "actor_role", "event_type",
-            "target_type", "target_id", "outcome", "reason", "request_id",
-        ),
-    )
-    writer.writeheader()
-    for entry in entries:
-        writer.writerow({key: entry.get(key) for key in writer.fieldnames})
+
+    def csv_rows():
+        buffer = io.StringIO(newline="")
+        writer = csv.DictWriter(buffer, fieldnames=fieldnames)
+        writer.writeheader()
+        yield buffer.getvalue()
+        buffer.seek(0)
+        buffer.truncate(0)
+        for entry in iter_audit_history(
+            search=search, event_type=event_type, outcome=outcome,
+            username=username, since=since_dt, until=until_dt,
+        ):
+            writer.writerow({key: entry.get(key) for key in fieldnames})
+            yield buffer.getvalue()
+            buffer.seek(0)
+            buffer.truncate(0)
+
     return StreamingResponse(
-        iter([buffer.getvalue()]),
+        csv_rows(),
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=trinetra-audit.csv"},
     )

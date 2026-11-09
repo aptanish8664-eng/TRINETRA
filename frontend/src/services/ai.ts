@@ -1,3 +1,5 @@
+import type { GeographicMissionObjective, GeographicUavAssignment, GeographicZone } from './auth'
+
 export type MissionProposalContent = {
   mission_objectives: string[]
   required_information: string[]
@@ -8,6 +10,20 @@ export type MissionProposalContent = {
   constraints: string[]
   assessment_explanations: string[]
   clarification_questions: string[]
+}
+
+export type GeographicMissionProposal = {
+  summary: string
+  assignments: GeographicUavAssignment[]
+  missing_information: string[]
+  constraints: string[]
+  warnings: string[]
+}
+
+export type GeographicMissionPlanningRequest = {
+  objective: GeographicMissionObjective
+  description: string
+  zones: Pick<GeographicZone, 'id' | 'name'>[]
 }
 
 export type OperatorSimulationConfig = {

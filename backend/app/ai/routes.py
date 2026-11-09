@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import Any
+from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
@@ -28,6 +28,7 @@ from ..persistence.database import (
     finish_mission_proposal_approval,
     get_mission_proposal,
     get_ai_conversation,
+    get_scenario,
     list_pending_mission_proposals,
     reject_mission_proposal,
     reserve_ai_usage,
@@ -36,6 +37,7 @@ from ..persistence.database import (
 )
 from ..security import AuthContext, get_auth_context
 from ..simulation.engine import SimulationConfig
+from ..telemetry.planning import current_planning_aircraft
 from .provider import (
     AIProviderFailure,
     AIProviderMalformedResponse,
@@ -46,11 +48,14 @@ from .provider import (
 )
 from .schemas import (
     AIUsageStatus,
+    GeographicMissionPlanningRequest,
+    GeographicMissionProposalContent,
     MissionApprovalRequest,
     MissionAssessmentResponse,
     MissionProposalRequest,
     MissionConversationCreateRequest,
     MissionConversationTurnRequest,
+    MissionConversationScenarioTransferRequest,
     MissionConversationResponse,
     MissionRejectionRequest,
     MissionProposalResponse,
@@ -312,6 +317,92 @@ async def create_ai_proposal(
         raise HTTPException(status_code=status, detail=message) from exc
 
 
+@router.post("/api/ai/geographic-mission-plan", response_model=GeographicMissionProposalContent)
+async def create_geographic_mission_plan(
+    payload: GeographicMissionPlanningRequest,
+    request: Request,
+    context: AuthContext = Depends(require_permission(Permission.AI_PROPOSE)),
+    _csrf: AuthContext = Depends(require_csrf),
+    provider: MissionAIProvider = Depends(get_ai_provider),
+) -> GeographicMissionProposalContent:
+    aircraft = current_planning_aircraft()
+    if aircraft is None:
+        raise HTTPException(status_code=503, detail="PX4 telemetry is unavailable. Continue with manual planning.")
+    if not aircraft:
+        raise HTTPException(status_code=409, detail="No connected PX4 aircraft with valid position telemetry are available.")
+    if not provider.available:
+        _record_ai_event(
+            request, context, "ai_geographic_mission_plan", "unavailable",
+            "openai_key_not_configured", {"model": OPENAI_MODEL},
+        )
+        raise HTTPException(status_code=503, detail="AI is unavailable: configure the backend OpenAI API key. Manual planning remains available.")
+    if len(payload.description) > AI_MAX_INPUT_CHARS:
+        raise HTTPException(status_code=413, detail="Mission description exceeds the configured AI input limit.")
+    if len({zone.id for zone in payload.zones}) != len(payload.zones):
+        raise HTTPException(status_code=422, detail="Zone identifiers must be unique.")
+    zone_ids = {zone.id for zone in payload.zones}
+    if any(redact_operator_text(zone.name)[1] for zone in payload.zones):
+        raise HTTPException(status_code=422, detail="Enter geographic locations on the map, not in zone names.")
+    description, contains_coordinates = redact_operator_text(payload.description)
+    if contains_coordinates:
+        raise HTTPException(status_code=422, detail="Coordinates are selected on the map and are not sent to AI.")
+    if not description.strip():
+        raise HTTPException(status_code=422, detail="Describe the mission without including geographic coordinates.")
+
+    available_ids = {item["id"] for item in aircraft}
+    mission_context = {
+        "objective": payload.objective,
+        "zones": [zone.model_dump(mode="json") for zone in payload.zones],
+        "available_aircraft_ids": sorted(available_ids),
+        "coordinate_reference": "WGS84; exact coordinate values are omitted",
+        "route_validation": "not_supported",
+    }
+    usage_id = _reserve_usage(context, "geographic_mission_plan", len(description))
+    started = time.monotonic()
+    try:
+        result = await asyncio.wait_for(
+            provider.propose_geographic_mission(description, mission_context),
+            timeout=AI_TIMEOUT_SECONDS + 1,
+        )
+        if not isinstance(result, ProviderResult) or not isinstance(result.parsed, GeographicMissionProposalContent):
+            raise AIProviderMalformedResponse("geographic provider result type invalid")
+        suggested_ids = [item.uav_id for item in result.parsed.assignments]
+        if len(set(suggested_ids)) != len(suggested_ids):
+            raise AIProviderMalformedResponse("duplicate aircraft assignment")
+        if any(item.uav_id not in available_ids for item in result.parsed.assignments):
+            raise AIProviderMalformedResponse("unknown aircraft assignment")
+        if any(item.zone_id is not None and item.zone_id not in zone_ids for item in result.parsed.assignments):
+            raise AIProviderMalformedResponse("unknown survey zone")
+        generated_text = [result.parsed.summary]
+        generated_text += result.parsed.missing_information + result.parsed.constraints + result.parsed.warnings
+        generated_text += [item.task for item in result.parsed.assignments]
+        if any(redact_operator_text(value)[1] for value in generated_text):
+            raise AIProviderMalformedResponse("geographic coordinates in advisory text")
+        finish_ai_usage(usage_id, result.output_tokens, True)
+        _record_ai_event(request, context, "ai_geographic_mission_plan", "success", "advisory_plan_returned", {
+            "provider": "openai", "model": OPENAI_MODEL, "response_id": result.response_id,
+            "input_chars": len(description), "input_tokens": result.input_tokens,
+            "output_tokens": result.output_tokens,
+            "duration_ms": int((time.monotonic() - started) * 1000),
+            "assignment_count": len(suggested_ids),
+        }, target_type="geographic_mission_plan")
+        return result.parsed
+    except HTTPException:
+        finish_ai_usage(usage_id, 0, False)
+        raise
+    except (asyncio.TimeoutError, AIProviderUnavailable, AIProviderFailure, AIProviderMalformedResponse, ValueError) as exc:
+        finish_ai_usage(usage_id, 0, False)
+        reason = "provider_timeout" if isinstance(exc, asyncio.TimeoutError) else "invalid_or_unavailable_provider_response"
+        _record_ai_event(request, context, "ai_geographic_mission_plan", "failed", reason, {
+            "provider": "openai", "model": OPENAI_MODEL,
+            "input_chars": len(description),
+            "duration_ms": int((time.monotonic() - started) * 1000),
+        }, target_type="geographic_mission_plan")
+        status = 503 if isinstance(exc, (asyncio.TimeoutError, AIProviderUnavailable, AIProviderFailure)) else 502
+        message = "AI service is unavailable. Manual planning remains available." if status == 503 else "AI suggestions failed validation. Review the mission manually."
+        raise HTTPException(status_code=status, detail=message) from exc
+
+
 @router.post("/api/ai/conversations", response_model=MissionConversationResponse, status_code=201)
 async def create_ai_conversation_route(
     payload: MissionConversationCreateRequest,
@@ -374,6 +465,7 @@ def read_ai_conversation_route(
 def transfer_ai_conversation_route(
     conversation_id: str,
     request: Request,
+    payload: Optional[MissionConversationScenarioTransferRequest] = None,
     context: AuthContext = Depends(require_permission(Permission.SCENARIO_CREATE)),
     _csrf: AuthContext = Depends(require_csrf),
 ) -> dict:
@@ -383,23 +475,64 @@ def transfer_ai_conversation_route(
     if record["status"] != "ready_for_review" or record["proposal"] is None:
         raise HTTPException(status_code=409, detail="Complete the conversation and review its proposal before saving a scenario.")
     try:
-        config = SimulationConfig(**record["operator_config"])
-        config.validate()
-        from ..schemas import ScenarioIntent
+        target_scenario_id = payload.scenario_id if payload else None
+        if target_scenario_id:
+            target_scenario = get_scenario(target_scenario_id, context.user.id)
+            if target_scenario is None:
+                raise HTTPException(status_code=404, detail="Scenario not found.")
+            latest = target_scenario["versions"][0]
+            config = SimulationConfig(**latest["config"])
+            from ..schemas import ScenarioIntent
 
-        proposal = record["proposal"]
-        intent_payload = ScenarioIntent(
-            mission_objectives=proposal["mission_objectives"],
-            proposed_tasks=proposal["proposed_tasks"],
-            uav_role_suggestions=proposal["uav_role_suggestions"],
-            operating_area_notes="",
-            environment_notes="",
-            constraints=proposal["constraints"],
-        )
+            existing_intent = ScenarioIntent.model_validate(latest["intent"])
+            proposal = record["proposal"]
+            intent_payload = ScenarioIntent(
+                **{
+                    **existing_intent.model_dump(),
+                    "mission_objectives": proposal["mission_objectives"],
+                    "proposed_tasks": [
+                        {
+                            "description": item["description"],
+                            "task_reference": item["task_reference"],
+                            "assigned_uav_id": item["assigned_uav_id"],
+                            "priority": item["priority"],
+                        }
+                        for item in proposal["proposed_tasks"]
+                    ],
+                    "uav_role_suggestions": proposal["uav_role_suggestions"],
+                    "constraints": list(dict.fromkeys([
+                        *existing_intent.constraints, *proposal["constraints"],
+                    ]))[:12],
+                }
+            )
+        else:
+            config = SimulationConfig(**record["operator_config"])
+            from ..schemas import ScenarioIntent
+
+            proposal = record["proposal"]
+            intent_payload = ScenarioIntent(
+                mission_objectives=proposal["mission_objectives"],
+                proposed_tasks=proposal["proposed_tasks"],
+                uav_role_suggestions=proposal["uav_role_suggestions"],
+                operating_area_notes="",
+                environment_notes="",
+                constraints=proposal["constraints"],
+            )
+        config.validate()
         from ..scenario_routes import _validated_intent
 
-        intent = _validated_intent(intent_payload, config)
-        scenario = transfer_ai_conversation_to_scenario(conversation_id, context.user.id, intent)
+        available_aircraft = current_planning_aircraft()
+        available_ids = (
+            {item["id"] for item in available_aircraft}
+            if available_aircraft is not None and intent_payload.geographic_mission is not None
+            else None
+        )
+        intent = _validated_intent(intent_payload, config, available_ids)
+        scenario = transfer_ai_conversation_to_scenario(
+            conversation_id, context.user.id, intent, target_scenario_id,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail="PX4 telemetry is unavailable; geographic aircraft assignments cannot be validated.") from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail="Conversation configuration failed scenario validation.") from exc
     if scenario is None:

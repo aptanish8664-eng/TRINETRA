@@ -25,7 +25,7 @@ export interface UserSession {
 export interface RegistrationApplication {
   full_name: string
   username: string
-  email: string
+  email: string | null
   password: string
   requested_role: ApplicationRole
   justification: string
@@ -108,6 +108,58 @@ export interface ScenarioVersion {
   } | null
 }
 
+export interface GeographicPoint {
+  latitude: number
+  longitude: number
+}
+
+export interface GeographicZone {
+  id: string
+  name: string
+  vertices: GeographicPoint[]
+}
+
+export type GeographicMissionObjective =
+  | 'area_survey'
+  | 'perimeter_monitoring'
+  | 'inspection'
+  | 'search_observation'
+  | 'communication_relay'
+
+export type GeographicUavRole = GeographicMissionObjective
+
+export interface GeographicUavAssignment {
+  uav_id: string
+  role: GeographicUavRole
+  task: string
+  zone_id: string | null
+  zone_ids?: string[]
+  start_location?: GeographicPoint | null
+  destination?: GeographicPoint | null
+  waypoints?: GeographicPoint[]
+}
+
+export interface GeographicMissionIntent {
+  objective: GeographicMissionObjective
+  start_location: GeographicPoint | null
+  destination: GeographicPoint | null
+  survey_zones: GeographicZone[]
+  uav_assignments: GeographicUavAssignment[]
+  constraints: string[]
+  ai_recommendations: string[]
+}
+
+export type ScenarioFaultType =
+  | 'none'
+  | 'sudden'
+  | 'gradual'
+  | 'intermittent'
+  | 'jump'
+  | 'freeze'
+  | 'noise'
+  | 'degradation'
+  | 'velocity_inconsistency'
+
 export interface ScenarioIntent {
   mission_objectives: string[]
   proposed_tasks: { description: string; task_reference: string | null; assigned_uav_id: string | null; priority: number }[]
@@ -115,6 +167,14 @@ export interface ScenarioIntent {
   operating_area_notes: string
   environment_notes: string
   constraints: string[]
+  geographic_mission: GeographicMissionIntent | null
+  uav_fault_assignments: {
+    uav_id: string
+    fault_type: ScenarioFaultType
+    spoof_start: number
+    spoof_duration: number
+    spoof_magnitude: number
+  }[]
 }
 
 export interface ScenarioConfig {

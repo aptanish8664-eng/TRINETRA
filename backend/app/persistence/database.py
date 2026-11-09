@@ -451,7 +451,8 @@ def _has_scenario_intent(intent: dict | None) -> bool:
     return bool(intent and any(
         intent.get(key) for key in (
             "mission_objectives", "proposed_tasks", "uav_role_suggestions",
-            "operating_area_notes", "environment_notes", "constraints",
+            "operating_area_notes", "environment_notes", "constraints", "geographic_mission",
+            "uav_fault_assignments",
         )
     ))
 
@@ -462,14 +463,24 @@ def _scenario_version_view(session, version: ScenarioVersionRecord) -> dict:
         .where(ScenarioApprovalRequestRecord.scenario_version_id == version.id)
     )
     intent_record = session.get(ScenarioIntentRecord, version.id)
+    intent = json.loads(intent_record.intent_json) if intent_record else {
+        "mission_objectives": [], "proposed_tasks": [], "uav_role_suggestions": [],
+        "operating_area_notes": "", "environment_notes": "", "constraints": [],
+        "geographic_mission": None,
+    }
+    intent.setdefault("uav_fault_assignments", [])
+    geographic_mission = intent.get("geographic_mission")
+    if geographic_mission is not None:
+        for assignment in geographic_mission.get("uav_assignments", []):
+            assignment.setdefault("zone_ids", [])
+            assignment.setdefault("start_location", None)
+            assignment.setdefault("destination", None)
+            assignment.setdefault("waypoints", [])
     return {
         "id": version.id,
         "version_number": version.version_number,
         "config": json.loads(version.config_json),
-        "intent": json.loads(intent_record.intent_json) if intent_record else {
-            "mission_objectives": [], "proposed_tasks": [], "uav_role_suggestions": [],
-            "operating_area_notes": "", "environment_notes": "", "constraints": [],
-        },
+        "intent": intent,
         "config_hash": version.config_hash,
         "created_at": version.created_at.isoformat() + "Z",
         "approval": {
@@ -855,7 +866,7 @@ def update_ai_conversation(
 
 
 def transfer_ai_conversation_to_scenario(
-    conversation_id: str, operator_id: str, intent: dict,
+    conversation_id: str, operator_id: str, intent: dict, scenario_id: str | None = None,
 ) -> dict | None:
     with SessionLocal() as session:
         record = session.get(AIConversationRecord, conversation_id)
@@ -864,19 +875,38 @@ def transfer_ai_conversation_to_scenario(
         if record.status != "ready_for_review" or not record.proposal_json:
             raise ValueError("Conversation is not ready for scenario transfer")
         if record.scenario_id:
+            if scenario_id is not None and record.scenario_id != scenario_id:
+                raise ValueError("Conversation is already attached to another scenario")
             return get_scenario(record.scenario_id, operator_id)
-        config = json.loads(record.config_json)
         proposal = json.loads(record.proposal_json)
-        scenario_id = uuid.uuid4().hex
         version_id = uuid.uuid4().hex
         now = utcnow_naive()
-        title = (proposal.get("mission_objectives") or ["AI-assisted abstract scenario"])[0].strip()[:120]
-        session.add(ScenarioRecord(
-            id=scenario_id, owner_user_id=operator_id, title=title or "AI-assisted abstract scenario",
-            created_at=now, updated_at=now,
-        ))
+        if scenario_id is None:
+            config = json.loads(record.config_json)
+            scenario_id = uuid.uuid4().hex
+            title = (proposal.get("mission_objectives") or ["AI-assisted abstract scenario"])[0].strip()[:120]
+            session.add(ScenarioRecord(
+                id=scenario_id, owner_user_id=operator_id, title=title or "AI-assisted abstract scenario",
+                created_at=now, updated_at=now,
+            ))
+            version_number = 1
+        else:
+            scenario = session.get(ScenarioRecord, scenario_id)
+            if scenario is None or scenario.owner_user_id != operator_id:
+                return None
+            latest = session.scalar(
+                select(ScenarioVersionRecord)
+                .where(ScenarioVersionRecord.scenario_id == scenario_id)
+                .order_by(ScenarioVersionRecord.version_number.desc())
+                .limit(1)
+            )
+            if latest is None:
+                raise ValueError("Scenario has no version to update")
+            config = json.loads(latest.config_json)
+            version_number = latest.version_number + 1
+            scenario.updated_at = now
         session.add(ScenarioVersionRecord(
-            id=version_id, scenario_id=scenario_id, version_number=1,
+            id=version_id, scenario_id=scenario_id, version_number=version_number,
             config_json=json.dumps(config, sort_keys=True, separators=(",", ":"), ensure_ascii=False),
             config_hash=_scenario_hash(config, intent), created_by=operator_id, created_at=now,
         ))

@@ -125,6 +125,25 @@ def test_decoder_builds_timestamped_per_vehicle_state_with_unit_conversions():
     assert snapshot["transport"]["status"] == "receiving"
 
 
+def test_highres_imu_masks_fields_not_updated_in_the_current_message():
+    store = Px4TelemetryStore()
+    imu = mavlink2.MAVLink_highres_imu_message(
+        123456, 1.0, 2.0, 3.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6,
+        1013.0, 0.0, 120.0, 24.5,
+        1 | 8 | 128 | 4096,
+    )
+
+    store.ingest_datagram(_frame(imu))
+
+    decoded = store.snapshot()["vehicles"][0]["imu_raw"]
+    assert decoded["acceleration_m_s2"] == [1.0, None, None]
+    assert decoded["angular_rate_rad_s"][0] == pytest.approx(0.1)
+    assert decoded["angular_rate_rad_s"][1:] == [None, None]
+    assert decoded["magnetic_field_gauss"] == [None, 0.5, None]
+    assert decoded["temperature_c"] == 24.5
+    assert decoded["fields_updated"] == 1 | 8 | 128 | 4096
+
+
 @pytest.mark.parametrize(("total", "mission_state"), [(0, 0), (65535, 1)])
 def test_mission_current_sentinel_is_not_exposed_as_waypoint_count(total, mission_state):
     store = Px4TelemetryStore()

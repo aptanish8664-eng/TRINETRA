@@ -31,6 +31,13 @@ def _finite_or_none(value: float | int | None) -> float | int | None:
     return value
 
 
+def _updated_imu_value(value: float, fields_updated: int, field_flag: int) -> float | None:
+    if not fields_updated & field_flag:
+        return None
+    result = _finite_or_none(float(value))
+    return None if result is None else float(result)
+
+
 class Px4TelemetryStore:
     """Decode MAVLink frames into an in-memory, explicitly sourced PX4 view."""
 
@@ -201,12 +208,22 @@ class Px4TelemetryStore:
                 vehicle["position"]["valid"] = fix_type >= 3
 
         elif kind == "HIGHRES_IMU":
+            fields_updated = int(message.fields_updated)
             vehicle["imu_raw"] = {
-                "acceleration_m_s2": [_finite_or_none(float(v)) for v in (message.xacc, message.yacc, message.zacc)],
-                "angular_rate_rad_s": [_finite_or_none(float(v)) for v in (message.xgyro, message.ygyro, message.zgyro)],
-                "magnetic_field_gauss": [_finite_or_none(float(v)) for v in (message.xmag, message.ymag, message.zmag)],
-                "temperature_c": _finite_or_none(float(message.temperature)),
-                "fields_updated": int(message.fields_updated),
+                "acceleration_m_s2": [
+                    _updated_imu_value(value, fields_updated, flag)
+                    for value, flag in zip((message.xacc, message.yacc, message.zacc), (1, 2, 4))
+                ],
+                "angular_rate_rad_s": [
+                    _updated_imu_value(value, fields_updated, flag)
+                    for value, flag in zip((message.xgyro, message.ygyro, message.zgyro), (8, 16, 32))
+                ],
+                "magnetic_field_gauss": [
+                    _updated_imu_value(value, fields_updated, flag)
+                    for value, flag in zip((message.xmag, message.ymag, message.zmag), (64, 128, 256))
+                ],
+                "temperature_c": _updated_imu_value(message.temperature, fields_updated, 4096),
+                "fields_updated": fields_updated,
                 "source_message": kind,
                 "source_time_usec": int(message.time_usec),
                 "received_at": received_at,
@@ -365,4 +382,3 @@ class Px4MavlinkProtocol(asyncio.DatagramProtocol):
 
     def error_received(self, exc: Exception) -> None:
         _LOGGER.warning("PX4 UDP telemetry socket error (%s)", type(exc).__name__)
-

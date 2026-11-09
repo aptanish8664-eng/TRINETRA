@@ -14,14 +14,17 @@ type Props = {
   config: OperatorSimulationConfig
   runId: string | null
   state: MissionState | null
-  onManualPlanning: () => void
+  sharedScenarioId?: string | null
+  onManualPlanning: (scenarioId?: string) => void
 }
 
 function ListBlock({ title, values, empty }: { title: string; values: string[]; empty?: string }) {
   return <section className="assistant-list-block"><h4>{title}</h4>{values.length ? <ul>{values.map((item, index) => <li key={`${title}-${index}`}>{item}</li>)}</ul> : <p>{empty ?? 'None returned.'}</p>}</section>
 }
 
-export function MissionAssistant({ signedIn, userId, role, config, runId, state, onManualPlanning }: Props) {
+export function MissionAssistant({
+  signedIn, userId, role, config, runId, state, sharedScenarioId, onManualPlanning,
+}: Props) {
   const [status, setStatus] = useState<AIStatus | null>(null)
   const [description, setDescription] = useState('')
   const [proposal, setProposal] = useState<MissionProposal | null>(null)
@@ -98,10 +101,12 @@ export function MissionAssistant({ signedIn, userId, role, config, runId, state,
     if (!conversation || conversation.status !== 'ready_for_review') return
     setBusy(true); setMessage('')
     try {
-      const saved = await api.saveAIConversationScenario(conversation.conversation_id)
+      const saved = sharedScenarioId
+        ? await api.saveAIConversationScenario(conversation.conversation_id, sharedScenarioId)
+        : await api.saveAIConversationScenario(conversation.conversation_id)
       applyConversation({ ...conversation, scenario_id: saved.id })
       setMessage(`Saved Scenario Lab draft “${saved.title}”. Review and edit its configuration in Scenario Lab.`)
-      onManualPlanning()
+      onManualPlanning(saved.id)
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'Could not save this scenario draft.')
     } finally { setBusy(false) }
@@ -199,7 +204,7 @@ export function MissionAssistant({ signedIn, userId, role, config, runId, state,
           </div>}
         </article>)}
       </section>}
-      <div className="assistant-manual-note"><Radio size={15}/><span>Manual scenario planning stays available in Scenario Lab even when AI is unavailable.</span><button className="inline-link" type="button" onClick={onManualPlanning}>OPEN SCENARIO LAB <ArrowRight size={13}/></button></div>
+      <div className="assistant-manual-note"><Radio size={15}/><span>Manual scenario planning stays available in Scenario Lab even when AI is unavailable.</span><button className="inline-link" type="button" onClick={() => onManualPlanning()}>OPEN SCENARIO LAB <ArrowRight size={13}/></button></div>
     </section>
 
     <aside className="panel assistant-assessment">

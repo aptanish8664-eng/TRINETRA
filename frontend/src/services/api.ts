@@ -15,7 +15,7 @@ import type {
   ScenarioConfig,
   ScenarioIntent,
 } from './auth'
-import type { AIStatus, MissionAssessment, MissionConversation, MissionProposal, OperatorSimulationConfig, PendingMissionProposal } from './ai'
+import type { AIStatus, GeographicMissionPlanningRequest, GeographicMissionProposal, MissionAssessment, MissionConversation, MissionProposal, OperatorSimulationConfig, PendingMissionProposal } from './ai'
 
 export function resolveApiBaseUrl(
   configuredApiUrl: string | undefined,
@@ -188,10 +188,15 @@ export const api = {
   gazeboPoseSocket: (since: string) => new WebSocket(`${API.replace(/^http/, 'ws')}/api/telemetry/gazebo/stream?trail_mode=delta-v1&since=${encodeURIComponent(since)}`),
   aiStatus: () => request<AIStatus>('/api/ai/status'),
   createAIProposal: (description: string, operator_config: OperatorSimulationConfig) => request<MissionProposal>('/api/ai/proposals', { method: 'POST', body: JSON.stringify({ description, operator_config }) }),
+  planGeographicMission: (payload: GeographicMissionPlanningRequest) =>
+    request<GeographicMissionProposal>('/api/ai/geographic-mission-plan', { method: 'POST', body: JSON.stringify(payload) }),
   createAIConversation: (message: string, operator_config: OperatorSimulationConfig) => request<MissionConversation>('/api/ai/conversations', { method: 'POST', body: JSON.stringify({ message, operator_config }) }),
   continueAIConversation: (conversationId: string, message: string) => request<MissionConversation>(`/api/ai/conversations/${encodeURIComponent(conversationId)}/turn`, { method: 'POST', body: JSON.stringify({ message }) }),
   aiConversation: (conversationId: string) => request<MissionConversation>(`/api/ai/conversations/${encodeURIComponent(conversationId)}`),
-  saveAIConversationScenario: (conversationId: string) => request<ScenarioDetail>(`/api/ai/conversations/${encodeURIComponent(conversationId)}/scenario`, { method: 'POST' }),
+  saveAIConversationScenario: (conversationId: string, scenarioId?: string) => request<ScenarioDetail>(
+    `/api/ai/conversations/${encodeURIComponent(conversationId)}/scenario`,
+    { method: 'POST', ...(scenarioId ? { body: JSON.stringify({ scenario_id: scenarioId }) } : {}) },
+  ),
   pendingAIProposals: () => request<{ proposals: PendingMissionProposal[] }>('/api/ai/proposals/pending'),
   aiProposal: (proposalId: string) => request<MissionProposal>(`/api/ai/proposals/${proposalId}`),
   approveAIProposal: (proposalId: string) => request<{ proposal_id: string; status: string; run_id: string; state: MissionState; started: false }>(`/api/ai/proposals/${proposalId}/approve`, { method: 'POST', body: JSON.stringify({ confirmation: 'approve' }) }),

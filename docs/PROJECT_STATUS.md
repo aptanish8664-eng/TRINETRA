@@ -1,6 +1,15 @@
 # TRINETRA Project Status
 
-## Current PX4/Gazebo integration status (2026-11-08)
+## Current status (2026-11-09)
+
+- Latest regression: backend **144 passed**, frontend **12 files / 38 tests passed**, and production TypeScript/Vite build passed (4,219 modules, 342 copied assets). The build retains the Cesium chunk-size warning. See the current test coverage report and root implementation checkpoint.
+- Controlled General/Operator login, session refresh, approval/rejection, authorization denial, audit recording, abstract simulation WebSocket, and logout were browser-tested with disposable accounts on an isolated temporary database. Original credentials and the canonical database were not used.
+- The current browser at `127.0.0.1:5173/login` rendered. Backend `127.0.0.1:8000/api/health` returned ready with SQLite healthy and an abstract simulator; PX4/Gazebo reported `not_integrated`. WSL has no running distributions. Backend health does not reveal the selected SQLite path. No PX4/Gazebo process/configuration or canonical database was changed.
+- Mission Planner now has partial WGS84 planning, versioned geographic intent, PX4-backed assignments, and provider-backed AI advice. Geographic plans are not route-validated or executable. Direct browser acceptance of the planner was not possible without an authenticated session; the browser remained at the sign-in gate.
+- A separate synthetic-only quaternion/ENU EKF, 13-profile sensor dataset, four-model comparison, EDA, and offline threat assessment are implemented and tested. Held-out results are generator-specific software research only; nothing is connected to live PX4 or adaptive vehicle response.
+- The application remains incomplete as an operational research demonstrator: original-account acceptance, current live PX4/Gazebo data, SITL flight, synchronized sensor frames/timestamps, live threat/reassignment, five-vehicle validation, provider/cloud/deployment, load, and accessibility acceptance remain unverified or blocked.
+
+## Historical PX4/Gazebo integration status (2026-11-08; not current runtime evidence)
 
 - The existing Mission Control route contains an authenticated PX4 telemetry view with a CesiumJS map fed by actual MAVLink position reports, plus a read-only Gazebo pose mirror fed by the WSL `/world/default/pose/info` bridge. Neither feature is a separate dashboard, and the frontend has no mock/random live-telemetry fallback.
 - An authenticated combined backend on an isolated scratch database receives PX4 IDs 1/2/3 and Gazebo `x500_0/1/2` concurrently. Current sampled vehicles are disarmed, GPS-valid, have near-zero reported speed, and report battery/mission messages; Gazebo positions remained static over the sample. This is live telemetry reception, not flight or moving-vehicle evidence. The populated `backend/trinetra.db` was not used.
@@ -12,7 +21,7 @@
 ## Architecture
 
 - `backend/app/simulation`: seeded fixed-timestep simulator, telemetry residual detector, threat persistence, isolation, and capacity-aware task reassignment.
-- `backend/app/research`: versioned abstract-simulator dataset generation, seed-group splits, sample/manifest integrity checks, DecisionTreeClassifier training, held-out evaluation, and hash-checked JSON inference. Optional model path connects the classifier to authoritative backend run and Mission Control state; heuristic remains the default.
+- `backend/app/research`: the existing versioned abstract-simulator dataset/DecisionTreeClassifier can optionally connect to abstract backend simulation; heuristic remains default. A separate synthetic-only sensor pipeline adds quaternion attitude, ENU EKF, fault datasets, grouped four-model evaluation, EDA, and offline threat assessments. These sensor models/outputs are not used by live PX4 or runtime adaptive response.
 - `backend/app/main.py`: FastAPI controls, WebSocket state, replay, experiments, exports, authenticated ownership checks, and restricted command review.
 - `backend/app/persistence/database.py`: SQLAlchemy records on SQLite by default or PostgreSQL via `DATABASE_URL`; PostgreSQL schema is Alembic-managed and startup enforces the migration head. Includes simulation records, users/sessions/audit, ownership, scenarios, and AI workflows.
 - `backend/app/security.py`, `backend/app/authorization.py`, and `backend/app/auth_routes.py`: Argon2id credentials, the `GENERAL`/`OPERATOR` role model, revocable sessions, CSRF enforcement, General account management, audit, and ownership.
@@ -114,8 +123,8 @@ The interactive backend-only provisioning command is documented in [AUTHENTICATI
 - Login and registration rate limits are in-process; multi-worker deployments require a shared rate-limit store. MFA is not implemented.
 - The simulator uses abstract local coordinate units; there is no verified geographic waypoint registry. The 3D scene is illustrative, not geographic.
 - The detector is a research baseline calibrated from synthetic noise, not validated against recorded flight telemetry. Precision/recall/F1 are run-level indicators rather than timestep metrics.
-- No browser automation or deployed multi-worker validation has been run.
-- PX4 MAVLink REST/WebSocket and the Cesium Mission Control layer are implemented; the Gazebo pose bridge/mirror is partial and does not stream the native Gazebo scene. PX4 threat detection, MAVSDK command integration and raw IMU estimator remain unimplemented. Phase 8 dataset generation and Phase 9 model runtime/UI are abstract-simulator-only. PostgreSQL support is local-test validated; Supabase and cloud operations are not verified.
+- Controlled isolated-account browser acceptance is documented, but original-account and hosted multi-worker validation remain unverified; systematic viewport/accessibility testing has not been run.
+- PX4 MAVLink REST/WebSocket and the Cesium Mission Control layer are implemented; the Gazebo pose bridge/mirror is partial and does not stream the native Gazebo scene. A synthetic raw-IMU estimator exists for research, but live PX4 synchronized estimation, PX4 threat detection, and MAVSDK command integration remain unimplemented. The existing dataset/model runtime remains abstract-simulator-only. PostgreSQL support is local-test validated; Supabase and cloud operations are not verified.
 
 
 ## Prior abstract fault and model evaluation snapshot (2026-11-08; simulator v1, superseded)
@@ -127,6 +136,6 @@ The prior simulator-v1 dataset v2 `2abfd7fb09de1330fd512f58ce916a8ac67c8c525ec60
 
 Simulator `deterministic-abstract-2d-v2` adds synthetic battery/endurance budget, workload, payload, capability, and communication checks to task reassignment. These values are not measured telemetry. The current dataset `84a505efbbc9c4a6e710cdd632fcac6044432527e389ba6f51383476693495b1` contains 72,900 rows over 30 seeds (18/6/6). Model `f2956c53b02514a77aebe38f4d202e87d37bbcccf79b86acc8811fb1d7cea471` test results over six held-out seeds: accuracy .9770, precision .8567, recall .9098, F1 .8824, ROC AUC .9837; mean seed F1 .8836, bootstrap 95% [.8503,.9133]. Jump has only six positive test samples. At the simulator-v2 milestone, backend passed 86 tests; a subsequent health-observability milestone passed 87. Frontend passed 19 tests and production build passed. PX4 SITL has launched externally, but GCS connection and X500 flight remain unverified; live telemetry, Supabase, Docker and hosting remain unverified.
 
-## Health component observability (2026-11-08)
+## Historical health component observability (2026-11-08)
 
 `GET /api/health` retains its read-only database probe and legacy fields, and now reports in-process abstract simulator/WebSocket counts, detector/model configuration, AI key configuration, and explicit PX4/telemetry not-integrated states. It does not claim external PX4 process health, provider reachability, or per-UAV freshness. The subsequent full backend suite passed 87 tests; frontend passed 19 tests and production build succeeded. PX4/Gazebo is running externally in WSL, but the QGC link remains localhost-only and no flight is verified. See [PX4 setup notes](./PX4_SETUP.md) and the root progress checkpoint.

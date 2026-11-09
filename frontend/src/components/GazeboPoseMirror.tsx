@@ -94,7 +94,9 @@ export function GazeboPoseMirror({ selectedModel, onSelect }: GazeboPoseMirrorPr
   const hasFramedModelsRef = useRef(false)
   const trailsRef = useRef(new Map<string, THREE.Line>())
   const selectedRef = useRef<string | null>(selectedModel)
+  const onSelectRef = useRef(onSelect)
   selectedRef.current = selectedModel
+  onSelectRef.current = onSelect
 
   useEffect(() => {
     let stopped = false
@@ -206,7 +208,7 @@ export function GazeboPoseMirror({ selectedModel, onSelect }: GazeboPoseMirrorPr
         const hit = raycaster.intersectObjects([...modelGroupsRef.current.values()], true)[0]
         let target: THREE.Object3D | null = hit?.object ?? null
         while (target && typeof target.userData.modelName !== 'string') target = target.parent
-        if (target) onSelect(String(target.userData.modelName))
+        if (target) onSelectRef.current(String(target.userData.modelName))
       }
       renderer.domElement.addEventListener('pointerup', selectAtPointer)
       sceneRef.current = scene
@@ -268,7 +270,7 @@ export function GazeboPoseMirror({ selectedModel, onSelect }: GazeboPoseMirrorPr
       setViewerReady(false)
       return
     }
-  }, [onSelect])
+  }, [])
 
   useEffect(() => {
     const scene = sceneRef.current

@@ -75,9 +75,11 @@
 .px4-telemetry-datum>span{display:flex;align-items:center;gap:5px;color:#71899a;font:7px var(--mono);letter-spacing:.03em}
 .px4-telemetry-datum>span svg{flex:none;color:#88cfe2}
 .px4-telemetry-datum>b{overflow-wrap:anywhere;color:#c5dce7;font:8px var(--mono)}
-.px4-imu-summary{display:grid;gap:5px;margin-top:8px;padding:9px;border:1px solid #1a3042;background:#081420}
+.px4-imu-summary{display:grid;gap:7px;margin-top:8px;padding:9px;border:1px solid #1a3042;background:#081420}
 .px4-imu-summary span,.px4-imu-summary small{color:#71899a;font:7px var(--mono)}
 .px4-imu-summary b{color:#c5dce7;font:8px var(--mono);overflow-wrap:anywhere}
+.px4-imu-summary>strong{color:#88cfe2;font:7px var(--mono)}
+.px4-imu-vector{display:grid;grid-template-columns:minmax(125px,.7fr) 1.3fr;gap:8px}
 .px4-source-foot{margin-top:8px;color:#71899a;font:7px var(--mono);overflow-wrap:anywhere}
 .px4-lower-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
 .px4-capability-panel>p{margin:12px 15px;color:#91a9ba;font-size:9px;line-height:1.7}

@@ -1,0 +1,88 @@
+.mission-mode-switch{display:flex;gap:3px;width:max-content;max-width:100%;padding:3px;margin:0 0 14px;border:1px solid #1d3449;background:#08111d;overflow:auto}
+.mission-mode-switch button{min-height:34px;padding:0 13px;border:0;background:transparent;color:#7890a1;font:8px var(--mono);letter-spacing:.07em;white-space:nowrap;cursor:pointer}
+.mission-mode-switch button.selected{background:#143044;color:#b8eafa}
+.px4-command-view{display:grid;gap:14px;min-width:0}
+.px4-source-banner{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:13px 16px}
+.px4-source-title,.px4-source-details{display:flex;align-items:center;gap:12px}
+.px4-source-title>div{display:grid;gap:5px}
+.px4-source-title strong{color:#cce6f1;font:10px var(--mono);letter-spacing:.08em}
+.px4-source-details{flex-wrap:wrap;justify-content:flex-end;color:#8099aa;font:8px var(--mono)}
+.gazebo-mirror-panel{display:grid;gap:10px;min-width:0}
+.gazebo-mirror-panel>.panel-heading{margin:0}
+.gazebo-mirror-panel .panel-heading h3{display:flex;align-items:center;gap:7px}
+.gazebo-mirror-panel .panel-heading h3 svg{color:#83cde2}
+.gazebo-stream-state{display:flex;align-items:center;gap:7px;color:#829bab;font:8px var(--mono);letter-spacing:.06em}
+.gazebo-stream-state i,.gazebo-model-dot{width:6px;height:6px;flex:none;border-radius:50%;background:#71899a}
+.gazebo-stream-state.connected i,.gazebo-model-dot.connected{background:#56e3b1;box-shadow:0 0 7px #56e3b1}
+.gazebo-stream-state.stale i,.gazebo-model-dot.stale{background:#f5b94c;box-shadow:0 0 7px #f5b94c}
+.gazebo-stream-state.offline i,.gazebo-stream-state.unauthorized i{background:#ff7b83}
+.gazebo-mirror-layout{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(260px,.75fr);gap:12px;min-width:0}
+.gazebo-mirror-view{position:relative;min-width:0;height:400px;overflow:hidden;border:1px solid #1a3448;background:#07101a}
+.gazebo-mirror-canvas{position:absolute;inset:0}
+.gazebo-mirror-canvas canvas{display:block;width:100%;height:100%;touch-action:none}
+.gazebo-mirror-wait,.gazebo-mirror-error{position:absolute;z-index:2;left:50%;top:50%;transform:translate(-50%,-50%);max-width:calc(100% - 24px);display:flex;align-items:center;gap:7px;padding:9px 12px;border:1px solid #38536a;background:#06101be8;color:#adbfcb;font:8px var(--mono);text-align:center}
+.gazebo-mirror-error{border-color:#75454a;color:#ffadb4}
+.gazebo-mirror-error.viewer{top:16px;left:12px;right:12px;transform:none;justify-content:center}
+.gazebo-view-controls{position:absolute;z-index:1;left:10px;bottom:9px;display:flex;align-items:center;gap:5px;padding:5px 7px;background:#06101bd9;color:#8499a8;font:7px var(--mono);pointer-events:none}
+.gazebo-model-list{display:grid;align-content:start;gap:6px;min-width:0;padding:10px;border:1px solid #1a3448;background:#081420}
+.gazebo-model-empty{margin:12px 0;color:#71899a;font-size:9px}
+.gazebo-model-row{display:grid;grid-template-columns:7px minmax(0,1fr);align-items:center;gap:5px 8px;padding:10px;border:1px solid #1b3041;background:#091725;color:#bdd1dc;text-align:left;cursor:pointer}
+.gazebo-model-row.selected{border-color:#35708a;background:#10283a}
+.gazebo-model-row b{font:9px var(--mono);letter-spacing:.05em}
+.gazebo-model-row small{grid-column:2;overflow-wrap:anywhere;color:#7f97a8;font:7px var(--mono)}
+.gazebo-mirror-note{margin:0;color:#71899a;font-size:8px;line-height:1.55}
+.gazebo-inline-error{display:flex;align-items:center;gap:8px;padding:9px 11px;border:1px solid #75454a;background:#2a1118;color:#ffadb4;font-size:9px}
+.px4-link-dot{display:inline-block;width:7px;height:7px;flex:none;border-radius:50%;background:#788896}
+.px4-link-dot.connected{background:#56e3b1;box-shadow:0 0 8px #56e3b1}
+.px4-link-dot.stale{background:#f5b94c;box-shadow:0 0 7px #f5b94c}
+.px4-link-dot.offline,.px4-link-dot.unauthorized{background:#ff7b83}
+.px4-link-dot.checking,.px4-link-dot.connecting,.px4-link-dot.disabled{background:#71899a}
+.px4-inline-error{display:flex;align-items:center;gap:8px;padding:10px 12px;border:1px solid #75454a;background:#2a1118;color:#ffadb4;font-size:10px}
+.px4-metrics{margin:0}
+.px4-metrics .metric-card{min-width:0}
+.px4-live-layout{display:grid;grid-template-columns:minmax(0,1.7fr) minmax(320px,.9fr);gap:14px;align-items:start}
+.px4-map-panel,.px4-fleet-panel,.px4-capability-panel{min-width:0}
+.px4-map-caption{color:#71899a;font:8px var(--mono)}
+.cesium-live-map{height:540px;position:relative;overflow:hidden;background:#07101b}
+.cesium-live-map-host{position:absolute;inset:0}
+.cesium-live-map-host .cesium-viewer,.cesium-live-map-host .cesium-widget,.cesium-live-map-host canvas{width:100%;height:100%}
+.cesium-live-map-host .cesium-viewer-toolbar{top:12px;right:12px}
+.cesium-map-waiting,.cesium-map-error{position:absolute;z-index:3;left:50%;top:50%;transform:translate(-50%,-50%);max-width:calc(100% - 28px);padding:10px 13px;border:1px solid #31536a;background:#081522e8;color:#a9c0ce;font:8px var(--mono);letter-spacing:.07em;text-align:center}
+.cesium-map-error{border-color:#75454a;color:#ffadb4}
+.cesium-map-scale{position:absolute;z-index:2;left:12px;bottom:10px;padding:5px 7px;background:#06101bd9;color:#92a9b8;font:7px var(--mono);pointer-events:none}
+.px4-empty-fleet{min-height:105px;display:grid;justify-items:center;align-content:center;gap:7px;padding:15px;color:#8ca4b5;text-align:center}
+.px4-empty-fleet svg{color:#87cfe3}
+.px4-empty-fleet span{font-size:10px}
+.px4-empty-fleet small{max-width:280px;color:#6e8597;font-size:8px;line-height:1.6}
+.px4-vehicle-list{max-height:230px;overflow:auto;border-bottom:1px solid #1d3449}
+.px4-vehicle-row{width:100%;display:grid;grid-template-columns:9px minmax(0,1fr) auto;align-items:center;gap:9px;padding:11px 13px;border:0;border-bottom:1px solid #162b3d;background:transparent;color:#bdd1dc;text-align:left;cursor:pointer}
+.px4-vehicle-row:last-child{border-bottom:0}
+.px4-vehicle-row.selected{background:#0e2637}
+.px4-vehicle-row>span:nth-child(2){display:grid;gap:5px;min-width:0}
+.px4-vehicle-row b{font:9px var(--mono);letter-spacing:.04em}
+.px4-vehicle-row small{color:#71899a;font:7px var(--mono)}
+.px4-vehicle-status{font:7px var(--mono);letter-spacing:.07em}
+.px4-vehicle-status.connected{color:#56e3b1}
+.px4-vehicle-status.stale,.px4-vehicle-status.disconnected{color:#f5b94c}
+.px4-vehicle-state{width:6px;height:6px;border-radius:50%;background:#71899a}
+.px4-vehicle-state.connected{background:#56e3b1}
+.px4-vehicle-state.stale,.px4-vehicle-state.disconnected{background:#f5b94c}
+.px4-selected-details{padding:12px}
+.px4-selected-details .selected-head{margin-bottom:11px}
+.px4-selected-details h4{margin:5px 0 0;color:#d5e8ef;font-size:11px}
+.px4-telemetry-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}
+.px4-telemetry-datum{display:grid;gap:7px;min-width:0;padding:9px;border:1px solid #1a3042;background:#081420}
+.px4-telemetry-datum>span{display:flex;align-items:center;gap:5px;color:#71899a;font:7px var(--mono);letter-spacing:.03em}
+.px4-telemetry-datum>span svg{flex:none;color:#88cfe2}
+.px4-telemetry-datum>b{overflow-wrap:anywhere;color:#c5dce7;font:8px var(--mono)}
+.px4-imu-summary{display:grid;gap:5px;margin-top:8px;padding:9px;border:1px solid #1a3042;background:#081420}
+.px4-imu-summary span,.px4-imu-summary small{color:#71899a;font:7px var(--mono)}
+.px4-imu-summary b{color:#c5dce7;font:8px var(--mono);overflow-wrap:anywhere}
+.px4-source-foot{margin-top:8px;color:#71899a;font:7px var(--mono);overflow-wrap:anywhere}
+.px4-lower-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.px4-capability-panel>p{margin:12px 15px;color:#91a9ba;font-size:9px;line-height:1.7}
+.px4-capability-status{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:0 15px;padding:9px 0;border-top:1px solid #192e40;color:#8097a8;font:8px var(--mono)}
+.px4-capability-status b{color:#f5b94c;font-size:7px;letter-spacing:.04em;text-align:right}
+@media(max-width:1050px){.px4-live-layout{grid-template-columns:minmax(0,1.3fr) minmax(285px,.9fr)}.cesium-live-map{height:480px}}
+@media(max-width:760px){.mission-mode-switch{width:100%}.mission-mode-switch button{flex:1;padding:0 8px;font-size:7px}.px4-source-banner{align-items:flex-start;flex-direction:column}.px4-source-details{justify-content:flex-start}.px4-live-layout,.px4-lower-grid{grid-template-columns:1fr}.cesium-live-map{height:390px}.px4-telemetry-grid{grid-template-columns:1fr 1fr}}
+@media(max-width:760px){.gazebo-mirror-layout{grid-template-columns:1fr}.gazebo-mirror-view{height:330px}.gazebo-model-list{grid-template-columns:1fr 1fr}.gazebo-model-list>.eyebrow{grid-column:1/-1}}

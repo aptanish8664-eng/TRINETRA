@@ -1,0 +1,58 @@
+# Local secrets/configuration
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+*.egg-info/
+
+# Frontend dependencies and generated output
+node_modules/
+frontend/dist/
+*.tsbuildinfo
+
+# Local database and backups contain account, session, and audit data
+backend/*.db
+backend/*.db-*
+backend/backups/
+backend/research-data/
+
+# Logs and local scratch outputs
+*.log
+.audit_*.py
+.env
+.env.*
+!.env.example
+!.env.template
+
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+
+*backup*
+*archive*
+development-database-archive/
+
+node_modules/
+.venv/
+venv/
+__pycache__/
+.pytest_cache/
+dist/
+build/
+coverage/
+
+*.log
+
+# Local PostgreSQL validation data
+backend/pg-validation-cluster/
+backend/smoke-health.db
+backend/__pycache__/
+
+# Local PostgreSQL migration test cluster
+backend/pg-migration-test-data/

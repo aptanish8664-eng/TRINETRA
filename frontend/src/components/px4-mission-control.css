@@ -88,3 +88,7 @@
 @media(max-width:1050px){.px4-live-layout{grid-template-columns:minmax(0,1.3fr) minmax(285px,.9fr)}.cesium-live-map{height:480px}}
 @media(max-width:760px){.mission-mode-switch{width:100%}.mission-mode-switch button{flex:1;padding:0 8px;font-size:7px}.px4-source-banner{align-items:flex-start;flex-direction:column}.px4-source-details{justify-content:flex-start}.px4-live-layout,.px4-lower-grid{grid-template-columns:1fr}.cesium-live-map{height:390px}.px4-telemetry-grid{grid-template-columns:1fr 1fr}}
 @media(max-width:760px){.gazebo-mirror-layout{grid-template-columns:1fr}.gazebo-mirror-view{height:330px}.gazebo-model-list{grid-template-columns:1fr 1fr}.gazebo-model-list>.eyebrow{grid-column:1/-1}}
+.cesium-map-notice.render{border-color:var(--cyan);color:var(--ice)}.cesium-map-boundary-frame{display:contents}
+.cesium-map-error-boundary{display:grid;gap:8px;justify-items:start;margin:12px 14px;padding:14px;border:1px solid var(--red);border-radius:4px;background:rgba(255,77,90,.08);color:var(--text);font-size:12px}
+/* The mirror's page-level error is a normal banner; only the in-viewer overlays are centred on the 3D view. */
+.gazebo-mirror-error:not(.viewer){position:static;transform:none;left:auto;top:auto;max-width:none}

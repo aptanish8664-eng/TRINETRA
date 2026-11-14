@@ -58,6 +58,35 @@ def test_health_and_simulation_control_and_replay(operator_client):
     assert client.get("/api/history").json()["runs"]
 
 
+def test_general_cannot_submit_a_scenario_for_review(general_client):
+    client, _user = general_client
+    response = client.post("/api/scenarios/unknown/versions/unknown/submit")
+    assert response.status_code == 403
+    assert "Only Operator" in response.json()["detail"]
+
+
+def test_operator_cannot_submit_incomplete_geographic_mission(general_client, operator_client):
+    operator, _user = operator_client
+    config = {
+        "uav_count": 4, "task_count": 10, "seed": 21, "duration": 30,
+        "spoofing_type": "none", "target_uav": "UAV-02", "spoof_start": 15,
+        "spoof_duration": 35, "spoof_magnitude": 3.0, "response_policy": "adaptive",
+        "detector_threshold": None,
+    }
+    intent = {
+        "mission_objectives": ["Inspection"], "mission_description": "Inspect a site.",
+        "proposed_tasks": [], "uav_role_suggestions": [], "operating_area_notes": "",
+        "environment_notes": "", "constraints": [], "uav_fault_assignments": [],
+        "geographic_mission": {"objective": "inspection", "workflow_stage": "general"},
+    }
+    created = operator.post("/api/scenarios", json={"title": "Incomplete mission", "config": config, "intent": intent})
+    assert created.status_code == 201, created.text
+    version = created.json()["versions"][0]
+    response = operator.post(f"/api/scenarios/{created.json()['id']}/versions/{version['id']}/submit")
+    assert response.status_code == 422
+    assert "Mission validation is incomplete" in response.json()["detail"]["message"]
+
+
 def test_http_request_log_is_structured_correlated_and_excludes_query(caplog):
     import json
     import logging
@@ -851,6 +880,7 @@ def test_geographic_mission_is_versioned_and_never_runs_in_abstract_simulator(
         "operating_area_notes": "", "environment_notes": "", "constraints": [],
         "geographic_mission": {
             "objective": "area_survey",
+            "mission_duration_minutes": 30,
             "start_location": {"latitude": 12.9716, "longitude": 77.5946},
             "destination": None,
             "survey_zones": [{
@@ -876,6 +906,7 @@ def test_geographic_mission_is_versioned_and_never_runs_in_abstract_simulator(
     assert created.status_code == 201, created.text
     scenario = created.json()
     version_one = scenario["versions"][0]
+    assert version_one["intent"]["geographic_mission"]["mission_duration_minutes"] == 30
     assert version_one["intent"]["geographic_mission"]["start_location"] == intent["geographic_mission"]["start_location"]
     assignment = version_one["intent"]["geographic_mission"]["uav_assignments"][0]
     assert assignment["start_location"] == intent["geographic_mission"]["uav_assignments"][0]["start_location"]
@@ -896,12 +927,8 @@ def test_geographic_mission_is_versioned_and_never_runs_in_abstract_simulator(
     submitted = operator.post(
         f"/api/scenarios/{scenario['id']}/versions/{version_two['id']}/submit",
     )
-    assert submitted.status_code == 200
-    decision = general.post(
-        f"/api/general/scenario-approvals/{submitted.json()['id']}/decision",
-        json={"decision": "approve", "reason": "Geographic intent reviewed."},
-    )
-    assert decision.status_code == 200
+    assert submitted.status_code == 422
+    assert "Mission validation is incomplete" in submitted.json()["detail"]["message"]
     assert operator.post(
         f"/api/scenarios/{scenario['id']}/execute",
         json={"version_id": version_two["id"]},

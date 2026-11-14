@@ -28,6 +28,12 @@ else:
     os.environ["TRINETRA_DB_PATH"] = str(TEST_DB_DIR / "test.db")
 # The HTTP test client uses plain localhost; production defaults to Secure cookies.
 os.environ["TRINETRA_SESSION_COOKIE_SECURE"] = "false"
+os.environ["TRINETRA_AUTO_START_DEFAULT_SITL"] = "false"
+# Real process environment overrides .env (load_dotenv uses override=False), so a local
+# .env that enables the PX4/Gazebo UDP receivers must not bind real ports during tests.
+# Tests that exercise the receivers configure their own transports explicitly.
+os.environ["TRINETRA_PX4_UDP_ENABLED"] = "false"
+os.environ["TRINETRA_GAZEBO_POSE_UDP_ENABLED"] = "false"
 
 
 import pytest

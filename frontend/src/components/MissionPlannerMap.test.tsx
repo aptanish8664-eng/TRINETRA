@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import type { GeographicPoint, GeographicUavAssignment, GeographicZone } from '../services/auth'
 import { MissionPlannerMap } from './MissionPlannerMap'
 
+
 const cesiumMock = vi.hoisted(() => {
   const entityStore = new Map<string, { id: string }>()
   const provider = (url = '') => ({ url, errorEvent: { addEventListener: vi.fn() } })
@@ -109,6 +110,10 @@ function renderMap() {
 
 describe('MissionPlannerMap imagery and search', () => {
   beforeEach(() => {
+    window.localStorage.clear()
+    cesiumMock.fromUrl.mockImplementation(async (url: string) => cesiumMock.imageryProvider(url))
+    vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(800)
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(600)
     cesiumMock.entityStore.clear()
     cesiumMock.fromUrl.mockClear()
     cesiumMock.viewer.entities.add.mockClear()
@@ -121,6 +126,7 @@ describe('MissionPlannerMap imagery and search', () => {
   afterEach(() => {
     cleanup()
     vi.unstubAllGlobals()
+    vi.restoreAllMocks()
   })
 
   it('switches basemaps without removing mission markers or survey vertices', async () => {
@@ -128,6 +134,7 @@ describe('MissionPlannerMap imagery and search', () => {
     await waitFor(() => expect(cesiumMock.fromUrl).toHaveBeenCalledWith(
       'https://services.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer',
     ))
+    await waitFor(() => expect(cesiumMock.entityStore.has('mission-planner:zone:zone-a:vertex:2')).toBe(true))
     const entityIds = [...cesiumMock.entityStore.keys()]
     expect(entityIds).toContain('mission-planner:start')
     expect(entityIds).toContain('mission-planner:zone:zone-a:vertex:2')
@@ -169,4 +176,38 @@ describe('MissionPlannerMap imagery and search', () => {
     await waitFor(() => expect(cesiumMock.viewer.camera.flyTo).toHaveBeenCalled())
     expect([...cesiumMock.entityStore.keys()]).toEqual(entityIds)
   }, 15_000)
+
+  describe('default basemap', () => {
+    const STREET = 'https://services.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer'
+    const SATELLITE = 'https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer'
+
+    it('starts on Street when nothing is stored and shows it as the active style', async () => {
+      renderMap()
+      await waitFor(() => expect(cesiumMock.fromUrl).toHaveBeenCalledWith(STREET))
+      expect((screen.getByLabelText('Map style') as HTMLSelectElement).value).toBe('street')
+      expect(cesiumMock.fromUrl).not.toHaveBeenCalledWith(SATELLITE)
+    })
+
+    it('honours a stored style, and satellite stays selectable and is remembered', async () => {
+      window.localStorage.setItem('trinetra.planner-map-style', 'satellite')
+      renderMap()
+      await waitFor(() => expect(cesiumMock.fromUrl).toHaveBeenCalledWith(SATELLITE))
+      expect((screen.getByLabelText('Map style') as HTMLSelectElement).value).toBe('satellite')
+      fireEvent.change(screen.getByLabelText('Map style'), { target: { value: 'street' } })
+      await waitFor(() => expect(cesiumMock.fromUrl).toHaveBeenCalledWith(STREET))
+      expect(window.localStorage.getItem('trinetra.planner-map-style')).toBe('street')
+    })
+
+    it('falls back to satellite imagery with a notice when the street tiles fail', async () => {
+      cesiumMock.fromUrl.mockImplementation(async (url: string) => {
+        if (url === STREET) throw new Error('street tiles unreachable')
+        return cesiumMock.imageryProvider(url)
+      })
+      renderMap()
+      expect(await screen.findByText(/Showing satellite imagery instead/)).toBeTruthy()
+      await waitFor(() => expect(cesiumMock.viewer.imageryLayers.addImageryProvider).toHaveBeenCalledTimes(1))
+      expect(cesiumMock.fromUrl).toHaveBeenCalledWith(SATELLITE)
+    })
+  })
 })
+

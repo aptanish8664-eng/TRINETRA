@@ -24,6 +24,31 @@ Baseline and adaptive comparisons instantiate separate simulations with identica
 
 The output is a demonstration of this specific seeded model, not evidence that adaptive response generally improves mission outcomes. A future evaluation should label per-timestep attack windows, compute confusion matrices on independent simulation seeds, report detection delay distributions, and include sensitivity analysis of detector calibration and response thresholds.
 
+## Recorded sensor data and offline GPS/IMU research
+
+`backend/app/research/recorded_dataset.py` provides a CSV import boundary for externally recorded data. The required normalized inputs are separate GPS and IMU streams with a `session_id` and monotonic source `timestamp_s`; GPS uses latitude/longitude degrees and altitude metres, while IMU uses acceleration in m/s² and angular rate in rad/s. Source name, source URL and license are mandatory. The loader hashes source files, rejects duplicate/out-of-order/non-finite rows and invalid coordinates, and joins IMU to GPS epochs using interpolation only when both bracketing IMU samples are within the configured limit. It does not extrapolate. Optional labels remain a separate list and must point to an existing GPS epoch. `recorded_features.py` converts each session to a local ENU origin and derives GPS velocity, acceleration, and IMU vector magnitudes; labels are emitted as a separate target list and are never read in feature generation. `split_sessions()` assigns whole sessions to disjoint groups and requires at least three sessions. A single session cannot support a leakage-safe held-out model evaluation.
+
+The importer is a generic normalized-data interface; no public external dataset is bundled or automatically downloaded. Candidate source records reviewed for this implementation:
+
+| Dataset | Source and license | Available observations | Limits for this project |
+| --- | --- | --- | --- |
+| A DATASET for GPS Spoofing Detection on Unmanned Aerial System, v3 | [Mendeley Data record](https://data.mendeley.com/datasets/z7dj3yyzt8/3), CC BY 4.0 | Eight-channel GPS receiver data from a vehicle emulating UAS, three static rooftop positions, 13 GPS features, authentic signals and three simulated attack types | Not actual UAV flight; record does not document synchronized IMU, sampling rate or a paired inertial stream, so it cannot alone validate fusion. |
+| MUN-FRL aerial visual-inertial-LiDAR dataset | [Official dataset documentation](https://mun-frl-vil-dataset.readthedocs.io/en/latest/), CC BY 4.0 | DJI M600 aerial sequences; IMU at 400 Hz and RTK-GNSS position at 5 Hz are hardware time-synchronized; PPK position ground truth at 5 Hz | No spoof labels; ROS bags are large (smallest documented sequence is about 27 GB). It was not downloaded or imported in this work. |
+
+Consequently, the current trained/evaluated research results remain generated from the explicitly synthetic ENU simulator dataset described above. The recorded importer has deterministic fixture tests but has not yet been exercised against either external dataset. Record each real dataset's original license, source and checksums in the importer manifest before training.
+
+### Evidence-based GPS/IMU consistency detector
+
+`backend/app/research/spoofing_detector.py` exposes `SensorObservation` and `GpsImuConsistencyDetector`. Inputs are timestamped local ENU GPS position/optional velocity and world ENU acceleration, with optional GPS course, IMU heading, reported accuracy, satellite count and fix quality. It reports position discontinuity, reported-velocity versus position-derived velocity, GPS-velocity acceleration versus IMU acceleration, and course versus heading residuals. Poor accuracy, low satellite count, invalid fix, missing GPS and long sample gaps remain alternative degradation explanations. The result includes timestamped measurement context, structured value/threshold/unit evidence, persistence count, detector version and limitations. Confidence is deliberately null and the score is an evidence count, not a probability or threat percentage. Status `LIKELY_GNSS_SPOOFING` is a conservative research label requiring persistent independent inconsistencies; this detector is not calibrated or connected to live control.
+
+If a future operator workflow uses a calibrated detector, false positives can trigger unnecessary vehicle degradation/isolation and task reassignment, while false negatives can leave corrupted navigation observations trusted. Any such action must remain a separate reviewed policy decision; this offline detector currently has no control effect.
+
+### Coordinate and asynchronous fusion interfaces
+
+`geodetic_to_enu()` converts WGS84 latitude/longitude/altitude to local tangent ENU metres around an explicit origin, using an ECEF delta and local rotation. Existing `SimulationSensorFusion` remains synthetic-data-specific. `DelayedGpsReplayFusion` is a separate ENU navigation EKF wrapper: callers provide monotonic IMU source epochs with world-frame acceleration and GPS source epochs (matching an IMU epoch) with their later arrival time. GPS delayed within its configured lag is inserted and the bounded time history is replayed deterministically; too-old, duplicate, future, or unaligned fixes are rejected with a reason. The replay history has a maximum-sample guard and requires starting a new segment when full. It does not itself transform body acceleration, estimate attitude, synchronize arbitrary PX4 clocks, or replace the PX4 telemetry adapter. Its tests establish software behavior only, not flight estimator accuracy.
+
+For future read-only live integration, first map PX4 message source epochs to one monotonic clock and convert GPS to ENU using a recorded origin; transform body acceleration with a validated attitude estimate and remove gravity consistently. Pass immutable normalized samples to these research interfaces. Do not treat receive time as measurement time, mix PPK ground truth into observable features, or expose this uncalibrated output as production threat status.
+
 ## Reproducible abstract dataset (Phase 8 partial)
 
 Run from `D:\TRINETRA\backend`:

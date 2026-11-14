@@ -15,6 +15,14 @@ _integer = {"type": "integer"}
 
 GEOGRAPHIC_MISSION_JSON_SCHEMA = _object({
     "summary": _string,
+    "objective_suggestions": _array(_object({
+        "objective": {"type": "string", "enum": [
+            "area_survey", "search_rescue", "perimeter_monitoring", "inspection",
+            "disaster_assessment", "agricultural_survey", "mapping_survey",
+            "target_tracking", "environmental_monitoring", "custom_mission",
+        ]},
+        "rationale": _string,
+    }, ["objective", "rationale"]), 0, 5),
     "assignments": _array(_object({
         "uav_id": _string,
         "role": {"type": "string", "enum": [
@@ -27,7 +35,7 @@ GEOGRAPHIC_MISSION_JSON_SCHEMA = _object({
     "missing_information": _array(_string, 0, 12),
     "constraints": _array(_string, 0, 12),
     "warnings": _array(_string, 0, 12),
-}, ["summary", "assignments", "missing_information", "constraints", "warnings"])
+}, ["summary", "objective_suggestions", "assignments", "missing_information", "constraints", "warnings"])
 
 PROPOSAL_JSON_SCHEMA = _object({
     "mission_objectives": _array(_string, 1, 8),
@@ -62,3 +70,20 @@ ASSESSMENT_JSON_SCHEMA = _object({
         "type": "string", "enum": ["continue_monitoring", "pause_simulation", "stop_simulation"],
     }, 0, 3),
 }, ["summary", "findings", "suggested_responses"])
+
+SCENARIO_ASSISTANT_JSON_SCHEMA = _object({
+    "reply": _string,
+    "actions": _array(_object({
+        "op": {"type": "string", "enum": [
+            "set_objective", "set_max_duration", "set_mission_text", "set_constraint",
+            "set_required_uav_count", "set_assignment_field",
+        ]},
+        "objective": _nullable_string,
+        "minutes": {"type": ["integer", "null"]},
+        "count": {"type": ["integer", "null"]},
+        "uav_index": {"type": ["integer", "null"]},
+        "field": _nullable_string,
+        "text_value": _nullable_string,
+        "number_value": {"type": ["number", "null"]},
+    }, ["op", "objective", "minutes", "count", "uav_index", "field", "text_value", "number_value"]), 0, 5),
+}, ["reply", "actions"])

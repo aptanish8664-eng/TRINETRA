@@ -3,6 +3,9 @@ import type { Entity, Viewer } from 'cesium'
 import 'cesium/Build/Cesium/Widgets/widgets.css'
 import type { GeographicPoint, GeographicUavAssignment, GeographicZone } from '../services/auth'
 import { parseGeographicSearchResults, type GeographicSearchResult } from './missionPlanning'
+import './mission-planner.css'
+import { readPlannerMapStyle, storePlannerMapStyle } from './basemapPreference'
+import { SAFE_VIEWER_OPTIONS, attachRenderGuard, hasRenderableSize, whenRenderable } from './cesiumRenderGuard'
 
 export type PlannerMapMode =
   | 'navigate'
@@ -78,6 +81,9 @@ export function MissionPlannerMap({
 }: Props) {
   const hostRef = useRef<HTMLDivElement>(null)
   const viewerRef = useRef<Viewer | null>(null)
+  // The Cesium module the viewer was created with. Effects that run after `viewerReady` reuse it instead of awaiting another dynamic
+  // import(), whose resolution time is unbounded under load (it made the entity sync race the viewer creation).
+  const cesiumRef = useRef<typeof import('cesium') | null>(null)
   const modeRef = useRef(mode)
   const callbacksRef = useRef({
     onStartChange, onDestinationChange, onAddVertex, onSelectVertex, onMoveVertex, onMoveLocation,
@@ -91,7 +97,9 @@ export function MissionPlannerMap({
   const dragRef = useRef<{ entityId: string; kind: 'start' | 'destination' | 'vertex'; zoneId?: string; index?: number; moved: boolean } | null>(null)
   const [viewerReady, setViewerReady] = useState(false)
   const [mapError, setMapError] = useState('')
-  const [mapStyle, setMapStyle] = useState<MapStyle>('street')
+  const [renderNotice, setRenderNotice] = useState('')
+  const [mapStyle, setMapStyleState] = useState<MapStyle>(readPlannerMapStyle)  // stored choice, otherwise the street default
+  const setMapStyle = (next: MapStyle) => { setMapStyleState(next); storePlannerMapStyle(next) }
   const [imageryLoading, setImageryLoading] = useState(false)
   const [searchText, setSearchText] = useState('')
   const [searchResults, setSearchResults] = useState<GeographicSearchResult[]>([])
@@ -110,9 +118,13 @@ export function MissionPlannerMap({
     let cancelled = false
     let viewer: Viewer | null = null
     let input: import('cesium').ScreenSpaceEventHandler | null = null
+    let disposeGuard: (() => void) | null = null
+    const sized = hostRef.current ? whenRenderable(hostRef.current) : null
 
     void (async () => {
       const Cesium = await import('cesium')
+      cesiumRef.current = Cesium
+      await sized?.promise  // never construct a viewer against a zero-size container
       if (cancelled || !hostRef.current) return
       viewer = new Cesium.Viewer(hostRef.current, {
         baseLayer: false,
@@ -128,8 +140,11 @@ export function MissionPlannerMap({
         selectionIndicator: false,
         timeline: false,
         scene3DOnly: true,
+        ...SAFE_VIEWER_OPTIONS,
+        useDefaultRenderLoop: hasRenderableSize(hostRef.current),
       })
       viewerRef.current = viewer
+      disposeGuard = attachRenderGuard(viewer, hostRef.current, { onNotice: setRenderNotice })
       viewer.scene.globe.show = true
       viewer.scene.globe.baseColor = Cesium.Color.fromCssColorString('#233a49')
       viewer.camera.setView({
@@ -221,6 +236,8 @@ export function MissionPlannerMap({
 
     return () => {
       cancelled = true
+      sized?.cancel()
+      disposeGuard?.()
       input?.destroy()
       searchControllerRef.current?.abort()
       if (viewer && !viewer.isDestroyed()) viewer.destroy()
@@ -239,14 +256,22 @@ export function MissionPlannerMap({
     setMapError('')
 
     void (async () => {
-      const Cesium = await import('cesium')
+      const Cesium = cesiumRef.current ?? await import('cesium')
       const isSatellite = mapStyle === 'satellite' || mapStyle === 'hybrid'
       const baseUrl = isSatellite ? SATELLITE_MAP_URL : STREET_MAP_URL
-      const baseProvider = await Cesium.ArcGisMapServerImageryProvider.fromUrl(baseUrl)
+      let styleWarning = ''
+      let baseProvider: import('cesium').ArcGisMapServerImageryProvider
+      try {
+        baseProvider = await Cesium.ArcGisMapServerImageryProvider.fromUrl(baseUrl)
+      } catch (error) {
+        if (mapStyle !== 'street') throw error
+        // Never leave an empty globe: fall back to the next available basemap and say so.
+        baseProvider = await Cesium.ArcGisMapServerImageryProvider.fromUrl(SATELLITE_MAP_URL)
+        styleWarning = `${providerFailure('Street map imagery', error)} Showing satellite imagery instead.`
+      }
       if (cancelled || viewer.isDestroyed()) return
 
       let labelsProvider: import('cesium').ArcGisMapServerImageryProvider | null = null
-      let styleWarning = ''
       if (mapStyle === 'hybrid') {
         try {
           labelsProvider = await Cesium.ArcGisMapServerImageryProvider.fromUrl(PLACE_LABELS_URL)
@@ -338,7 +363,7 @@ export function MissionPlannerMap({
   const goToSearchResult = (result: GeographicSearchResult) => {
     const viewer = viewerRef.current
     if (!viewer || viewer.isDestroyed()) return
-    void import('cesium').then(Cesium => {
+    void Promise.resolve(cesiumRef.current ?? import('cesium')).then(Cesium => {
       if (viewer.isDestroyed()) return
       viewer.camera.flyTo({
         destination: Cesium.Cartesian3.fromDegrees(result.longitude, result.latitude, 16_000),
@@ -351,7 +376,9 @@ export function MissionPlannerMap({
   useEffect(() => {
     const viewer = viewerRef.current
     if (!viewerReady || !viewer || viewer.isDestroyed()) return
-    void import('cesium').then(Cesium => {
+    const loaded = cesiumRef.current
+    if (!loaded) return  // set before viewerReady, so this only guards against a torn-down viewer
+    void Promise.resolve(loaded).then(Cesium => {
       if (viewer.isDestroyed()) return
       for (const entity of viewer.entities.values.slice()) {
         if (entity.id.startsWith(ENTITY_PREFIX)) viewer.entities.remove(entity)
@@ -521,6 +548,7 @@ export function MissionPlannerMap({
     </div>
     {imageryLoading && <div className="mission-map-loading" role="status">Loading {MAP_STYLES.find(style => style.value === mapStyle)?.label.toLowerCase()} map…</div>}
     {mapError && <div className="cesium-map-error" role="alert">{mapError}</div>}
+    {renderNotice && !mapError && <div className="cesium-map-notice" role="status">{renderNotice}</div>}
     <div className="mission-map-caption">WGS84 · {mapStyle === 'terrain3d' ? 'terrain' : 'ellipsoid'} · proposed routes only · no flight feasibility validation</div>
   </div>
 }

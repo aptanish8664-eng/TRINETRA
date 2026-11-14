@@ -69,7 +69,7 @@ Simulation state returns abstract simulator coordinates and, when the optional m
 - PostgreSQL is supported through `DATABASE_URL` and Alembic migrations; Supabase credentials/connectivity and cloud operations are not configured or validated. Schema upgrades are an operator-run CLI step, not an API route.
 - Current simulation request schema remains abstract (uav count, task count, seed, duration, spoofing type/target/window/magnitude, response policy, optional threshold). Geographic mission coordinates use WGS84 latitude/longitude degrees and remain separate from local simulation coordinates. No geographic-to-PX4/Gazebo frame transform, altitude model, route feasibility, or flight execution is implemented.
 - `scenario_version_intent.geographic_mission` is advisory geographic mission data bound into the immutable version hash. PX4 IDs are validated against currently connected telemetry with valid positions. General approval does not start a flight, and geographic drafts are explicitly rejected by abstract sandbox/execution routes.
-- AI provider behavior is mock-tested only. Live provider use remains blocked until a server-side `OPENAI_API_KEY` is configured; browser map interaction and populated-database operation were not verified in this milestone.
+- AI provider behavior is mock-tested only; no live OpenAI request was made. `backend/.env` is prepared with an empty key and verified `gpt-4.1-mini` model. Provider rate-limit failures are surfaced as HTTP 429, insufficient project credits/billing as HTTP 402, and rejected credentials as sanitized HTTP 503; raw provider bodies are never returned. Browser map rendering and populated-database operation remain unverified.
 
 
 ## PX4 and Gazebo telemetry endpoints (implemented; browser acceptance partial)
@@ -88,3 +88,95 @@ Both receivers are disabled by default and must be enabled with the documented s
 `MISSION_CURRENT.total_sequence` is returned as `null` when MAVLink reports `0` (count unsupported) or `UINT16_MAX` (no mission loaded); neither sentinel is a waypoint count. `mission_state=1` means no mission is present. Mission sequence remains read-only autopilot state and is not linked to TRINETRA task assignment.
 
 Three disarmed systems (IDs 1/2/3) and Gazebo models (`x500_0/1/2`) have been received together through the authenticated backend. An authenticated Mission Control browser view previously showed both live data panels and the three corresponding rows, but its Cesium renderer reported an image decode error. Cesium asset URLs have since been corrected and direct dev/build asset responses verified; a fresh post-fix visual render and flight movement are still unverified. PX4 threat scoring and task reassignment are not validated or linked to these routes. No mock/random source may represent live vehicles.
+
+## Managed SITL fleet and Mission Control deployment handoff
+
+| Route | Access | Contract |
+|---|---|---|
+| `GET /api/fleet/status` | Authenticated mission read | Reports only fixed-instance PX4 process, matching telemetry, and matching `x500_N` pose checks. |
+| `POST /api/fleet/activate` | Scenario-create permission plus CSRF | Accepts `required_uav_count` from 1–5, invokes the fixed allowlisted WSL fleet helper, and returns success only after every requested process, PX4 position, and Gazebo model is verified. |
+| `POST /api/fleet/stop-managed` | Scenario-create permission plus CSRF | Stops only exact PX4 processes registered as manager-owned; it sends no vehicle flight commands. |
+| `POST /api/scenarios/{scenario_id}/versions/{version_id}/deploy` | Scenario-create permission plus CSRF | Persists a deployment only for the latest immutable, complete mission version and only when selected PX4 processes, telemetry, and Gazebo poses are live. Operators need approval of that exact version; General accounts do not. |
+| `GET /api/mission-control/deployments/latest` | Authenticated mission read | Returns the caller-scoped deployment record and full versioned mission snapshot. |
+
+Deployment hands the validated mission to the existing PX4 Mission Control page. It does not upload a PX4 mission, arm, take off, or execute a route. Scenario completeness (sections A-C: mission, individual UAV configuration, review) is checked server-side, and General accounts cannot submit directly for review. The latest runtime was idle at the 2026-11-11 implementation checkpoint; previous live SITL observations in this document are historical and do not prove current fleet activation or movement.
+
+`geographic_mission.mission_duration_minutes` is optional and accepts 1-1440 minutes. It is stored in the immutable Scenario Lab intent/version hash. Scenario Lab's current contextual assistant applies only allowlisted deterministic form commands and invokes fleet changes through `POST /api/fleet/activate`; general generative chat is not connected yet.
+
+`GET /api/health` also reports `components.default_sitl_startup`. Automatic startup is asynchronous, uses the allowlisted WSL manager only when both configured UDP receivers are available, and reports READY only after PX4 process, telemetry position and Gazebo model verification.
+
+
+## Mission plan, schema version 2 (route planning) - implemented, unit/API tested, not browser/flight tested
+
+- **Schema versioning.** `ScenarioIntent.schema_version` is `1` (default; legacy `geographic_mission`) or `2` (`mission_plan`). Version 2 forbids `geographic_mission`; version 1 forbids `mission_plan`. Stored legacy versions are never rewritten: reads add `schema_version: 1` and `mission_plan: null` defaults only, and the UI shows them read-only. Intents are stored as JSON, so **no database migration is required or pending**.
+- **`mission_plan`** (`backend/app/mission_planning/schemas.py`): `objectives` (incl. `relief_supply_delivery`), optional `description`/`notes`, structured `operating_area` (circle `centre`+`radius_m`, or polygon `vertices`), `required_uav_count`, optional `max_duration_minutes`, enforced `constraints.max_distance_from_start_m` and `max_altitude_m`, `allow_multiple_primary`, and per aircraft: `role` (primary/decoy/standby), `priority` 1-3, `reassignable`, `task_type`, per-type `parameters`, `start_location`, `altitude_m`, `speed_mps`, `loiter_duration_s`, `return_mode`, the generated `route` and `confirmed`. Removed fields: individual objective, data requirements, completion condition, expected result, return completion condition, per-aircraft free-text constraints and the role/task duplication.
+- **Task types:** `expanding_square_search`, `sector_search`, `coverage_survey`, `perimeter_patrol`, `point_inspection`, `waypoint_route`, `loiter_hold`, `payload_dropoff` (simulated relief supply drop-off; `payload_category` is the fixed list `relief_supplies|medical_kit|flotation_device`). Objectives only suggest defaults; Target Tracking and Custom Mission allow `waypoint_route` only (no tracking capability exists); `payload_dropoff` needs the Relief Supply Delivery, Search and Rescue or Disaster Assessment objective.
+- `GET /api/mission-plans/limits` - planning limits (config `TRINETRA_MP_*`) and the task/payload lists.
+- `POST /api/mission-plans/preview-route` (`scenario.create` + CSRF), body `{plan, uav_id}` - generates and validates one aircraft's route; 200 `{route, summary}` or 422 `{detail: {code: "route_invalid", message, issues: [{code, message, uav_id, field}]}}`. Nothing is saved or sent anywhere.
+- **Authoritative validation** (`mission_planning/validation.py`) runs on scenario create/update (drafts verify any stored route; `faults`/`review` stages require a complete plan), on submit-for-review and on deploy: missing fields/parameters, speed and altitude limits, mission altitude and distance limits for every generated waypoint, start-to-area distance (SITL sanity limit), waypoint cap, `max_duration_minutes`, points inside the operating area, drop point inside the area and within the distance limit, drop altitude and hover ranges, exactly one primary (unless enabled), sequential confirmation, and the stored route must equal the deterministic regeneration (`route_mismatch`). Failures return 422 `{code: "mission_plan_invalid", message, issues[]}`.
+- **Generation.** Pure functions in `mission_planning/generators.py` work in local ENU around the aircraft start (`geometry.py` reuses `research.sensor_fusion.geodetic_to_enu`; the inverse is exact ECEF). Flat-earth limit: the tangent plane drops about d^2/2R (0.08 m at 1 km, 7.8 m at 10 km); intended for areas of a few kilometres. Routes have `takeoff`, pattern, optional loiter, then return/land waypoints, with estimated `length_m` and `duration_s` (3-D distance / speed plus hovers). `payload_dropoff` adds a `payload_released` event `{aircraft_id, waypoint_seq, planned_time_s, payload_category, simulated: true}`: a logged software event only; no actuator command exists and none is sent to PX4 or Gazebo.
+- **Deploy** still only hands off to Mission Control; the stored `intent.mission_plan` (routes, roles, priorities, events) is carried in the deployment payload and shown in the Mission Control deployment panel. It is not uploaded to PX4.
+- **Sections (2026-11-14).** Scenario Lab has three sections: A Mission, B Individual UAV configuration, C Review and validation. The earlier Section C (fault/attack panel) was removed; GPS attack experiments are designed in the Attack Lab after saving.
+
+## Attack Lab and threat assessment (added 2026-11-13; implemented and tested, simulated/software-only)
+
+All routes need a session; mutating routes need CSRF and an allowed origin. Experiments are owned by their creator.
+
+- `GET /api/attack-lab/limits` - ranges, attack types, presets (backend is the authority; the UI mirrors them).
+- `GET|POST /api/attack-lab/experiments`, `PUT|DELETE /api/attack-lab/experiments/{id}` - experiments pinned to an exact schema-2 scenario version; `POST /api/attack-lab/validate` returns structured issues; `POST /api/attack-lab/presets/{id}/apply` builds a preset from a plan. Validation failures are 422 `{detail:{code,message,issues[]}}`. Experiments never execute (`executed: false`).
+- `GET /api/research/model-info` - model id, tiers, formula, `live_residual_inputs_available`.
+- `POST /api/research/assess` - sensor-stream windows only; ground-truth keys are rejected with 422. Returns `anomaly_confidence`, `severity`, `mission_impact`, `threat_score` (0-100, `threat_score_is_probability: false`), `tier`, `evidence`, ranked `actions`, `handover_candidates`.
+- `POST|GET /api/research/decisions` - records an operator decision (`executed: false`); nothing is sent to an aircraft.
+- `POST /api/research/replays`, `POST .../{id}/finish`, `GET .../{id}/evaluation` - offline replay; the attack schedule is withheld until finish.
+- Scenario Lab no longer edits fault profiles; `uav_fault_assignments` is still accepted and saved as `[]` by the UI. Not applied to the real DB: migration `20261113_attack_lab_decisions`.
+
+## Deploy flow, simulation home and Attack Lab changes (2026-11-14; implemented, unit/API tested, live-checked on PX4 SITL through the API; not browser-verified)
+
+**Route-order fix.** `GET /api/scenarios/my-approval-requests` is now declared before `GET /api/scenarios/{scenario_id}`. Before, it was captured as a scenario id and always returned 404 `Scenario not found.`; the Scenario Lab refresh after a save failed on it, so the saved scenario and its deploy button never appeared. A regression test checks that no static path is shadowed by an earlier parameterised route.
+
+**Deploy** (`POST /api/scenarios/{scenario_id}/versions/{version_id}/deploy`; rules unchanged, errors now structured):
+
+| Status | `detail.code` | Meaning |
+|---|---|---|
+| 409 | `version_superseded` | Not the latest immutable version. Carries `latest_version_id` and `latest_version_number`. |
+| 409 | `approval_required` | An Operator deployed a version that is not approved. |
+| 503 | `fleet_not_verified` | A selected PX4 process, telemetry source or Gazebo pose is not verified. Carries `unverified`, `process_missing`, `manager_error`. |
+| 422 | `mission_plan_invalid` | Unchanged. |
+
+Deploying a version that is already deployed keeps the same record id and makes it the current deployment again. The deploy response and `GET /api/mission-control/deployments/latest` add, computed on read: `scenario_version_number`, `latest_version_number`, `schema_version`, `legacy` (true for a schema-1 deployment, which has no routes), `superseded` (a newer version of the scenario exists) and `mission_start`.
+
+**Mission start** (`backend/app/mission_planning/start.py`, the single definition): the take-off point of the primary aircraft, which is its `start_location` and the first generated waypoint. The "max distance from start" validation measures each aircraft from its own take-off point through the same helper. The home altitude is a fixed 488 m AMSL (the stock PX4 world elevation) because the plan stores no terrain elevation.
+
+| Endpoint | Access | Behaviour |
+|---|---|---|
+| `GET /api/fleet/simulation-location?scenario_id=&scenario_version_id=` | Authenticated mission read | Read-only. Returns `mission_start`, per-aircraft position and `distance_to_start_m` / `distance_to_area_m`, `relocation_recommended` (more than 1 km from the mission start), `far_from_mission_area` (more than 50 km from the operating area), a plain `message` and the `thresholds`. 404 `version_not_found`, 422 `version_not_schema_2`. |
+| `POST /api/fleet/relocate` | Scenario-create permission plus CSRF | Body `{scenario_id, scenario_version_id, confirm: true}`. Stops the managed PX4 instances and this checkout's Gazebo, restarts them with the mission start as home, waits up to 90 s for telemetry plus a Gazebo pose and for every aircraft to report a position within 50 m of the mission start. Sends no arm, take-off or mission command. 200 `{relocated, mission_start, checks, max_distance_to_start_m, commands_sent_to_aircraft: false, ...}`. |
+| `POST /api/fleet/activate` | unchanged | Optional `scenario_id` + `scenario_version_id`: instances this call has to start use that version's mission start as home. A running instance is never restarted; a different home is reported as `checks.simulation_home.status = "differs"`. |
+| `GET /api/fleet/status` | unchanged | Adds `simulation_home`, `simulation_home_source` (`px4_home_env`, `px4_default_world`, `unknown`) and per instance `home` and `managed`. |
+
+Relocate failures are structured (`detail.code`, `message`, `checks`, `simulation_stopped`, `recovery`): 422 `confirmation_required`, 422 `mission_start_unavailable`, 503 `receivers_unavailable`, 409 `aircraft_armed` (nothing changed), 409 `instance_not_managed` (the instance was not started by the fleet manager; nothing stopped), 502 `stop_failed`, 502 `home_not_applied`, 504 `verification_timeout`. Nothing in the application calls relocate on its own; the UI calls it only after an in-page confirmation.
+
+How the home is applied: the WSL manager sets `PX4_HOME_LAT`, `PX4_HOME_LON` and `PX4_HOME_ALT` (range-checked numbers, fixed decimal format) for an instance it starts. PX4's own `px4-rc.gzsim` then calls Gazebo's `/world/default/set_spherical_coordinates`. The PX4 source tree and the world file are not edited. Manager CLI: `activate --count N [--home-lat= --home-lon= --home-alt=]`, `relocate --count N (--home-* | --default-home)`.
+
+Live check (2026-11-14, PX4 SITL `px4_sitl_default`, Gazebo `default` world, throwaway backend and database): position before 47.397971, 8.546164; after relocate to a plan starting at 12.971600, 77.594600 the reported position was 12.971600, 77.594600 (0.03 m away), Gazebo pose receiving, fleet verified 1, relocate request 17 s. `relocate --default-home` returned the position to 47.397971, 8.546164.
+
+**Attack Lab.** Presets define the attack only; nothing scripts a response or a role change.
+
+- Preset ids: `baseline`, `slow_drift`, `rapid_jump`, `strong_offset`, `noise_burst`, and `paired_drift` (attacks two aircraft, `min_aircraft: 2`). Earlier ids are still accepted and returned under the new ids: `mild_drift` -> `slow_drift`, `rapid_spoof` -> `rapid_jump`, `role_handover` -> `strong_offset`, `isolation_fallback` -> `slow_drift`. Stored rows are not rewritten.
+- `config.response_policy` is always `operator_decides`; any other stored or submitted value is read as that. `benchmark_flagged` and `limits.response_policies` were removed. `config.handover.min_battery_pct` (default 40) stays as an eligibility setting for the operator's later handover choice.
+- `GET /api/attack-lab/limits` adds per preset `does`, `useful`, `min_aircraft`; `field_help` (start, duration, magnitude, direction, seed); `notes.hidden_schedule`, `notes.software_only`; `response`; `handover.label`, `handover.note`.
+- `GET /api/attack-lab/missions` (authenticated mission read): saved schema-2 scenarios and their versions with `latest`, `superseded`, `deployed`, `deployed_at`, `in_mission_control`, `aircraft` (id, role, reassignable, route duration), `estimated_duration_s`, `area_summary`, and `presets` (`presets` offered, `hidden` with the `reason`). It carries no experiment or attack data.
+- A preset whose `min_aircraft` exceeds the plan's aircraft count is refused by apply and by validation with issue `preset_needs_two_aircraft`. The issues `preset_needs_standby` and `benchmark_needs_preset` no longer exist.
+
+No database schema changed, so no migration was written for this work.
+
+## Aircraft endurance limit (2026-11-14; implemented, unit/API tested)
+
+Why a 255 km, 224 min coverage route was not flagged: `max_duration_minutes` is optional and the only duration check (`backend/app/mission_planning/validation.py`, the `duration_over_limit` rule) ran only when it was set; no other limit on flight time or distance existed, and the 200-waypoint cap passed at 173 waypoints.
+
+Now one shared definition applies to every route check (route preview, save, review, submit, deploy), with or without `max_duration_minutes`:
+
+- Config `TRINETRA_MP_MAX_FLIGHT_MINUTES` (default 20) and `TRINETRA_MP_MAX_FLIGHT_DISTANCE_M` (default 15000), read into `PlanningLimits.max_flight_s` / `max_flight_distance_m`. They describe the simulated X500 for planning; they are not a measured battery model.
+- A route over the time limit gets issue `endurance_time_exceeded` ("Route takes about 224 min; the aircraft limit is 20 min. Reduce the area, widen track spacing, or raise speed."); over the distance limit `endurance_distance_exceeded` ("Route is about 255.0 km long; the aircraft limit is 15 km. ..."). `duration_over_limit` remains for a `max_duration_minutes` that is stricter than the aircraft limit.
+- `POST /api/mission-plans/preview-route` returns 422 `route_invalid` with these issues, and on success `summary.limit_duration_s` and `summary.limit_length_m`. `GET /api/mission-plans/limits` now includes `max_flight_s` and `max_flight_distance_m`.
+- The frontend mirror (`enduranceIssues` in `missionPlan.ts`) uses the limits served by the backend and the same wording; the backend is authoritative.

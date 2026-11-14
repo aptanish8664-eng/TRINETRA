@@ -11,13 +11,41 @@ from app.research.sensor_fusion import (
     PositionVelocityBiasEkf,
     QuaternionComplementaryFilter,
     SimulationSensorFusion,
+    DelayedGpsReplayFusion,
     euler_from_quaternion,
+    geodetic_to_enu,
     quaternion_from_euler,
     rotate_body_to_world,
 )
 
 
 class SensorFusionTests(unittest.TestCase):
+    def test_geodetic_conversion_uses_local_enu_axes_and_anchor(self):
+        origin = dict(origin_latitude_deg=45.0, origin_longitude_deg=7.0, origin_altitude_m=500.0)
+        np.testing.assert_allclose(geodetic_to_enu(45.0, 7.0, 500.0, **origin), (0, 0, 0), atol=1e-8)
+        east = geodetic_to_enu(45.0, 7.0001, 500.0, **origin)
+        north = geodetic_to_enu(45.0001, 7.0, 500.0, **origin)
+        self.assertGreater(east[0], 7.0)
+        self.assertLess(abs(east[1]), 0.01)
+        self.assertGreater(north[1], 10.0)
+        with self.assertRaisesRegex(ValueError, "latitude"):
+            geodetic_to_enu(91, 0, 0, origin_latitude_deg=0, origin_longitude_deg=0, origin_altitude_m=0)
+
+    def test_replay_fusion_reprocesses_delayed_gps_within_lag_and_rejects_stale(self):
+        fusion = DelayedGpsReplayFusion(lag_s=2.5)
+        for index in range(7):
+            fusion.add_imu(index * 0.1, (0.0, 0.0, 0.0))
+        before = fusion.add_gps(0.3, (0.1, 0.0, 0.0), arrival_timestamp_s=0.6)
+        self.assertIsNotNone(before)
+        self.assertIsNone(fusion.last_gps_rejection_reason)
+        after = fusion.add_gps(0.6, (0.2, 0.0, 0.0), arrival_timestamp_s=0.6)
+        self.assertTrue(after["gps_measurement_used"])
+        self.assertAlmostEqual(after["timestamp_s"], 0.6)
+        fusion.add_imu(0.7, (0.0, 0.0, 0.0))
+        rejected = fusion.add_gps(0.3, (0.1, 0.0, 0.0), arrival_timestamp_s=0.7)
+        self.assertEqual(fusion.last_gps_rejection_reason, "duplicate_gps_epoch")
+        self.assertAlmostEqual(rejected["timestamp_s"], 0.7)
+
     def test_quaternion_round_trip_and_body_to_world_rotation(self):
         yaw = math.pi / 2
         quaternion = quaternion_from_euler(0.0, 0.0, yaw)

@@ -4,8 +4,9 @@ import json
 from dataclasses import dataclass
 from typing import Any, Generic, Protocol, TypeVar
 
-from .schemas import GeographicMissionProposalContent, MissionAssessmentContent, MissionProposalContent
-from .json_schemas import ASSESSMENT_JSON_SCHEMA, GEOGRAPHIC_MISSION_JSON_SCHEMA, PROPOSAL_JSON_SCHEMA
+from .schemas import GeographicMissionProposalContent, MissionAssessmentContent, MissionProposalContent, ScenarioAssistantContent
+from .json_schemas import ASSESSMENT_JSON_SCHEMA, GEOGRAPHIC_MISSION_JSON_SCHEMA, PROPOSAL_JSON_SCHEMA, SCENARIO_ASSISTANT_JSON_SCHEMA
+from .scenario_assistant import SYSTEM_INSTRUCTIONS as SCENARIO_ASSISTANT_INSTRUCTIONS
 from ..config import AI_MAX_OUTPUT_TOKENS, AI_TIMEOUT_SECONDS, OPENAI_API_KEY, OPENAI_MODEL
 
 
@@ -17,6 +18,18 @@ class AIProviderUnavailable(Exception):
 
 
 class AIProviderFailure(Exception):
+    pass
+
+
+class AIProviderRateLimited(AIProviderFailure):
+    pass
+
+
+class AIProviderQuotaExceeded(AIProviderFailure):
+    pass
+
+
+class AIProviderConfigurationError(AIProviderFailure):
     pass
 
 
@@ -43,6 +56,8 @@ class MissionAIProvider(Protocol):
     async def propose_geographic_mission(self, description: str, context: dict[str, Any]) -> ProviderResult[GeographicMissionProposalContent]: ...
 
     async def assess_mission(self, evidence: dict[str, Any]) -> ProviderResult[MissionAssessmentContent]: ...
+
+    async def scenario_assistant(self, payload: dict[str, Any]) -> ProviderResult[ScenarioAssistantContent]: ...
 
 
 class OpenAIResponsesProvider:
@@ -90,7 +105,10 @@ class OpenAIResponsesProvider:
             "Use only the operator request and the supplied objective, named zones, and current available PX4 aircraft IDs. "
             "Do not invent aircraft, locations, coordinates, vehicle capabilities, waypoints, route geometry, or feasibility. "
             "Coordinates are deliberately omitted; the map selections are authoritative and must not be reconstructed. "
-            "Suggest only aircraft IDs explicitly listed as available. Assign advisory roles and concise tasks to those IDs. "
+            "When objective_suggestions_only is true, suggest up to five relevant objective choices with concise rationales and return no aircraft assignments. "
+            "Otherwise, leave objective_suggestions empty. Suggest only aircraft IDs explicitly listed as available. "
+            "If a current_aircraft_id is supplied, recommend only that one aircraft; never assign multiple aircraft in one response. "
+            "Assign advisory roles and concise tasks to those IDs. "
             "If the information does not support a recommendation, return missing_information and warnings. "
             "All suggestions require operator review; do not claim approval, execution, or flight readiness."
         )
@@ -110,11 +128,22 @@ class OpenAIResponsesProvider:
         )
         return await self._parse(MissionAssessmentContent, ASSESSMENT_JSON_SCHEMA, instructions, evidence, "mission assessment")
 
+    async def scenario_assistant(self, payload: dict[str, Any]) -> ProviderResult[ScenarioAssistantContent]:
+        return await self._parse(
+            ScenarioAssistantContent, SCENARIO_ASSISTANT_JSON_SCHEMA, SCENARIO_ASSISTANT_INSTRUCTIONS,
+            payload, "scenario assistant",
+        )
+
     async def _parse(self, schema: type[T], json_schema: dict, instructions: str, payload: dict[str, Any], label: str) -> ProviderResult[T]:
         if not self.available:
             raise AIProviderUnavailable("AI provider is not configured")
         try:
-            from openai import AsyncOpenAI
+            from openai import (
+                AsyncOpenAI,
+                AuthenticationError,
+                PermissionDeniedError,
+                RateLimitError,
+            )
 
             client = AsyncOpenAI(
                 api_key=OPENAI_API_KEY,
@@ -151,6 +180,17 @@ class OpenAIResponsesProvider:
             raise
         except Exception as exc:
             # Provider exception details can contain request material; never bubble them to logs or clients.
+            body = getattr(exc, "body", None)
+            error = body.get("error") if isinstance(body, dict) else None
+            code = (error.get("code") or error.get("type")) if isinstance(error, dict) else None
+            if not isinstance(code, str):
+                code = None
+            if code in {"insufficient_quota", "billing_hard_limit_reached"}:
+                raise AIProviderQuotaExceeded(label) from exc
+            if isinstance(exc, RateLimitError):
+                raise AIProviderRateLimited(label) from exc
+            if isinstance(exc, (AuthenticationError, PermissionDeniedError)):
+                raise AIProviderConfigurationError(label) from exc
             raise AIProviderFailure(label) from exc
 
 

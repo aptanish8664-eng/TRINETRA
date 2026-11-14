@@ -9,26 +9,26 @@ import { Map2D } from './components/Map2D'
 import { AccessPortal, type AccessPage } from './components/AccessPortal'
 import { CommandDecisionPanel } from './components/CommandDecisionPanel'
 import { DetectorStatus } from './components/DetectorStatus'
-import { GeographicMissionPlanner } from './components/GeographicMissionPlanner'
-import { MissionAssistant } from './components/MissionAssistant'
 import { Px4MissionControl } from './components/Px4MissionControl'
 import { ScenarioWorkspace } from './components/ScenarioWorkspace'
+import { AttackLab } from './components/AttackLab'
+import { ThreatReplayPanel } from './components/ThreatReplayPanel'
 import { api } from './services/api'
-import type { UserSession } from './services/auth'
+import type { MissionDeployment, UserSession } from './services/auth'
 import type { MissionState, RunRecord, UAV } from './types'
 
 gsap.registerPlugin(ScrollTrigger)
 const ThreeEnvironment = lazy(() => import('./components/ThreeEnvironment').then(module => ({ default: module.ThreeEnvironment })))
 
-type Tab = 'Overview' | 'Mission Control' | 'Mission Planner' | 'Scenario Lab' | 'Fleet' | 'Analytics' | 'History' | 'Research'
+type Tab = 'Overview' | 'Mission Control' | 'Scenario Lab' | 'Attack Lab' | 'Fleet' | 'Analytics' | 'History' | 'Research'
 type Config = { uav_count: number; task_count: number; seed: number; duration: number; spoofing_type: string; target_uav: string; spoof_start: number; spoof_duration: number; spoof_magnitude: number; response_policy: string; detector_threshold: number | null }
 const initialConfig: Config = { uav_count: 4, task_count: 10, seed: 21, duration: 180, spoofing_type: 'sudden', target_uav: 'UAV-02', spoof_start: 15, spoof_duration: 35, spoof_magnitude: 3, response_policy: 'adaptive', detector_threshold: null }
-const tabs: Tab[] = ['Overview', 'Mission Control', 'Mission Planner', 'Scenario Lab', 'Fleet', 'Analytics', 'History', 'Research']
+const tabs: Tab[] = ['Overview', 'Mission Control', 'Scenario Lab', 'Attack Lab', 'Fleet', 'Analytics', 'History', 'Research']
 const tabRoutes: Record<Tab, string> = {
   Overview: '/',
   'Mission Control': '/mission-control',
-  'Mission Planner': '/mission-planner',
   'Scenario Lab': '/scenario-lab',
+  'Attack Lab': '/attack-lab',
   Fleet: '/fleet',
   Analytics: '/analytics',
   History: '/history',
@@ -100,13 +100,14 @@ function Overview({ onNavigate, onCreate }: { onNavigate: (tab: Tab) => void; on
 
 function App() {
   const [tab, setTab] = useState<Tab>(() => routeTabs[window.location.pathname] ?? 'Overview')
-  const [missionMode, setMissionMode] = useState<'abstract' | 'px4'>('abstract')
+  const [offlineOpen, setOfflineOpen] = useState(false)
   const [accessPage, setAccessPage] = useState<AccessPage | null>(() =>
     accessPageForPath(window.location.pathname, false),
   )
   const [operatorSession, setOperatorSession] = useState<UserSession | null>(null)
   const [config, setConfig] = useState<Config>(initialConfig)
   const [sharedScenarioId, setSharedScenarioId] = useState<string | null>(null)
+  const [deployNotice, setDeployNotice] = useState('')
   const [runId, setRunId] = useState<string | null>(null)
   const [state, setState] = useState<MissionState | null>(null)
   const [trajectory, setTrajectory] = useState<MissionState[]>([])
@@ -269,6 +270,7 @@ function App() {
     try { await api.logout() }
     catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not sign out') }
     finally {
+      window.dispatchEvent(new Event('trinetra:logout'))
       setOperatorSession(null); setRunId(null); setState(null); setTrajectory([]); setHistory([])
       setReplayId(null); setReplayFrames([]); setExperiment(null); setAccessPage('login'); setTab('Overview'); window.history.replaceState({}, '', '/login')
     }
@@ -330,19 +332,6 @@ function App() {
     try { const result = await api.exportExperiment(id); const url = URL.createObjectURL(new Blob([result.content], { type: 'text/csv' })); const link = document.createElement('a'); link.href = url; link.download = result.filename; link.click(); URL.revokeObjectURL(url) }
     catch (cause) { setError(cause instanceof Error ? cause.message : 'Experiment export failed') }
   }
-  const preset = (name: string) => {
-    const presets: Record<string, Partial<Config>> = {
-      'Clean mission': { spoofing_type: 'none' }, 'Sudden offset': { spoofing_type: 'sudden', spoof_start: 15, spoof_duration: 35, spoof_magnitude: 3 },
-      'Single GPS jump': { spoofing_type: 'jump', spoof_start: 15, spoof_duration: 35, spoof_magnitude: 3 },
-      'GPS freeze': { spoofing_type: 'freeze', spoof_start: 15, spoof_duration: 35 },
-      'GPS noise': { spoofing_type: 'noise', spoof_start: 15, spoof_duration: 35 },
-      'GPS degradation': { spoofing_type: 'degradation', spoof_start: 15, spoof_duration: 35 },
-      'Velocity inconsistency': { spoofing_type: 'velocity_inconsistency', spoof_start: 15, spoof_duration: 35, spoof_magnitude: 3 },
-      'Gradual drift': { spoofing_type: 'gradual', spoof_start: 12, spoof_duration: 40, spoof_magnitude: 4 }, 'Time-limited anomaly': { spoofing_type: 'intermittent', spoof_start: 12, spoof_duration: 32, spoof_magnitude: 2.7 },
-      'Capacity stress': { task_count: 18, uav_count: 3, target_uav: 'UAV-02', spoofing_type: 'sudden', spoof_magnitude: 3.2 },
-    }
-    setConfig(previous => ({ ...previous, ...presets[name] }))
-  }
   const metricSeries = useMemo(() => replayId
     ? replayFrames.slice(0, replayIndex + 1).flatMap(frame => frame.uavs[selectedUav?.id ?? ''] ? [frame.uavs[selectedUav?.id ?? ''].residual] : []).slice(-96)
     : series[selectedUav?.id ?? ''] ?? [], [replayId, replayFrames, replayIndex, series, selectedUav?.id])
@@ -363,17 +352,53 @@ function App() {
     {error && <div className="error-banner"><AlertTriangle size={16}/><span>{error}</span><button onClick={() => setError('')}>DISMISS</button></div>}
 
     {accessPage && <AccessPortal page={accessPage} onPageChange={navigateAccess} onExit={() => operatorSession ? changeTab('Overview') : navigateAccess('login')} onAuthenticated={handleAuthenticated} userSession={operatorSession} apiReady={apiReady} streamConnected={connected} hasActiveRun={Boolean(runId)}/>}
-    {!accessPage && tab === 'Overview' && <Overview onNavigate={changeTab} onCreate={() => { changeTab('Mission Control'); void createMission(true) }} />}
+    {!accessPage && tab === 'Overview' && <Overview onNavigate={changeTab} onCreate={() => changeTab('Scenario Lab')} />}
 
     {!accessPage && tab !== 'Overview' && <main className="workspace" ref={storyTopRef}>
-      <div className="workspace-head"><div><div className="breadcrumb"><span>TRINETRA</span><span>/</span><b>{tab.toUpperCase()}</b></div><SectionTitle eyebrow={tab === 'Mission Control' ? 'LIVE OPERATIONS' : tab === 'Mission Planner' ? 'AI-ASSISTED · OPERATOR CONTROLLED' : 'RESEARCH WORKSPACE'} title={tab === 'Mission Control' ? 'Mission Control' : tab} note={tab === 'Mission Control' ? missionMode === 'px4' ? 'Authenticated PX4 telemetry · live geographic view' : 'Deterministic software simulation · abstract local coordinate plane' : tab === 'Mission Planner' ? 'Untrusted proposal → deterministic checks → explicit operator approval' : undefined}/></div><div className="workspace-head-right">{currentState && !(tab === 'Mission Control' && missionMode === 'px4') && <span className={`mission-state ${currentState.status}`}><i/>{currentState.status.toUpperCase()}</span>}<span className="mono tiny">TRN / LAB / 01</span></div></div>
+      <div className="workspace-head"><div><div className="breadcrumb"><span>TRINETRA</span><span>/</span><b>{tab.toUpperCase()}</b></div><SectionTitle eyebrow={tab === 'Mission Control' ? 'LIVE OPERATIONS' : tab === 'Scenario Lab' ? 'UNIFIED MISSION WORKSPACE' : tab === 'Attack Lab' ? 'SIMULATED ATTACK EXPERIMENTS' : 'RESEARCH WORKSPACE'} title={tab === 'Mission Control' ? 'Mission Control' : tab} note={tab === 'Mission Control' ? 'Authenticated PX4 telemetry · live geographic view' : tab === 'Research' ? 'Research methods and the offline abstract simulation' : undefined}/></div><div className="workspace-head-right">{currentState && tab !== 'Mission Control' && <span className={`mission-state ${currentState.status}`}><i/>{currentState.status.toUpperCase()}</span>}<span className="mono tiny">TRN / LAB / 01</span></div></div>
 
-      {tab === 'Mission Control' && <>
-        <div className="mission-mode-switch" role="tablist" aria-label="Mission Control data source">
-          <button type="button" role="tab" aria-selected={missionMode === 'abstract'} className={missionMode === 'abstract' ? 'selected' : ''} onClick={() => setMissionMode('abstract')}>ABSTRACT RESEARCH SIMULATION</button>
-          <button type="button" role="tab" aria-selected={missionMode === 'px4'} className={missionMode === 'px4' ? 'selected' : ''} onClick={() => setMissionMode('px4')}>LIVE PX4 TELEMETRY</button>
-        </div>
-        {missionMode === 'px4' ? <Px4MissionControl/> : <>
+      {tab === 'Mission Control' && <Px4MissionControl notice={deployNotice} onDismissNotice={() => setDeployNotice('')} onOpenScenarioLab={() => changeTab('Scenario Lab')}
+        canManageFleet={operatorSession?.permissions.includes('scenario.create') ?? false}/>}
+
+      {!accessPage && <div hidden={tab !== 'Scenario Lab'}>
+      <ScenarioWorkspace
+        key={`${operatorSession?.user.id ?? 'anonymous'}:${operatorSession?.user.role ?? 'none'}`}
+        userId={operatorSession?.user.id ?? ''}
+        config={config}
+        onLoadConfig={setConfig}
+        sharedScenarioId={sharedScenarioId}
+        onScenarioSelected={setSharedScenarioId}
+        canManage={operatorSession?.permissions.includes('scenario.create') ?? false}
+        isOperator={operatorSession?.user.role === 'OPERATOR'}
+        active={tab === 'Scenario Lab'}
+        onOpenAttackLab={() => changeTab('Attack Lab')}
+        onMissionDeployed={(deployment: MissionDeployment, note?: string) => {
+          setSharedScenarioId(deployment.scenario_id)
+          const version = typeof deployment.scenario_version_number === 'number' ? ` version ${deployment.scenario_version_number}` : ''
+          setDeployNotice(`Deployed ${deployment.scenario_title ?? 'the mission'}${version} to Mission Control. Nothing was armed, flown or uploaded to PX4.${note ? ` ${note}` : ''}`)
+          changeTab('Mission Control')  // also updates the address bar, so Back returns to Scenario Lab
+        }}
+      />
+      </div>}
+
+      {tab === 'Attack Lab' && <AttackLab canEdit={operatorSession?.user.role === 'GENERAL'} initialScenarioId={sharedScenarioId}
+        onOpenScenarioLab={scenarioId => { if (scenarioId) setSharedScenarioId(scenarioId); changeTab('Scenario Lab') }}/>}
+
+      {tab === 'Fleet' && <section className="panel fleet-page"><div className="panel-heading"><div><span className="eyebrow">LIVE STATE INSPECTOR</span><h3>{currentState ? `${Object.keys(currentState.uavs).length} active fleet records` : 'No active mission'}</h3></div>{currentState && <span className="mission-state running"><i/>TICK {currentState.tick}</span>}</div>{currentState ? <div className="fleet-table">{Object.values(currentState.uavs).map(uav => <button className={`fleet-record ${selected === uav.id ? 'chosen' : ''}`} key={uav.id} onClick={() => setSelected(uav.id)}><span className="uav-glyph"><Wind size={16}/></span><b>{uav.id}</b><span>{uav.status.toUpperCase()}</span><span>GT {uav.position.x.toFixed(2)}, {uav.position.y.toFixed(2)}</span><span>GPS {uav.gps.x.toFixed(2)}, {uav.gps.y.toFixed(2)}</span><span>{uav.task_id ?? 'NO TASK'}</span><span>{uav.anomaly_score.toFixed(1)}×</span></button>)}</div> : <button className="button-primary" onClick={() => void createMission(true)}>CREATE A MISSION</button>}</section>}
+
+      {tab === 'Analytics' && <div className="analytics-layout"><section className="panel analytics-run"><span className="eyebrow">PAIRED POLICY STUDY</span><h3>Baseline versus adaptive response</h3><p>Both runs use the same seed, initial coordinates, task locations, and spoof scenario. Metrics are computed from simulation traces and are not expected to favor either policy.</p><div className="study-meta"><span>SEED <b>{config.seed}</b></span><span>FLEET <b>{config.uav_count}</b></span><span>SCENARIO <b>{config.spoofing_type.toUpperCase()}</b></span></div><button className="button-primary" onClick={() => void runComparison()} disabled={busy || !apiReady || (Boolean(operatorSession) && !canCreateExperiment)}>{busy ? <LoaderCircle className="spin" size={15}/> : <BarChart3 size={15}/>} RUN PAIRED EXPERIMENT</button>{operatorSession && !canCreateExperiment && <p className="permission-note">Your role is read-only for experiment creation.</p>}<p className="formula-note">Completion rate = completed tasks / configured tasks. Detection delay is measured in simulation ticks from configured onset to first persistent detection event. Precision and recall are run-level indicators in this initial demonstrator.</p></section>
+        {experiment ? <ExperimentResults result={experiment} onExport={canExportAnalytics ? id => void exportExperiment(id) : undefined}/> : <div className="analytics-placeholder panel"><BarChart3 size={27}/><b>Measured outcomes appear here.</b><span>Run the paired experiment to compute result tables and compare mission continuity.</span></div>}</div>}
+
+      {tab === 'History' && <section className="panel history-panel"><div className="panel-heading"><div><span className="eyebrow">PERSISTED RUNS · SQLITE</span><h3>Mission history & replay</h3></div><button className="button-secondary" onClick={() => void loadHistory()}><RotateCcw size={14}/> REFRESH HISTORY</button></div>{replayId && currentState && <div className="replay-current"><span className="eyebrow">REPLAYING STORED SNAPSHOT</span><b>{replayId} · tick {currentState.tick} · {currentState.progress.completed}/{currentState.progress.total} tasks</b><div className="replay-inline-controls"><button onClick={() => setReplayPlaying(!replayPlaying)}>{replayPlaying ? <Pause size={14}/> : <Play size={14}/>} {replayPlaying ? 'PAUSE' : 'PLAY'}</button><input type="range" min="0" max={Math.max(0,replayFrames.length-1)} value={replayIndex} onChange={event => setReplayIndex(Number(event.target.value))}/><button onClick={() => void exportRun(replayId)}><Download size={14}/> CSV</button></div></div>}{history.length ? <div className="history-list">{history.map(record => <article key={record.id} className="history-row"><span className="history-symbol"><Clock3 size={16}/></span><div><b>{record.id}</b><small>{new Date(record.created_at).toLocaleString()} · seed {String(record.config.seed)} · {String(record.config.spoofing_type)}</small></div><span className={`mission-state ${record.status}`}><i/>{record.status}</span><button className="button-secondary" onClick={() => void loadReplay(record.id)}>REPLAY <Play size={13}/></button><button className="small-icon" title="Export run CSV" onClick={() => void exportRun(record.id)}><Download size={15}/></button></article>)}</div> : <div className="empty-inline history-empty">{apiReady ? 'No persisted runs loaded. Refresh to check the local SQLite history.' : 'Connect the backend to inspect persisted runs.'}</div>}</section>}
+
+      {tab === 'Research' && <>
+        <Research open={researchOpen} setOpen={setResearchOpen}/>
+        <ThreatReplayPanel canRecord={operatorSession?.permissions.includes('scenario.create') ?? false}/>
+        <section className="panel offline-simulation" aria-label="Offline research simulation">
+          <div className="panel-heading"><div><span className="eyebrow">OFFLINE RESEARCH SIMULATION</span><h3>Deterministic abstract simulator <span className="count-tag">NOT LIVE PX4</span></h3></div>
+            <button type="button" className="button-secondary" aria-expanded={offlineOpen} onClick={() => setOfflineOpen(value => !value)}>{offlineOpen ? 'HIDE SIMULATION' : 'OPEN SIMULATION'}</button></div>
+          <p className="permission-note">Software-only abstract coordinates, unchanged from the original simulator: detection, threat scoring and task reassignment are validated here only, never on live PX4 data.</p>
+          {offlineOpen && <>
         {!replayId && <CommandDecisionPanel
           runId={runId ?? ''}
           currentUserId={operatorSession?.user.id ?? ''}
@@ -414,68 +439,9 @@ function App() {
           {actionNotice && <div className="assistant-message" role="status">{actionNotice}</div>}
           <div className="lower-grid"><TelemetryChart values={metricSeries} threshold={currentState.calibration.threshold}/><section className="event-panel panel"><div className="panel-heading"><div><span className="eyebrow">MISSION EVENT STREAM</span><h3>System decisions</h3></div><span className="event-count">{currentState.events.length} EVENTS</span></div><div className="event-list">{[...currentState.events].slice(-8).reverse().map(event => <article className="event-row" key={event.id}><span className={`event-marker ${event.severity ?? 'info'}`}>{event.type === 'uav_isolated' || event.type === 'anomaly_detected' ? <AlertTriangle size={13}/> : <Activity size={13}/>}</span><div><b>{event.type.replace(/_/g, ' ').toUpperCase()}</b><p>{event.reason ?? `${event.uav_id ?? ''} ${event.task_id ?? ''}`}</p></div><time>T+{event.time.toFixed(0)}</time></article>)}{currentState.events.length === 0 && <div className="empty-inline">No mission events recorded yet.</div>}</div></section></div>
         </>}
-        </>}
+          </>}
+        </section>
       </>}
-
-      {tab === 'Mission Planner' && <GeographicMissionPlanner
-        key={`${operatorSession?.user.id ?? 'anonymous'}:${operatorSession?.user.role ?? 'none'}`}
-        signedIn={Boolean(operatorSession)}
-        canManage={canCreateMission}
-        userId={operatorSession?.user.id ?? ''}
-        sharedScenarioId={sharedScenarioId}
-        onScenarioSelected={setSharedScenarioId}
-        onLoadConfig={setConfig}
-      >
-        <details className="legacy-planner-details">
-          <summary>EXISTING ABSTRACT SIMULATOR AI WORKFLOW</summary>
-          <p>Separate from geographic mission planning; this workflow produces abstract simulator scenarios and does not support geographic coordinates.</p>
-          <MissionAssistant key={`${operatorSession?.user.id ?? 'anonymous'}:${operatorSession?.user.role ?? 'none'}`} signedIn={Boolean(operatorSession)} userId={operatorSession?.user.id ?? ''} role={operatorSession?.user.role ?? 'OPERATOR'} config={config} runId={runId} state={currentState} sharedScenarioId={sharedScenarioId} onManualPlanning={scenarioId => {
-            if (scenarioId) setSharedScenarioId(scenarioId)
-            changeTab('Scenario Lab')
-          }}/>
-        </details>
-      </GeographicMissionPlanner>}
-
-      {tab === 'Scenario Lab' && <ScenarioWorkspace
-        config={config}
-        onLoadConfig={setConfig}
-        sharedScenarioId={sharedScenarioId}
-        onScenarioSelected={setSharedScenarioId}
-        onEditGeographicMission={() => changeTab('Mission Planner')}
-        canManage={operatorSession?.permissions.includes('scenario.create') ?? false}
-        onRunCreated={(id, next) => {
-          setRunId(id)
-          setState(next)
-          setTrajectory([next])
-          setSelected(config.target_uav)
-          setSeries({})
-          setTab('Mission Control')
-        }}
-      />}
-
-      {tab === 'Scenario Lab' && <div className="scenario-layout"><section className="panel scenario-form"><div className="panel-heading"><div><span className="eyebrow">REPRODUCIBLE CONFIGURATION</span><h3>Scenario parameters</h3></div><span className="mono tiny">FIXED TIMESTEP · 1.0 s</span></div><div className="preset-list">{['Clean mission', 'Sudden offset', 'Single GPS jump', 'GPS freeze', 'GPS noise', 'GPS degradation', 'Velocity inconsistency', 'Gradual drift', 'Time-limited anomaly', 'Capacity stress'].map(name => <button key={name} className="preset-chip" onClick={() => preset(name)}>{name}</button>)}</div><div className="form-grid">
-        <label>Fleet size <small>2 — 12 aircraft</small><input type="number" min="2" max="12" value={config.uav_count} onChange={event => { const count = Number(event.target.value); setConfig(previous => ({...previous, uav_count: count, target_uav: Number(previous.target_uav.slice(-2)) > count ? 'UAV-02' : previous.target_uav})) }}/></label>
-        <label>Task count <small>1 — 40 task markers</small><input type="number" min="1" max="40" value={config.task_count} onChange={event => setConfig({...config, task_count: Number(event.target.value)})}/></label>
-        <label>Random seed <small>Repeatable initial state</small><input type="number" value={config.seed} onChange={event => setConfig({...config, seed: Number(event.target.value)})}/></label>
-        <label>Duration (ticks) <small>Mission limit</small><input type="number" min="1" max="3600" value={config.duration} onChange={event => setConfig({...config, duration: Number(event.target.value)})}/></label>
-        <label>Simulated GPS fault <small>Software scenario only</small><select value={config.spoofing_type} onChange={event => setConfig({...config, spoofing_type: event.target.value})}><option value="none">Clean run</option><option value="sudden">Sustained GPS offset</option><option value="jump">Single position jump</option><option value="gradual">Gradual GPS drift</option><option value="intermittent">Intermittent offset</option><option value="freeze">Frozen GPS position</option><option value="noise">Increased GPS noise</option><option value="degradation">Degrading GPS quality</option><option value="velocity_inconsistency">GPS velocity inconsistency</option></select></label>
-        <label>Target aircraft <small>UAV identifier</small><select value={config.target_uav} onChange={event => setConfig({...config, target_uav: event.target.value})}>{Array.from({length: config.uav_count}, (_, index) => `UAV-${String(index+1).padStart(2,'0')}`).map(id => <option key={id}>{id}</option>)}</select></label>
-        <label>Spoof start (tick) <small>Simulation time</small><input type="number" min="0" value={config.spoof_start} onChange={event => setConfig({...config, spoof_start: Number(event.target.value)})}/></label>
-        <label>Duration (ticks) <small>Anomaly window</small><input type="number" min="1" value={config.spoof_duration} onChange={event => setConfig({...config, spoof_duration: Number(event.target.value)})}/></label>
-        <label>Offset magnitude <small>Abstract coordinate units</small><input type="number" min="0" step="0.1" value={config.spoof_magnitude} onChange={event => setConfig({...config, spoof_magnitude: Number(event.target.value)})}/></label>
-        <label>Response policy <small>Baseline does not isolate</small><select value={config.response_policy} onChange={event => setConfig({...config, response_policy: event.target.value})}><option value="adaptive">Adaptive response</option><option value="monitor">Monitor only</option><option value="baseline">Baseline policy</option></select></label>
-        <label>Detector threshold <small>Blank uses clean-run calibration</small><input type="number" min="0.001" step="0.01" placeholder="calibrated default" value={config.detector_threshold ?? ''} onChange={event => setConfig({...config, detector_threshold: event.target.value === '' ? null : Number(event.target.value)})}/></label>
-      </div><div className="form-actions"><button className="button-primary" onClick={() => void createMission(true)} disabled={busy || !apiReady || (Boolean(operatorSession) && !canCreateMission)}>{busy ? <LoaderCircle size={15} className="spin"/> : <Play size={15} fill="currentColor"/>} CREATE & DEPLOY</button><button className="button-secondary" onClick={() => void createMission(false)} disabled={busy || !apiReady || (Boolean(operatorSession) && !canCreateMission)}>CREATE READY RUN</button>{operatorSession && !canCreateMission && <small className="permission-note">Observer access is read-only.</small>}</div></section>
-        <aside className="panel scenario-aside"><span className="eyebrow">MODEL NOTES</span><h3>Abstract, repeatable, inspectable.</h3><p>Initial placements and tasks derive from the configured seed. Movement advances on a fixed scientific timestep; visual playback speed does not alter simulation time.</p><div className="aside-rule"/><div className="model-note"><span><Shield size={16}/></span><div><b>Telemetry-only detection</b><small>Reported GPS + assigned destination. No truth coordinates or hidden attack labels.</small></div></div><div className="model-note"><span><Focus size={16}/></span><div><b>Coordinate plane</b><small>Local simulation units. Not latitude, longitude, or real flight data.</small></div></div><div className="model-note"><span><Clock3 size={16}/></span><div><b>Capacity-aware reassignment</b><small>Priority ordering, eligibility filtering, and available task slots.</small></div></div><div className="aside-foot"><span>SCENARIO VALIDATION</span><span>BACKEND ENFORCED</span></div></aside></div>}
-
-      {tab === 'Fleet' && <section className="panel fleet-page"><div className="panel-heading"><div><span className="eyebrow">LIVE STATE INSPECTOR</span><h3>{currentState ? `${Object.keys(currentState.uavs).length} active fleet records` : 'No active mission'}</h3></div>{currentState && <span className="mission-state running"><i/>TICK {currentState.tick}</span>}</div>{currentState ? <div className="fleet-table">{Object.values(currentState.uavs).map(uav => <button className={`fleet-record ${selected === uav.id ? 'chosen' : ''}`} key={uav.id} onClick={() => setSelected(uav.id)}><span className="uav-glyph"><Wind size={16}/></span><b>{uav.id}</b><span>{uav.status.toUpperCase()}</span><span>GT {uav.position.x.toFixed(2)}, {uav.position.y.toFixed(2)}</span><span>GPS {uav.gps.x.toFixed(2)}, {uav.gps.y.toFixed(2)}</span><span>{uav.task_id ?? 'NO TASK'}</span><span>{uav.anomaly_score.toFixed(1)}×</span></button>)}</div> : <button className="button-primary" onClick={() => void createMission(true)}>CREATE A MISSION</button>}</section>}
-
-      {tab === 'Analytics' && <div className="analytics-layout"><section className="panel analytics-run"><span className="eyebrow">PAIRED POLICY STUDY</span><h3>Baseline versus adaptive response</h3><p>Both runs use the same seed, initial coordinates, task locations, and spoof scenario. Metrics are computed from simulation traces and are not expected to favor either policy.</p><div className="study-meta"><span>SEED <b>{config.seed}</b></span><span>FLEET <b>{config.uav_count}</b></span><span>SCENARIO <b>{config.spoofing_type.toUpperCase()}</b></span></div><button className="button-primary" onClick={() => void runComparison()} disabled={busy || !apiReady || (Boolean(operatorSession) && !canCreateExperiment)}>{busy ? <LoaderCircle className="spin" size={15}/> : <BarChart3 size={15}/>} RUN PAIRED EXPERIMENT</button>{operatorSession && !canCreateExperiment && <p className="permission-note">Your role is read-only for experiment creation.</p>}<p className="formula-note">Completion rate = completed tasks / configured tasks. Detection delay is measured in simulation ticks from configured onset to first persistent detection event. Precision and recall are run-level indicators in this initial demonstrator.</p></section>
-        {experiment ? <ExperimentResults result={experiment} onExport={canExportAnalytics ? id => void exportExperiment(id) : undefined}/> : <div className="analytics-placeholder panel"><BarChart3 size={27}/><b>Measured outcomes appear here.</b><span>Run the paired experiment to compute result tables and compare mission continuity.</span></div>}</div>}
-
-      {tab === 'History' && <section className="panel history-panel"><div className="panel-heading"><div><span className="eyebrow">PERSISTED RUNS · SQLITE</span><h3>Mission history & replay</h3></div><button className="button-secondary" onClick={() => void loadHistory()}><RotateCcw size={14}/> REFRESH HISTORY</button></div>{replayId && currentState && <div className="replay-current"><span className="eyebrow">REPLAYING STORED SNAPSHOT</span><b>{replayId} · tick {currentState.tick} · {currentState.progress.completed}/{currentState.progress.total} tasks</b><div className="replay-inline-controls"><button onClick={() => setReplayPlaying(!replayPlaying)}>{replayPlaying ? <Pause size={14}/> : <Play size={14}/>} {replayPlaying ? 'PAUSE' : 'PLAY'}</button><input type="range" min="0" max={Math.max(0,replayFrames.length-1)} value={replayIndex} onChange={event => setReplayIndex(Number(event.target.value))}/><button onClick={() => void exportRun(replayId)}><Download size={14}/> CSV</button></div></div>}{history.length ? <div className="history-list">{history.map(record => <article key={record.id} className="history-row"><span className="history-symbol"><Clock3 size={16}/></span><div><b>{record.id}</b><small>{new Date(record.created_at).toLocaleString()} · seed {String(record.config.seed)} · {String(record.config.spoofing_type)}</small></div><span className={`mission-state ${record.status}`}><i/>{record.status}</span><button className="button-secondary" onClick={() => void loadReplay(record.id)}>REPLAY <Play size={13}/></button><button className="small-icon" title="Export run CSV" onClick={() => void exportRun(record.id)}><Download size={15}/></button></article>)}</div> : <div className="empty-inline history-empty">{apiReady ? 'No persisted runs loaded. Refresh to check the local SQLite history.' : 'Connect the backend to inspect persisted runs.'}</div>}</section>}
-
-      {tab === 'Research' && <Research open={researchOpen} setOpen={setResearchOpen}/>}
     </main>}
     {accessPage !== 'general' && <footer className="footer"><BrandMark compact/><span>TRINETRA · SOFTWARE-ONLY RESEARCH DEMONSTRATOR</span><span>MISSION CONTINUITY. ENGINEERED.</span><span>LOCAL SIMULATION BUILD 0.1</span></footer>}
   </div>

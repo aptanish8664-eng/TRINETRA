@@ -113,6 +113,19 @@ describe('shared API CSRF handling', () => {
     expect(fetchMock).toHaveBeenCalledTimes(4)
   })
 
+  it('keeps the message and per-check detail of structured fleet activation errors', async () => {
+    const detail = {
+      code: 'verification_timeout', message: 'PX4 and Gazebo are running, but no telemetry arrived.',
+      checks: { telemetry_bridge: { status: 'not_running', detail: 'Bridge process is not running.' } },
+    }
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(200, session('fleet-token')))
+      .mockResolvedValueOnce(jsonResponse(504, { detail }))
+
+    await api.login({ username: 'trinetra-general', password: 'not-used-in-test' })
+    await expect(api.activateFleet(1)).rejects.toMatchObject({ status: 504, message: detail.message, detail })
+  })
+
   it('formats structured validation errors without exposing submitted values', async () => {
     fetchMock.mockResolvedValueOnce(jsonResponse(422, {
       detail: [{

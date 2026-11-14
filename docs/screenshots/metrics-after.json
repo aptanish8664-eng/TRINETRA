@@ -1,0 +1,28 @@
+{
+ "attack-lab-1440": {
+  "docHeight": 1780,
+  "gaps": []
+ },
+ "mission-control-1440": {
+  "docHeight": 2504,
+  "gaps": []
+ },
+ "scenario-lab-1440": {
+  "docHeight": 4873,
+  "gaps": []
+ },
+ "errors-1440": [],
+ "attack-lab-1920": {
+  "docHeight": 1780,
+  "gaps": []
+ },
+ "mission-control-1920": {
+  "docHeight": 2597,
+  "gaps": []
+ },
+ "scenario-lab-1920": {
+  "docHeight": 5046,
+  "gaps": []
+ },
+ "errors-1920": []
+}

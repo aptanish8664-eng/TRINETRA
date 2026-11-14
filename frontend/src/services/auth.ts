@@ -121,22 +121,42 @@ export interface GeographicZone {
 
 export type GeographicMissionObjective =
   | 'area_survey'
+  | 'search_rescue'
   | 'perimeter_monitoring'
   | 'inspection'
+  | 'disaster_assessment'
+  | 'agricultural_survey'
+  | 'mapping_survey'
+  | 'target_tracking'
+  | 'environmental_monitoring'
+  | 'custom_mission'
   | 'search_observation'
   | 'communication_relay'
 
-export type GeographicUavRole = GeographicMissionObjective
+export type GeographicUavRole = string
 
 export interface GeographicUavAssignment {
   uav_id: string
   role: GeographicUavRole
+  individual_objective?: string
   task: string
   zone_id: string | null
   zone_ids?: string[]
   start_location?: GeographicPoint | null
   destination?: GeographicPoint | null
   waypoints?: GeographicPoint[]
+  constraints?: string[]
+  flight_altitude_m?: number | null
+  speed_limit_m_s?: number | null
+  destination_action?: string
+  action_duration_seconds?: number | null
+  data_requirements?: string
+  completion_condition?: string
+  expected_result?: string
+  return_destination?: GeographicPoint | null
+  return_waypoints?: GeographicPoint[]
+  return_completion_condition?: string
+  confirmed?: boolean
 }
 
 export interface GeographicMissionIntent {
@@ -147,6 +167,22 @@ export interface GeographicMissionIntent {
   uav_assignments: GeographicUavAssignment[]
   constraints: string[]
   ai_recommendations: string[]
+  objectives?: GeographicMissionObjective[]
+  fleet_size?: number | null
+  required_uav_count?: number | null
+  activated_uav_ids?: string[]
+  mission_description?: string
+  mission_area_description?: string
+  mission_duration_minutes?: number | null
+  workflow_stage?: 'general' | 'aircraft' | 'faults' | 'review'
+  current_uav_step?: 'role' | 'task' | 'start' | 'destination' | 'geography' | 'constraints' | 'review'
+  current_uav_index?: number
+  selected_uav_ids?: string[]
+}
+
+export interface PlannerConversationMessage {
+  role: 'user' | 'assistant'
+  content: string
 }
 
 export type ScenarioFaultType =
@@ -162,12 +198,17 @@ export type ScenarioFaultType =
 
 export interface ScenarioIntent {
   mission_objectives: string[]
+  mission_description?: string
   proposed_tasks: { description: string; task_reference: string | null; assigned_uav_id: string | null; priority: number }[]
   uav_role_suggestions: { role: 'general' | 'search' | 'monitor' | 'relay' | 'reserve'; count: number; rationale: string }[]
   operating_area_notes: string
   environment_notes: string
   constraints: string[]
+  /** Legacy (schema 1) mission; read-only. New scenarios use `mission_plan` with schema_version 2. */
   geographic_mission: GeographicMissionIntent | null
+  schema_version?: number
+  mission_plan?: import('../components/missionPlan').MissionPlan | null
+  planner_conversation?: PlannerConversationMessage[]
   uav_fault_assignments: {
     uav_id: string
     fault_type: ScenarioFaultType
@@ -207,6 +248,29 @@ export interface ScenarioDetail {
   created_at: string
   updated_at: string
   versions: ScenarioVersion[]
+}
+
+export interface MissionDeployment {
+  id: string
+  mission_id: string
+  scenario_id: string
+  scenario_version_id: string
+  scenario_version_hash: string
+  scenario_title: string
+  execution_status: string
+  requested_uav_count: number
+  activated_uav_count: number
+  assigned_uav_count: number
+  approval: ScenarioApprovalRequest | null
+  validation: { passed: boolean; validated_at: string }
+  intent: ScenarioIntent
+  /** Added by the backend on read: version number, schema, whether a newer version exists, and the mission start. */
+  scenario_version_number?: number | null
+  latest_version_number?: number | null
+  schema_version?: number
+  legacy?: boolean
+  superseded?: boolean
+  mission_start?: { latitude: number; longitude: number; altitude_m: number; uav_id: string; role: string | null; definition: string } | null
 }
 
 export interface ScenarioApprovalRequest {

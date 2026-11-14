@@ -1,0 +1,58 @@
+{
+ "attack-lab-1440": {
+  "docHeight": 1809,
+  "gaps": []
+ },
+ "mission-control-1440": {
+  "docHeight": 2538,
+  "gaps": [
+   {
+    "selector": ".panel",
+    "cls": "panel mc-panel",
+    "h": 881,
+    "w": 655,
+    "emptyBelow": 668
+   },
+   {
+    "selector": ".mc-panel",
+    "cls": "panel mc-panel",
+    "h": 881,
+    "w": 655,
+    "emptyBelow": 668
+   }
+  ]
+ },
+ "scenario-lab-1440": {
+  "docHeight": 4894,
+  "gaps": []
+ },
+ "errors-1440": [],
+ "attack-lab-1920": {
+  "docHeight": 1808,
+  "gaps": []
+ },
+ "mission-control-1920": {
+  "docHeight": 2631,
+  "gaps": [
+   {
+    "selector": ".panel",
+    "cls": "panel mc-panel",
+    "h": 866,
+    "w": 683,
+    "emptyBelow": 653
+   },
+   {
+    "selector": ".mc-panel",
+    "cls": "panel mc-panel",
+    "h": 866,
+    "w": 683,
+    "emptyBelow": 653
+   }
+  ]
+ },
+ "scenario-lab-1920": {
+  "docHeight": 5067,
+  "gaps": []
+ },
+ "errors-1920": []
+}

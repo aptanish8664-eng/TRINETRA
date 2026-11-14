@@ -1,0 +1,28 @@
+.sim-location{display:grid;gap:8px;min-width:0}
+.sim-location-line{display:flex;align-items:center;gap:7px;margin:0;color:var(--muted);font:10px/1.5 var(--mono)}
+.sim-location-line.ok svg{color:var(--green,#56e3b1)}
+.sim-location-notice{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:10px 12px;align-items:start;padding:11px 12px;border:1px solid var(--amber);border-radius:4px;background:rgba(245,185,76,.08);color:var(--text)}
+.sim-location-notice>svg{margin-top:2px;color:var(--amber)}
+.sim-location-notice>div{display:grid;gap:4px;min-width:0}
+.sim-location-notice b{color:var(--amber);font:10px var(--mono);letter-spacing:.06em}
+.sim-location-notice span{font-size:12px;line-height:1.5}
+.sim-location-notice small{color:var(--muted);font:10px/1.5 var(--mono)}
+.sim-location-notice button{white-space:nowrap}
+.sim-location-confirm,.sim-location-result,.sim-location-failure{display:grid;gap:7px;padding:11px 12px;border:1px solid var(--border);border-radius:4px;background:var(--bg2)}
+.sim-location-confirm{border-color:var(--cyan)}
+.sim-location-confirm p{margin:0;font-size:12px;line-height:1.6;max-width:92ch}
+.sim-location-actions{display:flex;flex-wrap:wrap;gap:8px}
+.sim-location-result{border-color:var(--green,#56e3b1)}
+.sim-location-failure{border-color:var(--red,#ff4d5a)}
+.sim-location-result b,.sim-location-failure b{display:flex;align-items:center;gap:6px;font-size:12px}
+.sim-location-result span,.sim-location-failure span{font-size:12px;line-height:1.5}
+.sim-location-failure small,.sim-location-confirm small{color:var(--muted);font:10px var(--mono)}
+.sim-location-recovery{color:var(--amber)}
+.sim-location-checks{display:grid;gap:4px;margin:0;padding:0;list-style:none}
+.sim-location-checks li{display:grid;grid-template-columns:minmax(120px,190px) 70px minmax(0,1fr);gap:8px;align-items:baseline;font-size:11px}
+.sim-location-checks li b{font:10px var(--mono);letter-spacing:.03em}
+.sim-location-checks li span{font:10px var(--mono);text-transform:uppercase}
+.sim-location-checks li.ok span{color:var(--green,#56e3b1)}
+.sim-location-checks li.bad span{color:var(--amber)}
+.sim-location-checks li small{color:var(--muted);font:10px/1.5 var(--mono)}
+@media(max-width:760px){.sim-location-notice{grid-template-columns:auto minmax(0,1fr)}.sim-location-notice button{grid-column:1/-1}.sim-location-checks li{grid-template-columns:1fr}}

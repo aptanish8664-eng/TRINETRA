@@ -1,0 +1,36 @@
+.threat-panel{padding-bottom:14px;min-width:0}
+.threat-controls{display:flex;flex-wrap:wrap;gap:10px 14px;align-items:end;padding:0 14px 10px}
+.threat-controls label{display:grid;gap:4px;color:var(--muted);font:9px var(--mono)}.threat-controls select{min-height:32px;background:var(--bg2);color:var(--text);border:1px solid var(--border);padding:0 8px}
+.threat-clock{color:var(--ice);font:10px var(--mono)}
+.threat-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px;padding:0 14px}
+.threat-card{display:grid;gap:8px;padding:12px;border:1px solid var(--border);border-left-width:4px;border-radius:4px;background:var(--bg2);min-width:0;font-size:12px}
+.threat-card.tier-low{border-left-color:var(--green)}.threat-card.tier-medium{border-left-color:var(--amber)}.threat-card.tier-high{border-left-color:#ff9d5c}.threat-card.tier-critical{border-left-color:var(--red)}
+.threat-card.highlight{box-shadow:0 0 0 1px rgba(255,157,92,.5)}
+.threat-card header{display:flex;align-items:center;gap:8px}.threat-card header b{flex:1}.threat-card header small{color:var(--muted);font:9px var(--mono)}
+.threat-tier{padding:2px 9px;border:1px solid var(--border);border-radius:10px;font:10px var(--mono);letter-spacing:.08em}.threat-tier.muted{color:var(--muted)}
+.threat-gauge-row{display:grid;grid-template-columns:minmax(0,1fr) auto 90px;gap:10px;align-items:center}
+.threat-gauge{height:10px;border-radius:5px;background:var(--bg);border:1px solid var(--border);overflow:hidden}.threat-gauge i{display:block;height:100%}
+.threat-gauge-row strong{font-size:20px}.threat-spark{width:90px;height:28px}
+.threat-labels{margin:0;color:var(--muted);font:9px var(--mono)}
+.threat-values{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin:0}.threat-values div{padding:6px;border:1px solid var(--border);border-radius:3px}.threat-values dt{font:9px var(--mono);color:var(--muted)}.threat-values dd{margin:2px 0 0;font-size:13px}
+.threat-evidence{margin:0;padding-left:16px;display:grid;gap:4px}.threat-calm{margin:0;color:var(--green)}
+.threat-recommend{margin:0}.threat-recommend small{color:var(--muted)}
+.threat-options{display:flex;flex-wrap:wrap;gap:6px}
+.threat-options button{min-height:28px;padding:0 9px;border:1px solid var(--border);border-radius:3px;background:var(--bg);color:var(--ice);font:10px var(--mono);cursor:pointer}
+.threat-options button.selected{border-color:var(--cyan);background:rgba(85,217,255,.12)}.threat-options button:disabled{opacity:.45;cursor:not-allowed}
+.threat-confirm{display:grid;gap:7px;padding:10px;border:1px solid var(--cyan);border-radius:4px;background:rgba(85,217,255,.06)}.threat-confirm p{margin:0}
+.threat-confirm fieldset{display:grid;gap:5px;border:1px solid var(--border);padding:8px}.threat-confirm label.ineligible{opacity:.6}
+.threat-confirm-actions{display:flex;gap:8px;flex-wrap:wrap}
+.threat-empty{margin:0;color:var(--muted)}.threat-error{margin:0;color:var(--red)}.threat-recorded{margin:0;color:var(--green)}
+.threat-history{margin:0;padding-left:16px;display:grid;gap:3px;color:var(--muted);font-size:11px}.threat-card footer{color:var(--muted);font:9px var(--mono)}
+.threat-strips{display:grid;gap:5px;padding:10px 14px 0}.threat-strip{display:grid;grid-template-columns:70px minmax(0,1fr);gap:8px;align-items:center;font-size:11px}
+.threat-strip span{display:flex;gap:1px;height:12px}.threat-strip i{flex:1;max-width:8px}
+.threat-evaluation{margin:12px 14px 0;padding:12px;border:1px solid var(--border);border-radius:4px;background:var(--bg2)}.threat-evaluation h4{margin:0 0 6px}
+.threat-banner{display:flex;align-items:center;gap:12px;margin:0 14px 10px;padding:10px 12px;border:1px solid var(--red);background:rgba(255,77,90,.12);border-radius:4px}.threat-banner button{margin-left:auto}
+
+/* Two-part threat card: score/evidence on the left, recommendation and options on the right. */
+.threat-body{display:grid;grid-template-columns:minmax(0,1fr);gap:10px 16px;align-items:start}
+.threat-part{display:grid;gap:8px;min-width:0;align-content:start}
+.threat-monitor .threat-cards{grid-template-columns:minmax(0,1fr)}
+@container (min-width: 640px){.threat-body{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}}
+.threat-monitor .threat-card{container-type:inline-size;min-height:200px}

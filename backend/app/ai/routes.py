@@ -39,8 +39,11 @@ from ..security import AuthContext, get_auth_context
 from ..simulation.engine import SimulationConfig
 from ..telemetry.planning import current_planning_aircraft
 from .provider import (
+    AIProviderConfigurationError,
     AIProviderFailure,
     AIProviderMalformedResponse,
+    AIProviderQuotaExceeded,
+    AIProviderRateLimited,
     AIProviderUnavailable,
     MissionAIProvider,
     ProviderResult,
@@ -60,6 +63,16 @@ from .schemas import (
     MissionRejectionRequest,
     MissionProposalResponse,
     OperatorSimulationConfig,
+    ScenarioAssistantContent,
+    ScenarioAssistantRequest,
+    ScenarioAssistantResponse,
+)
+from .scenario_assistant import (
+    SAFE_REFUSAL,
+    clean_request,
+    message_has_coordinates,
+    safe_reply,
+    sanitize_actions,
 )
 from .service import (
     ProposalValidationError,
@@ -72,6 +85,32 @@ from .service import (
 
 
 router = APIRouter()
+
+
+def _provider_error(exc: Exception) -> tuple[int, str, str]:
+    if isinstance(exc, AIProviderUnavailable):
+        return 503, "OpenAI is not configured. Add the backend API key or continue with manual planning.", "openai_key_not_configured"
+    if isinstance(exc, AIProviderQuotaExceeded):
+        return (
+            402,
+            "The OpenAI project has insufficient API credits or billing is not enabled. Check its billing and usage limits.",
+            "provider_insufficient_quota",
+        )
+    if isinstance(exc, AIProviderRateLimited):
+        return 429, "The OpenAI rate limit was reached. Wait before retrying.", "provider_rate_limited"
+    if isinstance(exc, AIProviderConfigurationError):
+        return (
+            503,
+            "OpenAI rejected the configured API key or project permissions. Check the backend configuration.",
+            "provider_authentication_failed",
+        )
+    if isinstance(exc, asyncio.TimeoutError):
+        return 503, "The OpenAI request timed out. Try again or continue with manual planning.", "provider_timeout"
+    if isinstance(exc, AIProviderMalformedResponse):
+        return 502, "The AI response could not be validated. Review the request or continue with manual planning.", "invalid_provider_response"
+    if isinstance(exc, AIProviderFailure):
+        return 503, "The OpenAI service is unavailable. Try again or continue with manual planning.", "provider_unavailable"
+    return 502, "The AI response failed validation. Continue with manual planning.", "invalid_provider_response"
 
 
 def _conversation_context(config: OperatorSimulationConfig) -> dict[str, Any]:
@@ -161,13 +200,14 @@ async def _process_conversation_turn(
         raise
     except (asyncio.TimeoutError, AIProviderUnavailable, AIProviderFailure, AIProviderMalformedResponse, ProposalValidationError, ValueError) as exc:
         finish_ai_usage(usage_id, 0, False)
-        reason = "provider_timeout" if isinstance(exc, asyncio.TimeoutError) else "invalid_or_unavailable_provider_response"
+        status, message, reason = _provider_error(exc)
+        if isinstance(exc, (ProposalValidationError, ValueError)):
+            status, message, reason = 502, "AI conversation failed validation. Continue with manual planning.", "invalid_provider_response"
         _record_ai_event(request, context, "ai_mission_conversation", "failed", reason, {
             "model": OPENAI_MODEL, "input_chars": prior_chars + len(clean_message),
             "duration_ms": int((time.monotonic() - started) * 1000),
         }, target_type="ai_conversation")
-        status = 503 if isinstance(exc, (asyncio.TimeoutError, AIProviderUnavailable, AIProviderFailure)) else 502
-        raise HTTPException(status_code=status, detail="AI conversation failed safely. Retry or continue with manual planning.") from exc
+        raise HTTPException(status_code=status, detail=message) from exc
 
 
 def _record_ai_event(request: Request, context: AuthContext, action: str, outcome: str,
@@ -306,14 +346,14 @@ async def create_ai_proposal(
         )
     except (asyncio.TimeoutError, AIProviderUnavailable, AIProviderFailure, AIProviderMalformedResponse, ProposalValidationError, ValueError) as exc:
         finish_ai_usage(usage_id, 0, False)
-        reason = "provider_timeout" if isinstance(exc, asyncio.TimeoutError) else "invalid_or_unavailable_provider_response"
+        status, message, reason = _provider_error(exc)
+        if isinstance(exc, (ProposalValidationError, ValueError)):
+            status, message, reason = 502, "AI proposal failed deterministic validation. Review the request or continue with manual planning.", "invalid_provider_response"
         _record_ai_event(request, context, "ai_mission_proposal", "failed", reason, {
             "provider": "openai", "model": OPENAI_MODEL,
             "input_chars": len(redacted_description),
             "duration_ms": int((time.monotonic() - started) * 1000),
         })
-        status = 503 if isinstance(exc, (asyncio.TimeoutError, AIProviderUnavailable, AIProviderFailure)) else 502
-        message = "AI service is unavailable. Manual planning remains available." if status == 503 else "AI proposal failed deterministic validation. Review the request or continue with manual planning."
         raise HTTPException(status_code=status, detail=message) from exc
 
 
@@ -326,9 +366,10 @@ async def create_geographic_mission_plan(
     provider: MissionAIProvider = Depends(get_ai_provider),
 ) -> GeographicMissionProposalContent:
     aircraft = current_planning_aircraft()
-    if aircraft is None:
+    if aircraft is None and not payload.objective_suggestions_only:
         raise HTTPException(status_code=503, detail="PX4 telemetry is unavailable. Continue with manual planning.")
-    if not aircraft:
+    aircraft = aircraft or []
+    if not aircraft and not payload.objective_suggestions_only:
         raise HTTPException(status_code=409, detail="No connected PX4 aircraft with valid position telemetry are available.")
     if not provider.available:
         _record_ai_event(
@@ -350,10 +391,17 @@ async def create_geographic_mission_plan(
         raise HTTPException(status_code=422, detail="Describe the mission without including geographic coordinates.")
 
     available_ids = {item["id"] for item in aircraft}
+    if payload.aircraft_id is not None and payload.aircraft_id not in available_ids:
+        raise HTTPException(status_code=409, detail="The selected PX4 aircraft is not currently connected with a valid position.")
+    if payload.objective_suggestions_only and payload.aircraft_id is not None:
+        raise HTTPException(status_code=422, detail="Objective suggestions cannot be scoped to an aircraft.")
+    suggested_ids = {payload.aircraft_id} if payload.aircraft_id is not None else available_ids
     mission_context = {
         "objective": payload.objective,
         "zones": [zone.model_dump(mode="json") for zone in payload.zones],
-        "available_aircraft_ids": sorted(available_ids),
+        "available_aircraft_ids": sorted(suggested_ids),
+        "current_aircraft_id": payload.aircraft_id,
+        "objective_suggestions_only": payload.objective_suggestions_only,
         "coordinate_reference": "WGS84; exact coordinate values are omitted",
         "route_validation": "not_supported",
     }
@@ -366,16 +414,26 @@ async def create_geographic_mission_plan(
         )
         if not isinstance(result, ProviderResult) or not isinstance(result.parsed, GeographicMissionProposalContent):
             raise AIProviderMalformedResponse("geographic provider result type invalid")
-        suggested_ids = [item.uav_id for item in result.parsed.assignments]
-        if len(set(suggested_ids)) != len(suggested_ids):
+        assignment_ids = [item.uav_id for item in result.parsed.assignments]
+        if len(set(assignment_ids)) != len(assignment_ids):
             raise AIProviderMalformedResponse("duplicate aircraft assignment")
+        if payload.objective_suggestions_only and result.parsed.assignments:
+            raise AIProviderMalformedResponse("objective suggestion response included aircraft assignments")
+        if payload.objective_suggestions_only and not result.parsed.objective_suggestions:
+            raise AIProviderMalformedResponse("objective suggestion response was empty")
+        objective_ids = [item.objective for item in result.parsed.objective_suggestions]
+        if len(set(objective_ids)) != len(objective_ids):
+            raise AIProviderMalformedResponse("duplicate objective suggestion")
         if any(item.uav_id not in available_ids for item in result.parsed.assignments):
+            raise AIProviderMalformedResponse("unknown aircraft assignment")
+        if any(payload.aircraft_id is not None and item.uav_id != payload.aircraft_id for item in result.parsed.assignments):
             raise AIProviderMalformedResponse("unknown aircraft assignment")
         if any(item.zone_id is not None and item.zone_id not in zone_ids for item in result.parsed.assignments):
             raise AIProviderMalformedResponse("unknown survey zone")
         generated_text = [result.parsed.summary]
         generated_text += result.parsed.missing_information + result.parsed.constraints + result.parsed.warnings
         generated_text += [item.task for item in result.parsed.assignments]
+        generated_text += [item.rationale for item in result.parsed.objective_suggestions]
         if any(redact_operator_text(value)[1] for value in generated_text):
             raise AIProviderMalformedResponse("geographic coordinates in advisory text")
         finish_ai_usage(usage_id, result.output_tokens, True)
@@ -384,7 +442,7 @@ async def create_geographic_mission_plan(
             "input_chars": len(description), "input_tokens": result.input_tokens,
             "output_tokens": result.output_tokens,
             "duration_ms": int((time.monotonic() - started) * 1000),
-            "assignment_count": len(suggested_ids),
+            "assignment_count": len(assignment_ids),
         }, target_type="geographic_mission_plan")
         return result.parsed
     except HTTPException:
@@ -392,14 +450,14 @@ async def create_geographic_mission_plan(
         raise
     except (asyncio.TimeoutError, AIProviderUnavailable, AIProviderFailure, AIProviderMalformedResponse, ValueError) as exc:
         finish_ai_usage(usage_id, 0, False)
-        reason = "provider_timeout" if isinstance(exc, asyncio.TimeoutError) else "invalid_or_unavailable_provider_response"
+        status, message, reason = _provider_error(exc)
+        if isinstance(exc, ValueError) and not isinstance(exc, AIProviderMalformedResponse):
+            status, message, reason = 502, "AI suggestions failed validation. Review the mission manually.", "invalid_provider_response"
         _record_ai_event(request, context, "ai_geographic_mission_plan", "failed", reason, {
             "provider": "openai", "model": OPENAI_MODEL,
             "input_chars": len(description),
             "duration_ms": int((time.monotonic() - started) * 1000),
         }, target_type="geographic_mission_plan")
-        status = 503 if isinstance(exc, (asyncio.TimeoutError, AIProviderUnavailable, AIProviderFailure)) else 502
-        message = "AI service is unavailable. Manual planning remains available." if status == 503 else "AI suggestions failed validation. Review the mission manually."
         raise HTTPException(status_code=status, detail=message) from exc
 
 
@@ -738,11 +796,67 @@ async def assess_mission(
         )
     except (asyncio.TimeoutError, AIProviderUnavailable, AIProviderFailure, AIProviderMalformedResponse, ProposalValidationError) as exc:
         finish_ai_usage(usage_id, 0, False)
-        reason = "provider_timeout" if isinstance(exc, asyncio.TimeoutError) else "invalid_or_unavailable_provider_response"
+        status, message, reason = _provider_error(exc)
+        if isinstance(exc, ProposalValidationError):
+            status, message, reason = 502, "AI assessment failed evidence validation. Use deterministic telemetry and event views.", "invalid_provider_response"
         _record_ai_event(request, context, "ai_mission_assessment", "failed", reason, {
             "model": OPENAI_MODEL, "run_id": run_id,
             "duration_ms": int((time.monotonic() - started) * 1000),
         }, run_id, "run")
-        status = 503 if isinstance(exc, (asyncio.TimeoutError, AIProviderUnavailable, AIProviderFailure)) else 502
-        message = "AI service is unavailable. Use the deterministic telemetry and event views." if status == 503 else "AI assessment failed evidence validation. Use the deterministic telemetry and event views."
         raise HTTPException(status_code=status, detail=message) from exc
+
+
+def _assistant_error(status: int, code: str, message: str) -> HTTPException:
+    return HTTPException(status_code=status, detail={"code": code, "message": message})
+
+
+@router.post("/api/ai/scenario-assistant", response_model=ScenarioAssistantResponse)
+async def scenario_assistant(
+    payload: ScenarioAssistantRequest,
+    request: Request,
+    context: AuthContext = Depends(require_permission(Permission.AI_PROPOSE)),
+    _csrf: AuthContext = Depends(require_csrf),
+    provider: MissionAIProvider = Depends(get_ai_provider),
+) -> ScenarioAssistantResponse:
+    """Free-form Scenario Lab help. Returns a reply and allowlisted *proposed* actions; it never changes anything."""
+    if not provider.available:
+        _record_ai_event(request, context, "ai_scenario_assistant", "unavailable", "openai_key_not_configured",
+                         {"model": OPENAI_MODEL}, target_type="scenario_assistant")
+        raise _assistant_error(503, "openai_key_not_configured",
+                               "AI is unavailable: the backend OpenAI API key is not configured.")
+    if message_has_coordinates(payload):
+        raise _assistant_error(422, "coordinates_not_accepted",
+                               "Coordinates are selected on the map and are never sent to AI. Rephrase without coordinates.")
+    provider_payload, input_chars = clean_request(payload)
+    if input_chars > AI_MAX_INPUT_CHARS:
+        raise _assistant_error(413, "input_too_large", "The form and conversation are too large for the assistant.")
+    usage_id = _reserve_usage(context, "scenario_assistant", input_chars)
+    started = time.monotonic()
+    try:
+        result = await asyncio.wait_for(provider.scenario_assistant(provider_payload), timeout=AI_TIMEOUT_SECONDS + 1)
+        if not isinstance(result, ProviderResult) or not isinstance(result.parsed, ScenarioAssistantContent):
+            raise AIProviderMalformedResponse("scenario assistant result type invalid")
+        known = {item.index for item in payload.snapshot.aircraft}
+        actions, dropped = sanitize_actions(result.parsed.actions, len(known), known)
+        reply = safe_reply(result.parsed.reply)
+        if reply is None:
+            reply, actions = SAFE_REFUSAL, []
+            dropped = len(result.parsed.actions)
+        elif dropped:
+            reply = f"{reply} (I ignored {dropped} proposed change(s) that were not valid.)"
+        finish_ai_usage(usage_id, result.output_tokens, True)
+        _record_ai_event(request, context, "ai_scenario_assistant", "success", "assistant_reply_returned", {
+            "provider": "openai", "model": OPENAI_MODEL, "response_id": result.response_id,
+            "input_chars": input_chars, "input_tokens": result.input_tokens, "output_tokens": result.output_tokens,
+            "duration_ms": int((time.monotonic() - started) * 1000),
+            "proposed_actions": len(actions), "dropped_actions": dropped,
+        }, target_type="scenario_assistant")
+        return ScenarioAssistantResponse(reply=reply, actions=actions, dropped_actions=dropped)
+    except (asyncio.TimeoutError, AIProviderUnavailable, AIProviderFailure, AIProviderMalformedResponse, ValueError) as exc:
+        finish_ai_usage(usage_id, 0, False)
+        status, message, reason = _provider_error(exc)
+        _record_ai_event(request, context, "ai_scenario_assistant", "failed", reason, {
+            "provider": "openai", "model": OPENAI_MODEL, "input_chars": input_chars,
+            "duration_ms": int((time.monotonic() - started) * 1000),
+        }, target_type="scenario_assistant")
+        raise _assistant_error(status, reason, message) from exc

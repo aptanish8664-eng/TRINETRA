@@ -111,6 +111,36 @@ def rotate_body_to_world(quaternion: ArrayLike, vector: ArrayLike) -> np.ndarray
     return rotated[1:]
 
 
+def geodetic_to_enu(
+    latitude_deg: float, longitude_deg: float, altitude_m: float,
+    *, origin_latitude_deg: float, origin_longitude_deg: float, origin_altitude_m: float,
+) -> np.ndarray:
+    """Convert WGS84 geodetic coordinates to local tangent ENU metres (ECEF based)."""
+    values = (latitude_deg, longitude_deg, altitude_m, origin_latitude_deg,
+              origin_longitude_deg, origin_altitude_m)
+    if not all(math.isfinite(value) for value in values):
+        raise ValueError("geodetic coordinates must be finite")
+    if not (-90 <= latitude_deg <= 90 and -90 <= origin_latitude_deg <= 90):
+        raise ValueError("latitude must be in [-90, 90]")
+    if not (-180 <= longitude_deg <= 180 and -180 <= origin_longitude_deg <= 180):
+        raise ValueError("longitude must be in [-180, 180]")
+    a, f = 6378137.0, 1 / 298.257223563
+    e2 = f * (2 - f)
+    def ecef(lat_deg: float, lon_deg: float, alt: float) -> np.ndarray:
+        lat, lon = math.radians(lat_deg), math.radians(lon_deg)
+        n = a / math.sqrt(1 - e2 * math.sin(lat) ** 2)
+        return np.asarray(((n + alt) * math.cos(lat) * math.cos(lon),
+                           (n + alt) * math.cos(lat) * math.sin(lon),
+                           (n * (1 - e2) + alt) * math.sin(lat)))
+    origin = ecef(origin_latitude_deg, origin_longitude_deg, origin_altitude_m)
+    delta = ecef(latitude_deg, longitude_deg, altitude_m) - origin
+    lat0, lon0 = math.radians(origin_latitude_deg), math.radians(origin_longitude_deg)
+    rotation = np.asarray(((-math.sin(lon0), math.cos(lon0), 0),
+                           (-math.sin(lat0) * math.cos(lon0), -math.sin(lat0) * math.sin(lon0), math.cos(lat0)),
+                           (math.cos(lat0) * math.cos(lon0), math.cos(lat0) * math.sin(lon0), math.sin(lat0))))
+    return rotation @ delta
+
+
 def _slerp(start: np.ndarray, end: np.ndarray, amount: float) -> np.ndarray:
     target = end.copy()
     dot = float(np.dot(start, target))
@@ -502,3 +532,79 @@ class SimulationSensorFusion:
             attitude=attitude,
             navigation=None if self.navigation is None else self.navigation.view(),
         )
+
+
+class DelayedGpsReplayFusion:
+    """Navigation EKF with deterministic bounded-lag replay for GPS delivery delay.
+
+    World-frame ENU acceleration and GPS fixes are accepted separately. GPS source
+    epochs must match an IMU epoch; late delivery is accepted within ``lag_s`` and
+    the state is replayed. This is an offline/research primitive, not PX4 runtime.
+    """
+
+    def __init__(self, *, lag_s: float = 3.0, max_samples: int = 4096):
+        if not math.isfinite(lag_s) or lag_s <= 0 or max_samples < 2:
+            raise ValueError("lag_s and max_samples must be positive")
+        self.lag_s, self.max_samples = lag_s, max_samples
+        self._imu: list[tuple[float, np.ndarray]] = []
+        self._gps: dict[float, tuple[np.ndarray, float]] = {}
+        self._last_result: NavigationEstimate | None = None
+        self.last_gps_rejection_reason: str | None = None
+
+    def add_imu(self, timestamp_s: float, acceleration_world_m_s2: ArrayLike | None) -> NavigationEstimate | None:
+        acceleration = _vector(acceleration_world_m_s2, 3, "acceleration_world_m_s2")
+        if not math.isfinite(timestamp_s):
+            raise ValueError("IMU timestamp must be finite")
+        if self._imu and timestamp_s <= self._imu[-1][0]:
+            raise ValueError("IMU timestamps must increase")
+        if len(self._imu) >= self.max_samples:
+            raise ValueError("replay buffer sample limit reached; start a new segment")
+        self._imu.append((float(timestamp_s), np.zeros(3) if acceleration is None else acceleration))
+        self._last_result = self._replay()
+        return self._last_result
+
+    def add_gps(self, source_timestamp_s: float, position_enu_m: ArrayLike, *,
+                arrival_timestamp_s: float, sigma_m: float = 0.8) -> NavigationEstimate | None:
+        position = _vector(position_enu_m, 3, "GPS position")
+        if position is None or not all(math.isfinite(v) for v in (source_timestamp_s, arrival_timestamp_s, sigma_m)) or sigma_m <= 0:
+            raise ValueError("GPS timestamps, position, and sigma must be finite; sigma must be positive")
+        if not self._imu:
+            self.last_gps_rejection_reason = "imu_history_unavailable"
+            return None
+        now = self._imu[-1][0]
+        if source_timestamp_s > now or arrival_timestamp_s < source_timestamp_s:
+            self.last_gps_rejection_reason = "future_or_invalid_arrival"
+            return self._last_result
+        if now - source_timestamp_s > self.lag_s:
+            self.last_gps_rejection_reason = "outside_replay_window"
+            return self._last_result
+        matched_time = next((timestamp for timestamp, _ in self._imu
+                             if abs(timestamp - source_timestamp_s) <= 1e-9), None)
+        if matched_time is None:
+            self.last_gps_rejection_reason = "source_epoch_not_in_imu_history"
+            return self._last_result
+        if matched_time in self._gps:
+            self.last_gps_rejection_reason = "duplicate_gps_epoch"
+            return self._last_result
+        self._gps[matched_time] = (position, float(sigma_m))
+        self.last_gps_rejection_reason = None
+        self._last_result = self._replay()
+        return self._last_result
+
+    def _replay(self) -> NavigationEstimate | None:
+        if not self._gps:
+            return None
+        first_gps_time = min(self._gps)
+        first_index = next((i for i, (time, _) in enumerate(self._imu) if time == first_gps_time), None)
+        if first_index is None:
+            return None
+        ekf = PositionVelocityBiasEkf(self._gps[first_gps_time][0], initial_time_s=first_gps_time)
+        ekf.last_gps_used = True
+        ekf.last_innovation_m = [0.0, 0.0, 0.0]
+        ekf.last_mahalanobis_squared = 0.0
+        for timestamp, acceleration in self._imu[first_index + 1:]:
+            ekf.predict(timestamp, acceleration)
+            gps = self._gps.get(timestamp)
+            if gps is not None:
+                ekf.update_gps(timestamp, timestamp, gps[0], sigma_m=gps[1])
+        return ekf.view()

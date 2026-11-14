@@ -56,3 +56,7 @@ backend/__pycache__/
 
 # Local PostgreSQL migration test cluster
 backend/pg-migration-test-data/
+backend/research_artifacts/*
+!backend/research_artifacts/.gitkeep
+!backend/research_artifacts/model_card.md
+!backend/research_artifacts/metrics.json

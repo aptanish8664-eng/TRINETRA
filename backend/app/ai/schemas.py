@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Literal, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -85,9 +85,24 @@ class GeographicZoneLabel(StructuredOutput):
 
 
 class GeographicMissionPlanningRequest(StructuredOutput):
-    objective: Literal["area_survey", "perimeter_monitoring", "inspection", "search_observation", "communication_relay"]
+    objective: Literal[
+        "area_survey", "search_rescue", "perimeter_monitoring", "inspection", "disaster_assessment",
+        "agricultural_survey", "mapping_survey", "target_tracking", "environmental_monitoring",
+        "custom_mission", "search_observation", "communication_relay",
+    ]
     description: str = Field(min_length=1, max_length=2000)
     zones: list[GeographicZoneLabel] = Field(max_length=20)
+    aircraft_id: Optional[str] = Field(default=None, min_length=5, max_length=16, pattern=r"^px4-[1-9][0-9]{0,2}$")
+    objective_suggestions_only: bool = False
+
+
+class GeographicObjectiveSuggestion(StructuredOutput):
+    objective: Literal[
+        "area_survey", "search_rescue", "perimeter_monitoring", "inspection", "disaster_assessment",
+        "agricultural_survey", "mapping_survey", "target_tracking", "environmental_monitoring",
+        "custom_mission",
+    ]
+    rationale: str = Field(min_length=1, max_length=240)
 
 
 class GeographicAssignmentSuggestion(StructuredOutput):
@@ -99,6 +114,7 @@ class GeographicAssignmentSuggestion(StructuredOutput):
 
 class GeographicMissionProposalContent(StructuredOutput):
     summary: str = Field(min_length=1, max_length=500)
+    objective_suggestions: list[GeographicObjectiveSuggestion] = Field(default_factory=list, max_length=5)
     assignments: list[GeographicAssignmentSuggestion] = Field(max_length=20)
     missing_information: list[str] = Field(max_length=12)
     constraints: list[str] = Field(max_length=12)
@@ -157,3 +173,66 @@ class MissionAssessmentResponse(StructuredOutput):
     simulation_status: str
     validated_evidence: dict
     assessment: MissionAssessmentContent
+
+
+class ScenarioAssistantTurn(StructuredOutput):
+    role: Literal["user", "assistant"]
+    content: str = Field(max_length=600)
+
+
+class ScenarioAssistantAircraft(StructuredOutput):
+    index: int = Field(ge=1, le=5)
+    uav_id: str = Field(max_length=16)
+    confirmed: bool
+    role: Optional[str] = Field(default=None, max_length=20)
+    priority: int = Field(default=2, ge=1, le=3)
+    reassignable: bool = True
+    task_type: Optional[str] = Field(default=None, max_length=40)
+    altitude_m: Optional[float] = None
+    speed_mps: Optional[float] = None
+    loiter_duration_s: float = 0.0
+    return_mode: str = Field(default="return_to_start", max_length=30)
+    start_selected: bool = False
+    route_waypoints: int = Field(default=0, ge=0, le=2000)
+    parameters: dict[str, Union[float, str]] = Field(default_factory=dict, max_length=12)
+    missing: list[str] = Field(default_factory=list, max_length=16)
+
+
+class ScenarioAssistantSnapshot(StructuredOutput):
+    """Compact, coordinate-free view of the Scenario Lab form. It is untrusted data, never instructions."""
+    section: Literal["A", "B", "C"]  # A mission, B individual UAV configuration, C review and validation
+    title: str = Field(default="", max_length=120)
+    objectives: list[str] = Field(default_factory=list, max_length=11)
+    description: str = Field(default="", max_length=500)
+    area_kind: Optional[Literal["circle", "polygon"]] = None
+    max_duration_minutes: Optional[int] = None
+    max_distance_from_start_m: Optional[float] = None
+    max_altitude_m: Optional[float] = None
+    required_uav_count: Optional[int] = None
+    activated_uav_count: int = Field(default=0, ge=0, le=20)
+    fleet_verified: bool = False
+    active_uav_index: int = Field(default=1, ge=1, le=5)
+    validation_items: list[str] = Field(default_factory=list, max_length=14)
+    deploy_blockers: list[str] = Field(default_factory=list, max_length=16)
+    aircraft: list[ScenarioAssistantAircraft] = Field(default_factory=list, max_length=5)
+
+
+class ScenarioAssistantRequest(StructuredOutput):
+    draft_id: str = Field(min_length=1, max_length=80, pattern=r"^[A-Za-z0-9_-]+$")
+    message: str = Field(min_length=1, max_length=500)
+    history: list[ScenarioAssistantTurn] = Field(default_factory=list, max_length=12)
+    snapshot: ScenarioAssistantSnapshot
+
+
+class ScenarioAssistantContent(BaseModel):
+    """Provider output. Actions are validated one by one by the backend so a bad one is dropped, not fatal."""
+    model_config = ConfigDict(extra="forbid")
+    reply: str = Field(min_length=1, max_length=1500)
+    actions: list[dict] = Field(max_length=5)
+
+
+class ScenarioAssistantResponse(StructuredOutput):
+    reply: str
+    actions: list[dict]
+    source: Literal["ai"] = "ai"
+    dropped_actions: int = 0

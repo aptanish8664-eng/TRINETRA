@@ -1,0 +1,591 @@
+{
+ "model_id": "e963ff06e6d9",
+ "published_accounting": {
+  "baseline_cusum": {
+   "validation": {
+    "samples": 12760,
+    "attacked_samples": 2683,
+    "precision": 0.3507,
+    "recall": 0.4633,
+    "f1": 0.3992,
+    "roc_auc": 0.612,
+    "false_alarms_per_hour": 7.14,
+    "attacked_flights": 38,
+    "detection_rate": 0.711,
+    "latency_median_s": 2.0,
+    "latency_p90_s": 43.0,
+    "by_attack_type": {
+     "drift": {
+      "flights": 6,
+      "detection_rate": 0.667,
+      "latency_median_s": 19.8
+     },
+     "freeze": {
+      "flights": 2,
+      "detection_rate": 1.0,
+      "latency_median_s": 2.5
+     },
+     "hard": {
+      "flights": 6,
+      "detection_rate": 1.0,
+      "latency_median_s": 1.8
+     },
+     "jump": {
+      "flights": 6,
+      "detection_rate": 1.0,
+      "latency_median_s": 1.0
+     },
+     "noise": {
+      "flights": 6,
+      "detection_rate": 0.667,
+      "latency_median_s": 3.2
+     },
+     "offset": {
+      "flights": 6,
+      "detection_rate": 0.667,
+      "latency_median_s": 2.0
+     },
+     "velocity_inconsistency": {
+      "flights": 6,
+      "detection_rate": 0.167,
+      "latency_median_s": 100.0
+     }
+    },
+    "by_magnitude_tier": {
+     "hard": {
+      "flights": 6,
+      "detection_rate": 1.0,
+      "latency_median_s": 1.8
+     },
+     "high": {
+      "flights": 10,
+      "detection_rate": 0.9,
+      "latency_median_s": 1.0
+     },
+     "low": {
+      "flights": 12,
+      "detection_rate": 0.333,
+      "latency_median_s": 1.5
+     },
+     "mid": {
+      "flights": 10,
+      "detection_rate": 0.8,
+      "latency_median_s": 4.0
+     }
+    }
+   },
+   "test": {
+    "samples": 18314,
+    "attacked_samples": 2516,
+    "precision": 0.3196,
+    "recall": 0.4579,
+    "f1": 0.3765,
+    "roc_auc": 0.6541,
+    "false_alarms_per_hour": 7.75,
+    "attacked_flights": 38,
+    "detection_rate": 0.763,
+    "latency_median_s": 2.0,
+    "latency_p90_s": 47.9,
+    "by_attack_type": {
+     "drift": {
+      "flights": 6,
+      "detection_rate": 0.833,
+      "latency_median_s": 47.5
+     },
+     "freeze": {
+      "flights": 2,
+      "detection_rate": 1.0,
+      "latency_median_s": 3.2
+     },
+     "hard": {
+      "flights": 6,
+      "detection_rate": 1.0,
+      "latency_median_s": 1.5
+     },
+     "jump": {
+      "flights": 6,
+      "detection_rate": 1.0,
+      "latency_median_s": 1.0
+     },
+     "noise": {
+      "flights": 6,
+      "detection_rate": 0.667,
+      "latency_median_s": 1.2
+     },
+     "offset": {
+      "flights": 6,
+      "detection_rate": 1.0,
+      "latency_median_s": 2.2
+     },
+     "velocity_inconsistency": {
+      "flights": 6,
+      "detection_rate": 0.0,
+      "latency_median_s": null
+     }
+    },
+    "by_magnitude_tier": {
+     "hard": {
+      "flights": 6,
+      "detection_rate": 1.0,
+      "latency_median_s": 1.5
+     },
+     "high": {
+      "flights": 10,
+      "detection_rate": 0.8,
+      "latency_median_s": 1.0
+     },
+     "low": {
+      "flights": 12,
+      "detection_rate": 0.583,
+      "latency_median_s": 3.5
+     },
+     "mid": {
+      "flights": 10,
+      "detection_rate": 0.8,
+      "latency_median_s": 2.2
+     }
+    }
+   }
+  },
+  "hist_gradient_boosting": {
+   "validation": {
+    "samples": 12760,
+    "attacked_samples": 2683,
+    "precision": 0.8579,
+    "recall": 0.3444,
+    "f1": 0.4915,
+    "roc_auc": 0.7726,
+    "false_alarms_per_hour": 8.57,
+    "attacked_flights": 38,
+    "detection_rate": 0.579,
+    "latency_median_s": 1.0,
+    "latency_p90_s": 5.0,
+    "by_attack_type": {
+     "drift": {
+      "flights": 6,
+      "detection_rate": 0.333,
+      "latency_median_s": 4.5
+     },
+     "freeze": {
+      "flights": 2,
+      "detection_rate": 1.0,
+      "latency_median_s": 1.0
+     },
+     "hard": {
+      "flights": 6,
+      "detection_rate": 0.333,
+      "latency_median_s": 3.8
+     },
+     "jump": {
+      "flights": 6,
+      "detection_rate": 0.833,
+      "latency_median_s": 1.0
+     },
+     "noise": {
+      "flights": 6,
+      "detection_rate": 0.333,
+      "latency_median_s": 1.8
+     },
+     "offset": {
+      "flights": 6,
+      "detection_rate": 0.667,
+      "latency_median_s": 2.2
+     },
+     "velocity_inconsistency": {
+      "flights": 6,
+      "detection_rate": 0.833,
+      "latency_median_s": 1.0
+     }
+    },
+    "by_magnitude_tier": {
+     "hard": {
+      "flights": 6,
+      "detection_rate": 0.333,
+      "latency_median_s": 3.8
+     },
+     "high": {
+      "flights": 10,
+      "detection_rate": 0.9,
+      "latency_median_s": 1.5
+     },
+     "low": {
+      "flights": 12,
+      "detection_rate": 0.417,
+      "latency_median_s": 1.0
+     },
+     "mid": {
+      "flights": 10,
+      "detection_rate": 0.6,
+      "latency_median_s": 1.0
+     }
+    }
+   },
+   "test": {
+    "samples": 18314,
+    "attacked_samples": 2516,
+    "precision": 0.8477,
+    "recall": 0.3517,
+    "f1": 0.4972,
+    "roc_auc": 0.8287,
+    "false_alarms_per_hour": 4.56,
+    "attacked_flights": 38,
+    "detection_rate": 0.605,
+    "latency_median_s": 1.0,
+    "latency_p90_s": 4.2,
+    "by_attack_type": {
+     "drift": {
+      "flights": 6,
+      "detection_rate": 0.333,
+      "latency_median_s": 5.5
+     },
+     "freeze": {
+      "flights": 2,
+      "detection_rate": 1.0,
+      "latency_median_s": 1.0
+     },
+     "hard": {
+      "flights": 6,
+      "detection_rate": 0.5,
+      "latency_median_s": 1.0
+     },
+     "jump": {
+      "flights": 6,
+      "detection_rate": 0.833,
+      "latency_median_s": 1.0
+     },
+     "noise": {
+      "flights": 6,
+      "detection_rate": 0.333,
+      "latency_median_s": 1.5
+     },
+     "offset": {
+      "flights": 6,
+      "detection_rate": 0.833,
+      "latency_median_s": 2.5
+     },
+     "velocity_inconsistency": {
+      "flights": 6,
+      "detection_rate": 0.667,
+      "latency_median_s": 1.0
+     }
+    },
+    "by_magnitude_tier": {
+     "hard": {
+      "flights": 6,
+      "detection_rate": 0.5,
+      "latency_median_s": 1.0
+     },
+     "high": {
+      "flights": 10,
+      "detection_rate": 1.0,
+      "latency_median_s": 1.0
+     },
+     "low": {
+      "flights": 12,
+      "detection_rate": 0.333,
+      "latency_median_s": 1.0
+     },
+     "mid": {
+      "flights": 10,
+      "detection_rate": 0.6,
+      "latency_median_s": 1.0
+     }
+    }
+   }
+  }
+ },
+ "new_accounting_same_models": {
+  "hist_gradient_boosting": {
+   "val": {
+    "samples": 12760,
+    "attacked_samples": 2683,
+    "precision": 0.9904,
+    "recall": 0.3444,
+    "f1": 0.5111,
+    "roc_auc": 0.8113,
+    "false_alarms_per_hour": 0.0,
+    "attacked_flights": 38,
+    "detection_rate": 0.579,
+    "latency_median_s": 1.0,
+    "latency_p90_s": 5.0,
+    "by_attack_type": {
+     "drift": {
+      "flights": 6,
+      "detection_rate": 0.333,
+      "latency_median_s": 4.5
+     },
+     "freeze": {
+      "flights": 2,
+      "detection_rate": 1.0,
+      "latency_median_s": 1.0
+     },
+     "hard": {
+      "flights": 6,
+      "detection_rate": 0.333,
+      "latency_median_s": 3.8
+     },
+     "jump": {
+      "flights": 6,
+      "detection_rate": 0.833,
+      "latency_median_s": 1.0
+     },
+     "noise": {
+      "flights": 6,
+      "detection_rate": 0.333,
+      "latency_median_s": 1.8
+     },
+     "offset": {
+      "flights": 6,
+      "detection_rate": 0.667,
+      "latency_median_s": 2.2
+     },
+     "velocity_inconsistency": {
+      "flights": 6,
+      "detection_rate": 0.833,
+      "latency_median_s": 1.0
+     }
+    },
+    "by_magnitude_tier": {
+     "hard": {
+      "flights": 6,
+      "detection_rate": 0.333,
+      "latency_median_s": 3.8
+     },
+     "high": {
+      "flights": 10,
+      "detection_rate": 0.9,
+      "latency_median_s": 1.5
+     },
+     "low": {
+      "flights": 12,
+      "detection_rate": 0.417,
+      "latency_median_s": 1.0
+     },
+     "mid": {
+      "flights": 10,
+      "detection_rate": 0.6,
+      "latency_median_s": 1.0
+     }
+    }
+   },
+   "test": {
+    "samples": 18314,
+    "attacked_samples": 2516,
+    "precision": 0.9833,
+    "recall": 0.3517,
+    "f1": 0.5181,
+    "roc_auc": 0.8604,
+    "false_alarms_per_hour": 0.0,
+    "attacked_flights": 38,
+    "detection_rate": 0.605,
+    "latency_median_s": 1.0,
+    "latency_p90_s": 4.2,
+    "by_attack_type": {
+     "drift": {
+      "flights": 6,
+      "detection_rate": 0.333,
+      "latency_median_s": 5.5
+     },
+     "freeze": {
+      "flights": 2,
+      "detection_rate": 1.0,
+      "latency_median_s": 1.0
+     },
+     "hard": {
+      "flights": 6,
+      "detection_rate": 0.5,
+      "latency_median_s": 1.0
+     },
+     "jump": {
+      "flights": 6,
+      "detection_rate": 0.833,
+      "latency_median_s": 1.0
+     },
+     "noise": {
+      "flights": 6,
+      "detection_rate": 0.333,
+      "latency_median_s": 1.5
+     },
+     "offset": {
+      "flights": 6,
+      "detection_rate": 0.833,
+      "latency_median_s": 2.5
+     },
+     "velocity_inconsistency": {
+      "flights": 6,
+      "detection_rate": 0.667,
+      "latency_median_s": 1.0
+     }
+    },
+    "by_magnitude_tier": {
+     "hard": {
+      "flights": 6,
+      "detection_rate": 0.5,
+      "latency_median_s": 1.0
+     },
+     "high": {
+      "flights": 10,
+      "detection_rate": 1.0,
+      "latency_median_s": 1.0
+     },
+     "low": {
+      "flights": 12,
+      "detection_rate": 0.333,
+      "latency_median_s": 1.0
+     },
+     "mid": {
+      "flights": 10,
+      "detection_rate": 0.6,
+      "latency_median_s": 1.0
+     }
+    }
+   }
+  },
+  "baseline_cusum": {
+   "val": {
+    "samples": 12760,
+    "attacked_samples": 2683,
+    "precision": 0.5471,
+    "recall": 0.4633,
+    "f1": 0.5017,
+    "roc_auc": 0.6627,
+    "false_alarms_per_hour": 2.75,
+    "attacked_flights": 38,
+    "detection_rate": 0.711,
+    "latency_median_s": 2.0,
+    "latency_p90_s": 43.0,
+    "by_attack_type": {
+     "drift": {
+      "flights": 6,
+      "detection_rate": 0.667,
+      "latency_median_s": 19.8
+     },
+     "freeze": {
+      "flights": 2,
+      "detection_rate": 1.0,
+      "latency_median_s": 2.5
+     },
+     "hard": {
+      "flights": 6,
+      "detection_rate": 1.0,
+      "latency_median_s": 1.8
+     },
+     "jump": {
+      "flights": 6,
+      "detection_rate": 1.0,
+      "latency_median_s": 1.0
+     },
+     "noise": {
+      "flights": 6,
+      "detection_rate": 0.667,
+      "latency_median_s": 3.2
+     },
+     "offset": {
+      "flights": 6,
+      "detection_rate": 0.667,
+      "latency_median_s": 2.0
+     },
+     "velocity_inconsistency": {
+      "flights": 6,
+      "detection_rate": 0.167,
+      "latency_median_s": 100.0
+     }
+    },
+    "by_magnitude_tier": {
+     "hard": {
+      "flights": 6,
+      "detection_rate": 1.0,
+      "latency_median_s": 1.8
+     },
+     "high": {
+      "flights": 10,
+      "detection_rate": 0.9,
+      "latency_median_s": 1.0
+     },
+     "low": {
+      "flights": 12,
+      "detection_rate": 0.333,
+      "latency_median_s": 1.5
+     },
+     "mid": {
+      "flights": 10,
+      "detection_rate": 0.8,
+      "latency_median_s": 4.0
+     }
+    }
+   },
+   "test": {
+    "samples": 18314,
+    "attacked_samples": 2516,
+    "precision": 0.5297,
+    "recall": 0.4579,
+    "f1": 0.4912,
+    "roc_auc": 0.6958,
+    "false_alarms_per_hour": 4.25,
+    "attacked_flights": 38,
+    "detection_rate": 0.763,
+    "latency_median_s": 2.0,
+    "latency_p90_s": 47.9,
+    "by_attack_type": {
+     "drift": {
+      "flights": 6,
+      "detection_rate": 0.833,
+      "latency_median_s": 47.5
+     },
+     "freeze": {
+      "flights": 2,
+      "detection_rate": 1.0,
+      "latency_median_s": 3.2
+     },
+     "hard": {
+      "flights": 6,
+      "detection_rate": 1.0,
+      "latency_median_s": 1.5
+     },
+     "jump": {
+      "flights": 6,
+      "detection_rate": 1.0,
+      "latency_median_s": 1.0
+     },
+     "noise": {
+      "flights": 6,
+      "detection_rate": 0.667,
+      "latency_median_s": 1.2
+     },
+     "offset": {
+      "flights": 6,
+      "detection_rate": 1.0,
+      "latency_median_s": 2.2
+     },
+     "velocity_inconsistency": {
+      "flights": 6,
+      "detection_rate": 0.0,
+      "latency_median_s": null
+     }
+    },
+    "by_magnitude_tier": {
+     "hard": {
+      "flights": 6,
+      "detection_rate": 1.0,
+      "latency_median_s": 1.5
+     },
+     "high": {
+      "flights": 10,
+      "detection_rate": 0.8,
+      "latency_median_s": 1.0
+     },
+     "low": {
+      "flights": 12,
+      "detection_rate": 0.583,
+      "latency_median_s": 3.5
+     },
+     "mid": {
+      "flights": 10,
+      "detection_rate": 0.8,
+      "latency_median_s": 2.2
+     }
+    }
+   }
+  }
+ }
+}

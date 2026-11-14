@@ -25,6 +25,7 @@ from .authorization import Permission, has_permission
 from .ai.routes import router as ai_router
 from .config import (
     ALLOWED_ORIGINS,
+    AUTO_START_DEFAULT_SITL,
     GAZEBO_POSE_UDP_ALLOWED_SOURCE_IP,
     GAZEBO_POSE_UDP_ALLOWED_SOURCE_PORT,
     GAZEBO_POSE_UDP_BIND_HOST,
@@ -62,6 +63,10 @@ from .persistence.database import (
 from .schemas import CommandDecisionCreateRequest, CommandDecisionReviewRequest, ExperimentRequest, SimulationRequest, TaskReassignmentRequest
 from .security import AuthContext, get_auth_context
 from .scenario_routes import router as scenario_router
+from .fleet_routes import router as fleet_router
+from .mission_plan_routes import router as mission_plan_router
+from .attack_lab_routes import router as attack_lab_router
+from .research_routes import router as research_router
 from .simulation.detector import DETECTOR_VERSION
 from .simulation.engine import SIMULATION_VERSION, Simulation, SimulationConfig
 from .simulation.response import reassignment_block_reason, reassign_tasks
@@ -94,9 +99,15 @@ ACTIVE_ML_MODEL = _load_configured_ml_model()
 async def app_lifespan(_app: FastAPI):
     await start_px4_telemetry_receiver()
     await start_gazebo_pose_receiver()
+    startup_task = asyncio.create_task(_initialize_default_sitl())
     try:
         yield
     finally:
+        startup_task.cancel()
+        try:
+            await startup_task
+        except asyncio.CancelledError:
+            pass
         await stop_gazebo_pose_receiver()
         await stop_px4_telemetry_receiver()
 
@@ -118,6 +129,10 @@ app.add_middleware(
 app.include_router(auth_router)
 app.include_router(ai_router)
 app.include_router(scenario_router)
+app.include_router(fleet_router)
+app.include_router(mission_plan_router)
+app.include_router(attack_lab_router)
+app.include_router(research_router)
 
 
 class ManagedRun:
@@ -160,6 +175,51 @@ gazebo_pose_store = GazeboPoseStore()
 gazebo_pose_udp_transport: asyncio.DatagramTransport | None = None
 gazebo_pose_udp_protocol: GazeboPoseProtocol | None = None
 gazebo_pose_udp_error_code: str | None = None
+default_sitl_startup_status: dict[str, Any] = {
+    "status": "STARTING", "aircraft_id": None, "detail": "Backend startup has not run yet.",
+}
+
+
+async def _initialize_default_sitl() -> None:
+    global default_sitl_startup_status
+    if not AUTO_START_DEFAULT_SITL:
+        default_sitl_startup_status = {"status": "DEGRADED", "aircraft_id": None, "detail": "Automatic default SITL startup is disabled."}
+        return
+    if px4_udp_transport is None or gazebo_pose_udp_transport is None:
+        default_sitl_startup_status = {
+            "status": "DEGRADED", "aircraft_id": None,
+            "detail": "PX4 telemetry and Gazebo pose receivers must both be configured before default SITL startup.",
+        }
+        return
+    default_sitl_startup_status = {"status": "STARTING", "aircraft_id": None, "detail": "Requesting one managed disarmed PX4/Gazebo instance."}
+    try:
+        from .telemetry.fleet_manager import invoke_fleet_manager
+        manager = await asyncio.to_thread(invoke_fleet_manager, "activate", count=1, timeout_seconds=35)
+        if manager.get("failure"):
+            default_sitl_startup_status = {"status": "FAILED", "aircraft_id": None, "detail": str(manager["failure"])[:240]}
+            return
+        from .fleet_routes import _verified_fleet
+        deadline = time.monotonic() + 45
+        while True:
+            verified, _ = _verified_fleet(1)
+            if verified:
+                default_sitl_startup_status = {
+                    "status": "READY", "aircraft_id": verified[0]["aircraft_id"],
+                    "system_id": verified[0]["system_id"], "gazebo_model": verified[0]["gazebo_model"],
+                    "detail": "PX4 process, telemetry position, and Gazebo model verified.",
+                }
+                return
+            if time.monotonic() >= deadline:
+                break
+            await asyncio.sleep(0.5)
+        default_sitl_startup_status = {"status": "DEGRADED", "aircraft_id": None, "detail": "PX4 process, telemetry, and Gazebo pose did not all verify before timeout."}
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        default_sitl_startup_status = {
+            "status": "FAILED", "aircraft_id": None,
+            "detail": f"Default SITL initialization failed ({type(exc).__name__}).",
+        }
 
 
 async def start_px4_telemetry_receiver() -> None:
@@ -466,6 +526,7 @@ def health() -> dict:
         "px4": px4_component,
         "telemetry": telemetry_component,
         "gazebo": gazebo_component,
+        "default_sitl_startup": dict(default_sitl_startup_status),
     }
     payload = {
         "status": "ready" if database_status == "healthy" else "degraded",

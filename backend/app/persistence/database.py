@@ -239,6 +239,53 @@ class ScenarioApprovalRequestRecord(Base):
     reviewed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
 
+class MissionDeploymentRecord(Base):
+    __tablename__ = "mission_deployments"
+    __table_args__ = (UniqueConstraint("scenario_version_id", name="uq_deployment_scenario_version"),)
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    scenario_id: Mapped[str] = mapped_column(ForeignKey("scenarios.id", ondelete="CASCADE"), index=True)
+    scenario_version_id: Mapped[str] = mapped_column(
+        ForeignKey("scenario_versions.id", ondelete="CASCADE"), index=True,
+    )
+    deployed_by: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    mission_id: Mapped[str] = mapped_column(String, index=True)
+    payload_json: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow_naive, index=True)
+
+
+class AttackExperimentRecord(Base):
+    """Attack Lab experiment: pinned to an exact schema-2 scenario version; never embedded in the mission plan."""
+    __tablename__ = "attack_experiments"
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    owner_user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    name: Mapped[str] = mapped_column(String(120))
+    scenario_id: Mapped[str] = mapped_column(ForeignKey("scenarios.id", ondelete="CASCADE"), index=True)
+    scenario_version_id: Mapped[str] = mapped_column(ForeignKey("scenario_versions.id", ondelete="CASCADE"), index=True)
+    preset_id: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    seed: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(20), index=True, default="draft")
+    config_json: Mapped[str] = mapped_column(Text)
+    config_hash: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow_naive, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow_naive, onupdate=utcnow_naive)
+
+
+class ResearchDecisionRecord(Base):
+    """An operator's chosen response to a threat assessment. Recorded only; nothing is executed."""
+    __tablename__ = "research_decisions"
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    username: Mapped[str] = mapped_column(String(64))
+    aircraft_id: Mapped[str] = mapped_column(String(16), index=True)
+    action: Mapped[str] = mapped_column(String(40))
+    handover_candidate: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    source: Mapped[str] = mapped_column(String(24))
+    source_name: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    tier: Mapped[Optional[str]] = mapped_column(String(12), nullable=True)
+    threat_score: Mapped[Optional[float]] = mapped_column(nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow_naive, index=True)
+
+
 class MissionProposalRecord(Base):
     __tablename__ = "mission_proposals"
     id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -450,9 +497,9 @@ def _scenario_hash(config: dict, intent: dict | None = None) -> str:
 def _has_scenario_intent(intent: dict | None) -> bool:
     return bool(intent and any(
         intent.get(key) for key in (
-            "mission_objectives", "proposed_tasks", "uav_role_suggestions",
+            "mission_objectives", "mission_description", "proposed_tasks", "uav_role_suggestions",
             "operating_area_notes", "environment_notes", "constraints", "geographic_mission",
-            "uav_fault_assignments",
+            "uav_fault_assignments", "planner_conversation", "mission_plan",
         )
     ))
 
@@ -465,17 +512,44 @@ def _scenario_version_view(session, version: ScenarioVersionRecord) -> dict:
     intent_record = session.get(ScenarioIntentRecord, version.id)
     intent = json.loads(intent_record.intent_json) if intent_record else {
         "mission_objectives": [], "proposed_tasks": [], "uav_role_suggestions": [],
-        "operating_area_notes": "", "environment_notes": "", "constraints": [],
+        "mission_description": "", "operating_area_notes": "", "environment_notes": "", "constraints": [],
         "geographic_mission": None,
     }
+    intent.setdefault("mission_description", "")
     intent.setdefault("uav_fault_assignments", [])
+    intent.setdefault("planner_conversation", [])
+    intent.setdefault("schema_version", 1)  # versions saved before schema 2 are legacy; stored JSON is never rewritten
+    intent.setdefault("mission_plan", None)
     geographic_mission = intent.get("geographic_mission")
     if geographic_mission is not None:
+        geographic_mission.setdefault("objectives", [])
+        geographic_mission.setdefault("fleet_size", None)
+        geographic_mission.setdefault("mission_description", "")
+        geographic_mission.setdefault("mission_area_description", "")
+        geographic_mission.setdefault("workflow_stage", "general")
+        geographic_mission.setdefault("current_uav_step", "role")
+        geographic_mission.setdefault("current_uav_index", 0)
+        geographic_mission.setdefault("selected_uav_ids", [])
+        geographic_mission.setdefault("required_uav_count", geographic_mission.get("fleet_size"))
+        geographic_mission.setdefault("activated_uav_ids", [])
         for assignment in geographic_mission.get("uav_assignments", []):
             assignment.setdefault("zone_ids", [])
             assignment.setdefault("start_location", None)
             assignment.setdefault("destination", None)
             assignment.setdefault("waypoints", [])
+            assignment.setdefault("constraints", [])
+            assignment.setdefault("individual_objective", "")
+            assignment.setdefault("flight_altitude_m", None)
+            assignment.setdefault("speed_limit_m_s", None)
+            assignment.setdefault("destination_action", "")
+            assignment.setdefault("action_duration_seconds", None)
+            assignment.setdefault("data_requirements", "")
+            assignment.setdefault("completion_condition", "")
+            assignment.setdefault("expected_result", "")
+            assignment.setdefault("return_destination", None)
+            assignment.setdefault("return_waypoints", [])
+            assignment.setdefault("return_completion_condition", "")
+            assignment.setdefault("confirmed", False)
     return {
         "id": version.id,
         "version_number": version.version_number,
@@ -591,6 +665,80 @@ def get_scenario(scenario_id: str, user_id: str, include_all: bool = False) -> d
             "updated_at": scenario.updated_at.isoformat() + "Z",
             "versions": [_scenario_version_view(session, version) for version in versions],
         }
+
+
+def _deployment_view(record: MissionDeploymentRecord) -> dict:
+    return {"id": record.id, "mission_id": record.mission_id,
+            "scenario_id": record.scenario_id, "scenario_version_id": record.scenario_version_id,
+            "deployed_by": record.deployed_by, "created_at": record.created_at.isoformat() + "Z",
+            **json.loads(record.payload_json)}
+
+
+def save_mission_deployment(
+    scenario_id: str, version_id: str, user_id: str, role: str, payload: dict,
+) -> dict:
+    """Persist one idempotent handoff for a validated immutable scenario version."""
+    with SessionLocal() as session:
+        begin_write_transaction(session)
+        scenario = session.get(ScenarioRecord, scenario_id)
+        version = session.get(ScenarioVersionRecord, version_id)
+        if scenario is None or version is None or scenario.owner_user_id != user_id or version.scenario_id != scenario_id:
+            raise LookupError("Scenario version not found")
+        latest_id = session.scalar(
+            select(ScenarioVersionRecord.id).where(ScenarioVersionRecord.scenario_id == scenario_id)
+            .order_by(ScenarioVersionRecord.version_number.desc()).limit(1)
+        )
+        if version_id != latest_id:
+            raise ValueError("Only the latest immutable scenario version can be deployed")
+        existing = session.scalar(select(MissionDeploymentRecord).where(
+            MissionDeploymentRecord.scenario_version_id == version_id,
+        ))
+        approval = session.scalar(select(ScenarioApprovalRequestRecord).where(
+            ScenarioApprovalRequestRecord.scenario_version_id == version_id,
+        ))
+        if role == "OPERATOR" and (approval is None or approval.status != "APPROVED"):
+            raise ValueError("Operator deployment requires approval of this exact immutable scenario version")
+        if role not in {"OPERATOR", "GENERAL"}:
+            raise ValueError("This account role cannot deploy missions")
+        now = utcnow_naive()
+        if existing is not None:
+            # Deploying the same immutable version again keeps one record (same id) but makes it the current
+            # deployment: Mission Control reads the most recently deployed mission, not the first one ever made.
+            existing.created_at = now
+            session.commit()
+            session.refresh(existing)
+            return _deployment_view(existing)
+        record = MissionDeploymentRecord(
+            id=uuid.uuid4().hex, scenario_id=scenario_id, scenario_version_id=version_id,
+            deployed_by=user_id, mission_id=scenario_id,
+            payload_json=json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False),
+            created_at=now,
+        )
+        session.add(record)
+        session.commit()
+        session.refresh(record)
+        return _deployment_view(record)
+
+
+def deployment_times_for_versions(version_ids: set[str]) -> dict[str, str]:
+    """Deployment time per deployed scenario version id (versions that were never deployed are absent)."""
+    if not version_ids:
+        return {}
+    with SessionLocal() as session:
+        records = session.scalars(select(MissionDeploymentRecord).where(
+            MissionDeploymentRecord.scenario_version_id.in_(version_ids)))
+        return {record.scenario_version_id: record.created_at.isoformat() + "Z" for record in records}
+
+
+def latest_mission_deployment(user_id: str, *, include_all: bool = False) -> dict | None:
+    with SessionLocal() as session:
+        query = select(MissionDeploymentRecord).join(
+            ScenarioRecord, MissionDeploymentRecord.scenario_id == ScenarioRecord.id,
+        )
+        if not include_all:
+            query = query.where(ScenarioRecord.owner_user_id == user_id)
+        record = session.scalar(query.order_by(MissionDeploymentRecord.created_at.desc()).limit(1))
+        return _deployment_view(record) if record else None
 
 
 def list_scenarios(user_id: str, include_all: bool = False) -> list[dict]:
@@ -1102,3 +1250,90 @@ def ai_usage_remaining(operator_id: str, request_limit: int, daily_output_limit:
             AIUsageRecord.operator_id == operator_id, AIUsageRecord.occurred_at >= day_start
         )) or 0
     return max(0, request_limit - requests), max(0, daily_output_limit - used_tokens)
+
+
+# --- Attack Lab experiments and recorded research decisions ------------------------------------------------------
+
+def _experiment_view(record: AttackExperimentRecord) -> dict:
+    return {
+        "id": record.id, "owner_user_id": record.owner_user_id, "name": record.name, "scenario_id": record.scenario_id,
+        "scenario_version_id": record.scenario_version_id, "preset_id": record.preset_id, "seed": record.seed,
+        "status": record.status, "config": json.loads(record.config_json), "config_hash": record.config_hash,
+        "created_at": record.created_at.isoformat() + "Z", "updated_at": record.updated_at.isoformat() + "Z",
+    }
+
+
+def save_attack_experiment(owner_user_id: str, name: str, scenario_id: str, scenario_version_id: str, preset_id: str | None,
+                           seed: int, status: str, config: dict, experiment_id: str | None = None) -> dict:
+    canonical = json.dumps(config, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+    identity = json.dumps({"config": config, "seed": seed, "preset_id": preset_id, "scenario_version_id": scenario_version_id},
+                          sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+    config_hash = hashlib.sha256(identity.encode("utf-8")).hexdigest()  # covers config, seed, preset and the pinned version
+    with SessionLocal() as session:
+        begin_write_transaction(session)
+        record = session.get(AttackExperimentRecord, experiment_id) if experiment_id else None
+        if record is None:
+            record = AttackExperimentRecord(id=experiment_id or uuid.uuid4().hex, owner_user_id=owner_user_id)
+            session.add(record)
+        record.name, record.scenario_id, record.scenario_version_id = name, scenario_id, scenario_version_id
+        record.preset_id, record.seed, record.status = preset_id, seed, status
+        record.config_json, record.config_hash = canonical, config_hash
+        record.updated_at = utcnow_naive()
+        session.commit()
+        session.refresh(record)
+        return _experiment_view(record)
+
+
+def get_attack_experiment(experiment_id: str) -> dict | None:
+    with SessionLocal() as session:
+        record = session.get(AttackExperimentRecord, experiment_id)
+        return _experiment_view(record) if record else None
+
+
+def list_attack_experiments(user_id: str, include_all: bool = False) -> list[dict]:
+    with SessionLocal() as session:
+        query = select(AttackExperimentRecord)
+        if not include_all:  # read-only readers see experiments pinned to missions they own
+            query = query.join(ScenarioRecord, AttackExperimentRecord.scenario_id == ScenarioRecord.id).where(ScenarioRecord.owner_user_id == user_id)
+        rows = session.scalars(query.order_by(AttackExperimentRecord.created_at.desc()).limit(200)).all()
+        return [_experiment_view(row) for row in rows]
+
+
+def delete_attack_experiment(experiment_id: str) -> bool:
+    with SessionLocal() as session:
+        begin_write_transaction(session)
+        record = session.get(AttackExperimentRecord, experiment_id)
+        if record is None:
+            return False
+        session.delete(record)
+        session.commit()
+        return True
+
+
+def _decision_view(record: ResearchDecisionRecord) -> dict:
+    return {
+        "id": record.id, "user_id": record.user_id, "username": record.username, "aircraft_id": record.aircraft_id,
+        "action": record.action, "handover_candidate": record.handover_candidate, "source": record.source,
+        "source_name": record.source_name, "tier": record.tier, "threat_score": record.threat_score,
+        "created_at": record.created_at.isoformat() + "Z", "executed": False,
+    }
+
+
+def record_research_decision(user_id: str, username: str, aircraft_id: str, action: str, handover_candidate: str | None,
+                             source: str, source_name: str | None, tier: str | None, threat_score: float | None) -> dict:
+    with SessionLocal() as session:
+        begin_write_transaction(session)
+        record = ResearchDecisionRecord(
+            id=uuid.uuid4().hex, user_id=user_id, username=username, aircraft_id=aircraft_id, action=action,
+            handover_candidate=handover_candidate, source=source, source_name=source_name, tier=tier, threat_score=threat_score,
+        )
+        session.add(record)
+        session.commit()
+        session.refresh(record)
+        return _decision_view(record)
+
+
+def list_research_decisions(limit: int = 50) -> list[dict]:
+    with SessionLocal() as session:
+        rows = session.scalars(select(ResearchDecisionRecord).order_by(ResearchDecisionRecord.created_at.desc()).limit(limit)).all()
+        return [_decision_view(row) for row in rows]

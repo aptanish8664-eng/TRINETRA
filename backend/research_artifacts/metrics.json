@@ -1,0 +1,1215 @@
+{
+  "model_id": "049e3cff124a",
+  "trained_at": "2026-11-13T04:20:08.910813+00:00",
+  "artifact_sha256": "049e3cff124a861a5d8d5c4b7a1962bc7a19b50334a424831a5e2651dd6fe17e",
+  "selected_model": "hist_gradient_boosting",
+  "selection_rule": "highest validation recall subject to <= 1 sustained false alarm(s) per hour; a more complex detector must beat a simpler one by >= 0.02 recall; not precision",
+  "false_alarm_budget_per_hour": 1.0,
+  "test_evaluated": true,
+  "bootstrap": {
+    "rounds": 1000,
+    "unit": "flights",
+    "interval": "95% percentile"
+  },
+  "dataset": {
+    "seed": 20261113,
+    "config_hash": "c3f31668704768b440fb1c65f55af2e12af80e6e118a958f21660bc3efc375fb",
+    "splits": {
+      "train": {
+        "flights": 750,
+        "rows": 310417,
+        "attacked_rows": 41788
+      },
+      "val": {
+        "flights": 250,
+        "rows": 100444,
+        "attacked_rows": 13889
+      },
+      "test": {
+        "flights": 250,
+        "rows": 107748,
+        "attacked_rows": 13871
+      }
+    },
+    "total_flights": 1250,
+    "total_rows": 518609,
+    "profile": "large",
+    "counts": {
+      "train": {
+        "flights": 750,
+        "attacked_flights": 630,
+        "attack_free_flights": 120,
+        "attack_free_hours": 32.19,
+        "by_attack_type": {
+          "drift": 120,
+          "freeze": 90,
+          "jump": 120,
+          "noise": 120,
+          "offset": 90,
+          "velocity_inconsistency": 90
+        },
+        "by_magnitude_bin": {
+          "hard": 90,
+          "high": 150,
+          "low": 240,
+          "mid": 150
+        },
+        "by_attack_type_and_bin": {
+          "drift:hard": 30,
+          "drift:high": 30,
+          "drift:low": 30,
+          "drift:mid": 30,
+          "freeze:low": 90,
+          "jump:hard": 30,
+          "jump:high": 30,
+          "jump:low": 30,
+          "jump:mid": 30,
+          "noise:hard": 30,
+          "noise:high": 30,
+          "noise:low": 30,
+          "noise:mid": 30,
+          "offset:high": 30,
+          "offset:low": 30,
+          "offset:mid": 30,
+          "velocity_inconsistency:high": 30,
+          "velocity_inconsistency:low": 30,
+          "velocity_inconsistency:mid": 30
+        }
+      },
+      "val": {
+        "flights": 250,
+        "attacked_flights": 210,
+        "attack_free_flights": 40,
+        "attack_free_hours": 10.34,
+        "by_attack_type": {
+          "drift": 40,
+          "freeze": 30,
+          "jump": 40,
+          "noise": 40,
+          "offset": 30,
+          "velocity_inconsistency": 30
+        },
+        "by_magnitude_bin": {
+          "hard": 30,
+          "high": 50,
+          "low": 80,
+          "mid": 50
+        },
+        "by_attack_type_and_bin": {
+          "drift:hard": 10,
+          "drift:high": 10,
+          "drift:low": 10,
+          "drift:mid": 10,
+          "freeze:low": 30,
+          "jump:hard": 10,
+          "jump:high": 10,
+          "jump:low": 10,
+          "jump:mid": 10,
+          "noise:hard": 10,
+          "noise:high": 10,
+          "noise:low": 10,
+          "noise:mid": 10,
+          "offset:high": 10,
+          "offset:low": 10,
+          "offset:mid": 10,
+          "velocity_inconsistency:high": 10,
+          "velocity_inconsistency:low": 10,
+          "velocity_inconsistency:mid": 10
+        }
+      },
+      "test": {
+        "flights": 250,
+        "attacked_flights": 210,
+        "attack_free_flights": 40,
+        "attack_free_hours": 11.32,
+        "by_attack_type": {
+          "drift": 40,
+          "freeze": 30,
+          "jump": 40,
+          "noise": 40,
+          "offset": 30,
+          "velocity_inconsistency": 30
+        },
+        "by_magnitude_bin": {
+          "hard": 30,
+          "high": 50,
+          "low": 80,
+          "mid": 50
+        },
+        "by_attack_type_and_bin": {
+          "drift:hard": 10,
+          "drift:high": 10,
+          "drift:low": 10,
+          "drift:mid": 10,
+          "freeze:low": 30,
+          "jump:hard": 10,
+          "jump:high": 10,
+          "jump:low": 10,
+          "jump:mid": 10,
+          "noise:hard": 10,
+          "noise:high": 10,
+          "noise:low": 10,
+          "noise:mid": 10,
+          "offset:high": 10,
+          "offset:low": 10,
+          "offset:mid": 10,
+          "velocity_inconsistency:high": 10,
+          "velocity_inconsistency:low": 10,
+          "velocity_inconsistency:mid": 10
+        }
+      }
+    }
+  },
+  "models": {
+    "baseline_cusum": {
+      "description": "CUSUM on the normalised innovation ratio",
+      "parameters": {
+        "k": 2.0,
+        "threshold": 13.071,
+        "sustain_samples": 3
+      },
+      "validation": {
+        "samples": 100444,
+        "attacked_samples": 13889,
+        "precision": 0.5599,
+        "recall": 0.5168,
+        "f1": 0.5375,
+        "roc_auc": 0.7312,
+        "false_alarms_per_hour": 0.0,
+        "attacked_flights": 210,
+        "detection_rate": 0.69,
+        "latency_median_s": 2.5,
+        "latency_p90_s": 23.0,
+        "by_attack_type": {
+          "drift": {
+            "flights": 30,
+            "detection_rate": 0.667,
+            "recall": 0.304,
+            "latency_median_s": 18.0
+          },
+          "freeze": {
+            "flights": 30,
+            "detection_rate": 1.0,
+            "recall": 0.935,
+            "latency_median_s": 3.0
+          },
+          "hard": {
+            "flights": 30,
+            "detection_rate": 0.833,
+            "recall": 0.163,
+            "latency_median_s": 1.0
+          },
+          "jump": {
+            "flights": 30,
+            "detection_rate": 1.0,
+            "recall": 0.852,
+            "latency_median_s": 1.0
+          },
+          "noise": {
+            "flights": 30,
+            "detection_rate": 0.667,
+            "recall": 0.578,
+            "latency_median_s": 1.8
+          },
+          "offset": {
+            "flights": 30,
+            "detection_rate": 0.667,
+            "recall": 0.622,
+            "latency_median_s": 2.0
+          },
+          "velocity_inconsistency": {
+            "flights": 30,
+            "detection_rate": 0.0,
+            "recall": 0.0,
+            "latency_median_s": null
+          }
+        },
+        "by_magnitude_tier": {
+          "hard": {
+            "flights": 30,
+            "detection_rate": 0.833,
+            "recall": 0.163,
+            "latency_median_s": 1.0
+          },
+          "high": {
+            "flights": 50,
+            "detection_rate": 0.8,
+            "recall": 0.769,
+            "latency_median_s": 1.0
+          },
+          "low": {
+            "flights": 80,
+            "detection_rate": 0.512,
+            "recall": 0.429,
+            "latency_median_s": 2.5
+          },
+          "mid": {
+            "flights": 50,
+            "detection_rate": 0.78,
+            "recall": 0.518,
+            "latency_median_s": 3.0
+          }
+        },
+        "ci95": {
+          "precision": [
+            0.516,
+            0.61
+          ],
+          "recall": [
+            0.456,
+            0.583
+          ],
+          "f1": [
+            0.496,
+            0.582
+          ],
+          "false_alarms_per_hour": [
+            0.0,
+            0.0
+          ],
+          "detection_rate": [
+            0.628,
+            0.75
+          ]
+        },
+        "by_attack_type_recall": {
+          "drift": 0.209,
+          "freeze": 0.935,
+          "jump": 0.857,
+          "noise": 0.599,
+          "offset": 0.622,
+          "velocity_inconsistency": 0.0
+        },
+        "by_magnitude_recall": {
+          "hard": 0.163,
+          "high": 0.769,
+          "low": 0.429,
+          "mid": 0.518
+        }
+      },
+      "test": {
+        "samples": 107748,
+        "attacked_samples": 13871,
+        "precision": 0.5373,
+        "recall": 0.5079,
+        "f1": 0.5222,
+        "roc_auc": 0.7248,
+        "false_alarms_per_hour": 0.09,
+        "attacked_flights": 210,
+        "detection_rate": 0.667,
+        "latency_median_s": 2.0,
+        "latency_p90_s": 10.5,
+        "by_attack_type": {
+          "drift": {
+            "flights": 30,
+            "detection_rate": 0.533,
+            "recall": 0.3,
+            "latency_median_s": 6.0
+          },
+          "freeze": {
+            "flights": 30,
+            "detection_rate": 1.0,
+            "recall": 0.943,
+            "latency_median_s": 3.0
+          },
+          "hard": {
+            "flights": 30,
+            "detection_rate": 0.8,
+            "recall": 0.18,
+            "latency_median_s": 1.5
+          },
+          "jump": {
+            "flights": 30,
+            "detection_rate": 1.0,
+            "recall": 0.79,
+            "latency_median_s": 1.0
+          },
+          "noise": {
+            "flights": 30,
+            "detection_rate": 0.667,
+            "recall": 0.585,
+            "latency_median_s": 1.2
+          },
+          "offset": {
+            "flights": 30,
+            "detection_rate": 0.667,
+            "recall": 0.61,
+            "latency_median_s": 2.0
+          },
+          "velocity_inconsistency": {
+            "flights": 30,
+            "detection_rate": 0.0,
+            "recall": 0.0,
+            "latency_median_s": null
+          }
+        },
+        "by_magnitude_tier": {
+          "hard": {
+            "flights": 30,
+            "detection_rate": 0.8,
+            "recall": 0.18,
+            "latency_median_s": 1.5
+          },
+          "high": {
+            "flights": 50,
+            "detection_rate": 0.8,
+            "recall": 0.765,
+            "latency_median_s": 1.0
+          },
+          "low": {
+            "flights": 80,
+            "detection_rate": 0.5,
+            "recall": 0.387,
+            "latency_median_s": 2.5
+          },
+          "mid": {
+            "flights": 50,
+            "detection_rate": 0.72,
+            "recall": 0.544,
+            "latency_median_s": 3.0
+          }
+        },
+        "ci95": {
+          "precision": [
+            0.493,
+            0.585
+          ],
+          "recall": [
+            0.442,
+            0.572
+          ],
+          "f1": [
+            0.48,
+            0.561
+          ],
+          "false_alarms_per_hour": [
+            0.0,
+            0.273
+          ],
+          "detection_rate": [
+            0.603,
+            0.727
+          ]
+        },
+        "by_attack_type_recall": {
+          "drift": 0.211,
+          "freeze": 0.943,
+          "jump": 0.795,
+          "noise": 0.607,
+          "offset": 0.61,
+          "velocity_inconsistency": 0.0
+        },
+        "by_magnitude_recall": {
+          "hard": 0.18,
+          "high": 0.765,
+          "low": 0.387,
+          "mid": 0.544
+        }
+      }
+    },
+    "hist_gradient_boosting": {
+      "description": "scikit-learn HistGradientBoostingClassifier, class_weight=balanced",
+      "parameters": {
+        "max_depth": 5,
+        "max_iter": 300,
+        "learning_rate": 0.05,
+        "l2_regularization": 1.0,
+        "threshold": 0.9026,
+        "sustain_samples": 3
+      },
+      "hyperparameter_trials_on_validation": [
+        {
+          "params": {
+            "max_depth": 3,
+            "max_iter": 200,
+            "learning_rate": 0.1,
+            "l2_regularization": 0.0
+          },
+          "val_recall": 0.6455,
+          "val_detection_rate": 0.81,
+          "val_false_alarms_per_hour": 0.1
+        },
+        {
+          "params": {
+            "max_depth": 4,
+            "max_iter": 200,
+            "learning_rate": 0.1,
+            "l2_regularization": 1.0
+          },
+          "val_recall": 0.6569,
+          "val_detection_rate": 0.833,
+          "val_false_alarms_per_hour": 0.0
+        },
+        {
+          "params": {
+            "max_depth": 5,
+            "max_iter": 300,
+            "learning_rate": 0.05,
+            "l2_regularization": 1.0
+          },
+          "val_recall": 0.665,
+          "val_detection_rate": 0.843,
+          "val_false_alarms_per_hour": 0.1
+        },
+        {
+          "params": {
+            "max_depth": 6,
+            "max_iter": 150,
+            "learning_rate": 0.08,
+            "l2_regularization": 5.0
+          },
+          "val_recall": 0.6623,
+          "val_detection_rate": 0.829,
+          "val_false_alarms_per_hour": 0.1
+        }
+      ],
+      "validation": {
+        "samples": 100444,
+        "attacked_samples": 13889,
+        "precision": 0.9959,
+        "recall": 0.665,
+        "f1": 0.7975,
+        "roc_auc": 0.9478,
+        "false_alarms_per_hour": 0.1,
+        "attacked_flights": 210,
+        "detection_rate": 0.843,
+        "latency_median_s": 1.0,
+        "latency_p90_s": 24.4,
+        "by_attack_type": {
+          "drift": {
+            "flights": 30,
+            "detection_rate": 0.667,
+            "recall": 0.364,
+            "latency_median_s": 13.5
+          },
+          "freeze": {
+            "flights": 30,
+            "detection_rate": 1.0,
+            "recall": 1.0,
+            "latency_median_s": 1.0
+          },
+          "hard": {
+            "flights": 30,
+            "detection_rate": 0.867,
+            "recall": 0.172,
+            "latency_median_s": 1.0
+          },
+          "jump": {
+            "flights": 30,
+            "detection_rate": 1.0,
+            "recall": 0.9,
+            "latency_median_s": 1.0
+          },
+          "noise": {
+            "flights": 30,
+            "detection_rate": 0.767,
+            "recall": 0.648,
+            "latency_median_s": 2.5
+          },
+          "offset": {
+            "flights": 30,
+            "detection_rate": 0.8,
+            "recall": 0.624,
+            "latency_median_s": 2.0
+          },
+          "velocity_inconsistency": {
+            "flights": 30,
+            "detection_rate": 0.8,
+            "recall": 0.743,
+            "latency_median_s": 1.0
+          }
+        },
+        "by_magnitude_tier": {
+          "hard": {
+            "flights": 30,
+            "detection_rate": 0.867,
+            "recall": 0.172,
+            "latency_median_s": 1.0
+          },
+          "high": {
+            "flights": 50,
+            "detection_rate": 1.0,
+            "recall": 0.98,
+            "latency_median_s": 1.0
+          },
+          "low": {
+            "flights": 80,
+            "detection_rate": 0.65,
+            "recall": 0.516,
+            "latency_median_s": 1.0
+          },
+          "mid": {
+            "flights": 50,
+            "detection_rate": 0.98,
+            "recall": 0.744,
+            "latency_median_s": 2.5
+          }
+        },
+        "ci95": {
+          "precision": [
+            0.994,
+            0.998
+          ],
+          "recall": [
+            0.606,
+            0.724
+          ],
+          "f1": [
+            0.753,
+            0.839
+          ],
+          "false_alarms_per_hour": [
+            0.0,
+            0.305
+          ],
+          "detection_rate": [
+            0.792,
+            0.889
+          ]
+        },
+        "by_attack_type_recall": {
+          "drift": 0.253,
+          "freeze": 1.0,
+          "jump": 0.903,
+          "noise": 0.665,
+          "offset": 0.624,
+          "velocity_inconsistency": 0.743
+        },
+        "by_magnitude_recall": {
+          "hard": 0.172,
+          "high": 0.98,
+          "low": 0.516,
+          "mid": 0.744
+        }
+      },
+      "test": {
+        "samples": 107748,
+        "attacked_samples": 13871,
+        "precision": 0.9947,
+        "recall": 0.6568,
+        "f1": 0.7912,
+        "roc_auc": 0.9419,
+        "false_alarms_per_hour": 0.26,
+        "attacked_flights": 210,
+        "detection_rate": 0.848,
+        "latency_median_s": 1.0,
+        "latency_p90_s": 29.6,
+        "by_attack_type": {
+          "drift": {
+            "flights": 30,
+            "detection_rate": 0.633,
+            "recall": 0.345,
+            "latency_median_s": 6.0
+          },
+          "freeze": {
+            "flights": 30,
+            "detection_rate": 1.0,
+            "recall": 1.0,
+            "latency_median_s": 1.0
+          },
+          "hard": {
+            "flights": 30,
+            "detection_rate": 0.933,
+            "recall": 0.195,
+            "latency_median_s": 1.0
+          },
+          "jump": {
+            "flights": 30,
+            "detection_rate": 1.0,
+            "recall": 0.845,
+            "latency_median_s": 1.0
+          },
+          "noise": {
+            "flights": 30,
+            "detection_rate": 0.733,
+            "recall": 0.652,
+            "latency_median_s": 1.5
+          },
+          "offset": {
+            "flights": 30,
+            "detection_rate": 0.833,
+            "recall": 0.62,
+            "latency_median_s": 2.0
+          },
+          "velocity_inconsistency": {
+            "flights": 30,
+            "detection_rate": 0.8,
+            "recall": 0.732,
+            "latency_median_s": 1.0
+          }
+        },
+        "by_magnitude_tier": {
+          "hard": {
+            "flights": 30,
+            "detection_rate": 0.933,
+            "recall": 0.195,
+            "latency_median_s": 1.0
+          },
+          "high": {
+            "flights": 50,
+            "detection_rate": 1.0,
+            "recall": 0.979,
+            "latency_median_s": 1.0
+          },
+          "low": {
+            "flights": 80,
+            "detection_rate": 0.637,
+            "recall": 0.47,
+            "latency_median_s": 1.0
+          },
+          "mid": {
+            "flights": 50,
+            "detection_rate": 0.98,
+            "recall": 0.775,
+            "latency_median_s": 2.0
+          }
+        },
+        "ci95": {
+          "precision": [
+            0.992,
+            0.997
+          ],
+          "recall": [
+            0.598,
+            0.718
+          ],
+          "f1": [
+            0.747,
+            0.834
+          ],
+          "false_alarms_per_hour": [
+            0.0,
+            0.702
+          ],
+          "detection_rate": [
+            0.799,
+            0.899
+          ]
+        },
+        "by_attack_type_recall": {
+          "drift": 0.247,
+          "freeze": 1.0,
+          "jump": 0.85,
+          "noise": 0.669,
+          "offset": 0.62,
+          "velocity_inconsistency": 0.732
+        },
+        "by_magnitude_recall": {
+          "hard": 0.195,
+          "high": 0.979,
+          "low": 0.47,
+          "mid": 0.775
+        }
+      }
+    },
+    "combined_max": {
+      "description": "max(calibrated CUSUM, calibrated gradient boosting); validation numbers use cross-fitted calibration",
+      "parameters": {
+        "threshold": 0.8889,
+        "sustain_samples": 3
+      },
+      "validation": {
+        "samples": 100444,
+        "attacked_samples": 13889,
+        "precision": 0.9958,
+        "recall": 0.6635,
+        "f1": 0.7964,
+        "roc_auc": 0.9031,
+        "false_alarms_per_hour": 0.1,
+        "attacked_flights": 210,
+        "detection_rate": 0.838,
+        "latency_median_s": 1.0,
+        "latency_p90_s": 22.8,
+        "by_attack_type": {
+          "drift": {
+            "flights": 30,
+            "detection_rate": 0.667,
+            "recall": 0.363,
+            "latency_median_s": 13.5
+          },
+          "freeze": {
+            "flights": 30,
+            "detection_rate": 1.0,
+            "recall": 1.0,
+            "latency_median_s": 1.0
+          },
+          "hard": {
+            "flights": 30,
+            "detection_rate": 0.867,
+            "recall": 0.172,
+            "latency_median_s": 1.0
+          },
+          "jump": {
+            "flights": 30,
+            "detection_rate": 1.0,
+            "recall": 0.898,
+            "latency_median_s": 1.0
+          },
+          "noise": {
+            "flights": 30,
+            "detection_rate": 0.733,
+            "recall": 0.645,
+            "latency_median_s": 2.5
+          },
+          "offset": {
+            "flights": 30,
+            "detection_rate": 0.8,
+            "recall": 0.623,
+            "latency_median_s": 2.0
+          },
+          "velocity_inconsistency": {
+            "flights": 30,
+            "detection_rate": 0.8,
+            "recall": 0.74,
+            "latency_median_s": 1.0
+          }
+        },
+        "by_magnitude_tier": {
+          "hard": {
+            "flights": 30,
+            "detection_rate": 0.867,
+            "recall": 0.172,
+            "latency_median_s": 1.0
+          },
+          "high": {
+            "flights": 50,
+            "detection_rate": 1.0,
+            "recall": 0.98,
+            "latency_median_s": 1.0
+          },
+          "low": {
+            "flights": 80,
+            "detection_rate": 0.637,
+            "recall": 0.513,
+            "latency_median_s": 1.0
+          },
+          "mid": {
+            "flights": 50,
+            "detection_rate": 0.98,
+            "recall": 0.743,
+            "latency_median_s": 2.5
+          }
+        },
+        "ci95": {
+          "precision": [
+            0.993,
+            0.998
+          ],
+          "recall": [
+            0.604,
+            0.723
+          ],
+          "f1": [
+            0.752,
+            0.838
+          ],
+          "false_alarms_per_hour": [
+            0.0,
+            0.305
+          ],
+          "detection_rate": [
+            0.787,
+            0.884
+          ]
+        },
+        "by_attack_type_recall": {
+          "drift": 0.252,
+          "freeze": 1.0,
+          "jump": 0.901,
+          "noise": 0.663,
+          "offset": 0.623,
+          "velocity_inconsistency": 0.74
+        },
+        "by_magnitude_recall": {
+          "hard": 0.172,
+          "high": 0.98,
+          "low": 0.513,
+          "mid": 0.743
+        }
+      },
+      "test": {
+        "samples": 107748,
+        "attacked_samples": 13871,
+        "precision": 0.9958,
+        "recall": 0.6526,
+        "f1": 0.7885,
+        "roc_auc": 0.8935,
+        "false_alarms_per_hour": 0.18,
+        "attacked_flights": 210,
+        "detection_rate": 0.843,
+        "latency_median_s": 1.0,
+        "latency_p90_s": 27.5,
+        "by_attack_type": {
+          "drift": {
+            "flights": 30,
+            "detection_rate": 0.633,
+            "recall": 0.341,
+            "latency_median_s": 6.0
+          },
+          "freeze": {
+            "flights": 30,
+            "detection_rate": 1.0,
+            "recall": 1.0,
+            "latency_median_s": 1.0
+          },
+          "hard": {
+            "flights": 30,
+            "detection_rate": 0.9,
+            "recall": 0.192,
+            "latency_median_s": 1.0
+          },
+          "jump": {
+            "flights": 30,
+            "detection_rate": 1.0,
+            "recall": 0.839,
+            "latency_median_s": 1.0
+          },
+          "noise": {
+            "flights": 30,
+            "detection_rate": 0.733,
+            "recall": 0.648,
+            "latency_median_s": 1.8
+          },
+          "offset": {
+            "flights": 30,
+            "detection_rate": 0.833,
+            "recall": 0.615,
+            "latency_median_s": 2.0
+          },
+          "velocity_inconsistency": {
+            "flights": 30,
+            "detection_rate": 0.8,
+            "recall": 0.724,
+            "latency_median_s": 1.0
+          }
+        },
+        "by_magnitude_tier": {
+          "hard": {
+            "flights": 30,
+            "detection_rate": 0.9,
+            "recall": 0.192,
+            "latency_median_s": 1.0
+          },
+          "high": {
+            "flights": 50,
+            "detection_rate": 1.0,
+            "recall": 0.978,
+            "latency_median_s": 1.0
+          },
+          "low": {
+            "flights": 80,
+            "detection_rate": 0.637,
+            "recall": 0.465,
+            "latency_median_s": 1.0
+          },
+          "mid": {
+            "flights": 50,
+            "detection_rate": 0.98,
+            "recall": 0.769,
+            "latency_median_s": 2.0
+          }
+        },
+        "ci95": {
+          "precision": [
+            0.994,
+            0.998
+          ],
+          "recall": [
+            0.593,
+            0.714
+          ],
+          "f1": [
+            0.743,
+            0.831
+          ],
+          "false_alarms_per_hour": [
+            0.0,
+            0.447
+          ],
+          "detection_rate": [
+            0.79,
+            0.896
+          ]
+        },
+        "by_attack_type_recall": {
+          "drift": 0.244,
+          "freeze": 1.0,
+          "jump": 0.844,
+          "noise": 0.665,
+          "offset": 0.615,
+          "velocity_inconsistency": 0.724
+        },
+        "by_magnitude_recall": {
+          "hard": 0.192,
+          "high": 0.978,
+          "low": 0.465,
+          "mid": 0.769
+        }
+      }
+    },
+    "lstm_next_state": {
+      "status": "skipped",
+      "reason": "torch is not installed and was not installed automatically"
+    }
+  },
+  "feature_set_trial": {
+    "triggered": true,
+    "validation_recall_of_selected_v2": {
+      "drift": 0.238,
+      "low": 0.499
+    },
+    "change": "residual windows of 90 s and 120 s plus their early-scale ratios and growth rates (6 columns)",
+    "v2": {
+      "selected": "hist_gradient_boosting",
+      "validation_recall": 0.6392,
+      "validation_detection_rate": 0.819,
+      "validation_drift_recall": 0.238,
+      "validation_low_magnitude_recall": 0.499,
+      "test": {
+        "precision": 0.996,
+        "recall": 0.6335,
+        "f1": 0.7744,
+        "roc_auc": 0.9354,
+        "false_alarms_per_hour": 0.09,
+        "detection_rate": 0.833,
+        "by_attack_type_recall": {
+          "drift": 0.239,
+          "freeze": 1.0,
+          "jump": 0.767,
+          "noise": 0.665,
+          "offset": 0.597,
+          "velocity_inconsistency": 0.708
+        },
+        "by_magnitude_recall": {
+          "hard": 0.19,
+          "high": 0.973,
+          "low": 0.452,
+          "mid": 0.719
+        }
+      }
+    },
+    "v2_long_windows": {
+      "selected": "hist_gradient_boosting",
+      "validation_recall": 0.665,
+      "validation_detection_rate": 0.843,
+      "validation_drift_recall": 0.253,
+      "validation_low_magnitude_recall": 0.516,
+      "test": {
+        "precision": 0.9947,
+        "recall": 0.6568,
+        "f1": 0.7912,
+        "roc_auc": 0.9419,
+        "false_alarms_per_hour": 0.26,
+        "detection_rate": 0.848,
+        "by_attack_type_recall": {
+          "drift": 0.247,
+          "freeze": 1.0,
+          "jump": 0.85,
+          "noise": 0.669,
+          "offset": 0.62,
+          "velocity_inconsistency": 0.732
+        },
+        "by_magnitude_recall": {
+          "hard": 0.195,
+          "high": 0.979,
+          "low": 0.47,
+          "mid": 0.775
+        }
+      }
+    },
+    "adopted": true,
+    "rule": "adopted only if validation recall improves by >= 0.02",
+    "chosen_feature_set": "v2_long_windows"
+  },
+  "calibration": {
+    "method": "isotonic regression fit on the validation split (recovery rows excluded)",
+    "detector": "hist_gradient_boosting",
+    "brier_test_raw": 0.0655,
+    "brier_test_calibrated": 0.04069,
+    "reliability_test": [
+      {
+        "bin": "0.0-0.1",
+        "count": 74624,
+        "mean_predicted": 0.027,
+        "observed_rate": 0.0293
+      },
+      {
+        "bin": "0.1-0.2",
+        "count": 7213,
+        "mean_predicted": 0.1323,
+        "observed_rate": 0.1353
+      },
+      {
+        "bin": "0.2-0.3",
+        "count": 1985,
+        "mean_predicted": 0.2241,
+        "observed_rate": 0.2474
+      },
+      {
+        "bin": "0.3-0.4",
+        "count": 921,
+        "mean_predicted": 0.3485,
+        "observed_rate": 0.3366
+      },
+      {
+        "bin": "0.4-0.5",
+        "count": 367,
+        "mean_predicted": 0.4245,
+        "observed_rate": 0.3924
+      },
+      {
+        "bin": "0.5-0.6",
+        "count": 467,
+        "mean_predicted": 0.5163,
+        "observed_rate": 0.4625
+      },
+      {
+        "bin": "0.6-0.7",
+        "count": 373,
+        "mean_predicted": 0.6495,
+        "observed_rate": 0.563
+      },
+      {
+        "bin": "0.7-0.8",
+        "count": 173,
+        "mean_predicted": 0.7462,
+        "observed_rate": 0.6994
+      },
+      {
+        "bin": "0.8-0.9",
+        "count": 192,
+        "mean_predicted": 0.818,
+        "observed_rate": 0.8594
+      },
+      {
+        "bin": "0.9-1.0",
+        "count": 9090,
+        "mean_predicted": 0.9972,
+        "observed_rate": 0.9958
+      }
+    ],
+    "max_abs_gap_bins_50plus_samples": 0.0865,
+    "reliability_rank_correlation": 1.0
+  },
+  "tiers": {
+    "thresholds": {
+      "medium": 12.24,
+      "high": 34.2,
+      "critical": 59.29
+    },
+    "tuned_on": "validation",
+    "validation_distribution": {
+      "normal": {
+        "Low": 0.99,
+        "Medium": 0.0098,
+        "High": 0.0002,
+        "Critical": 0.0
+      },
+      "attacked": {
+        "Low": 0.2663,
+        "Medium": 0.2935,
+        "High": 0.2569,
+        "Critical": 0.1834
+      },
+      "recovery": {
+        "Low": 0.3952,
+        "Medium": 0.3989,
+        "High": 0.1178,
+        "Critical": 0.0882
+      }
+    },
+    "test_distribution": {
+      "normal": {
+        "Low": 0.9913,
+        "Medium": 0.0085,
+        "High": 0.0002,
+        "Critical": 0.0
+      },
+      "attacked": {
+        "Low": 0.2885,
+        "Medium": 0.2819,
+        "High": 0.2389,
+        "Critical": 0.1907
+      },
+      "recovery": {
+        "Low": 0.3989,
+        "Medium": 0.4032,
+        "High": 0.1113,
+        "Critical": 0.0865
+      }
+    },
+    "rule": "medium = 99th percentile of normal validation scores; high/critical = 40th/75th percentile of attacked validation scores above medium"
+  },
+  "threat_score_formula": "100 * anomaly_confidence * (0.65 * severity + 0.35 * mission_impact); not a probability",
+  "evidence_reference_normal_p99": {
+    "res_pos_w10": 7.8302,
+    "res_pos_w30": 9.5762,
+    "res_vel": 0.7388,
+    "heading_res_deg": 7.8239,
+    "innov_ratio": 3.2219,
+    "res_rate": 2.8984,
+    "cross_res10": 59.8569,
+    "res60_z": 51.2577,
+    "noise_ratio": 1.4571,
+    "freeze_ratio": 1.4106,
+    "velpos_inconsist": 1.8101
+  },
+  "feature_columns": [
+    "res_pos_w10",
+    "res_pos_w30",
+    "res_vel",
+    "heading_res_deg",
+    "innov_ratio",
+    "res_rate",
+    "res10_mean",
+    "res10_std",
+    "res10_max",
+    "resvel_max5",
+    "speed",
+    "cross_res10",
+    "n_aircraft",
+    "res_pos_w60",
+    "res10_z",
+    "res30_z",
+    "res60_z",
+    "resvel_z",
+    "innov_z",
+    "res30_rate10",
+    "res60_rate10",
+    "res10_accel",
+    "res30_accel",
+    "noise_std10",
+    "noise_ratio",
+    "var_ratio",
+    "velpos_inconsist",
+    "velpos_z",
+    "gps_travel_3s",
+    "imu_travel_3s",
+    "freeze_ratio",
+    "frozen_run",
+    "cross_res30",
+    "cross_z10",
+    "cusum_innov",
+    "res_pos_w90",
+    "res_pos_w120",
+    "res90_z",
+    "res120_z",
+    "res90_rate10",
+    "res120_rate10"
+  ],
+  "leakage_controls": [
+    "features computed from sensor streams only (causal, per-flight early-scale normalisation)",
+    "labels in a separate hidden file",
+    "split by flight (asserted)",
+    "thresholds, calibration, model choice, feature-set choice and tiers fit on validation only",
+    "post-attack recovery rows (30 s) excluded from the normal class and from false-alarm counting (label-side bookkeeping, never a feature)",
+    "test split used only for the final report"
+  ],
+  "limits": [
+    "synthetic data, not real attacks",
+    "flat-earth ENU frame",
+    "EKF-like residual, not a live PX4 EKF residual",
+    "confidence intervals are bootstrap over simulated flights and do not cover simulator-vs-real differences",
+    "features assume the assessed window starts at the beginning of the flight (early-flight scale)"
+  ]
+}

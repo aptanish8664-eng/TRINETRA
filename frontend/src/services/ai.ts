@@ -14,6 +14,7 @@ export type MissionProposalContent = {
 
 export type GeographicMissionProposal = {
   summary: string
+  objective_suggestions?: { objective: GeographicMissionObjective; rationale: string }[]
   assignments: GeographicUavAssignment[]
   missing_information: string[]
   constraints: string[]
@@ -24,6 +25,8 @@ export type GeographicMissionPlanningRequest = {
   objective: GeographicMissionObjective
   description: string
   zones: Pick<GeographicZone, 'id' | 'name'>[]
+  aircraft_id?: string
+  objective_suggestions_only?: boolean
 }
 
 export type OperatorSimulationConfig = {

@@ -11,7 +11,14 @@ from fastapi.testclient import TestClient
 from openai import AsyncOpenAI as SDKAsyncOpenAI
 from sqlalchemy import update
 
-from app.ai.provider import AIProviderFailure, ProviderResult, get_ai_provider
+from app.ai.provider import (
+    AIProviderConfigurationError,
+    AIProviderFailure,
+    AIProviderQuotaExceeded,
+    AIProviderRateLimited,
+    ProviderResult,
+    get_ai_provider,
+)
 from app.ai.schemas import GeographicMissionProposalContent, MissionProposalContent
 from app.main import app
 from app.persistence.database import MissionProposalRecord, SessionLocal, utcnow_naive
@@ -387,6 +394,48 @@ def test_official_responses_adapter_sends_strict_schema_without_network(monkeypa
     assert "additionalProperties" in calls["request"]["text"]["format"]["schema"]
 
 
+@pytest.mark.parametrize(("sdk_error", "status_code", "error_code", "expected_error"), [
+    (openai.RateLimitError, 429, "rate_limit_exceeded", AIProviderRateLimited),
+    (openai.RateLimitError, 429, "insufficient_quota", AIProviderQuotaExceeded),
+    (openai.AuthenticationError, 401, "invalid_api_key", AIProviderConfigurationError),
+])
+def test_official_responses_adapter_sanitizes_provider_failures(monkeypatch, sdk_error, status_code, error_code, expected_error):
+    from app.ai import provider as provider_module
+    from app.ai.json_schemas import PROPOSAL_JSON_SCHEMA
+
+    response = httpx.Response(status_code,
+                              request=httpx.Request("POST", "https://api.openai.com/v1/responses"))
+    error_type = "authentication_error" if status_code == 401 else "rate_limit_error"
+    body = {"error": {"code": error_code, "type": error_type}}
+    error = sdk_error("private provider response", response=response, body=body)
+
+    class FailedResponses:
+        async def create(self, **kwargs):
+            raise error
+
+    class FakeClient:
+        responses = FailedResponses()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+    monkeypatch.setattr(openai, "AsyncOpenAI", lambda **kwargs: FakeClient())
+    monkeypatch.setattr(provider_module, "OPENAI_API_KEY", "test-only-key")
+    provider = provider_module.OpenAIResponsesProvider()
+
+    async def request():
+        return await provider._parse(
+            MissionProposalContent, PROPOSAL_JSON_SCHEMA, "instructions", {}, "test proposal",
+        )
+
+    with pytest.raises(expected_error) as raised:
+        asyncio.run(request())
+    assert "private provider response" not in str(raised.value)
+
+
 def test_missing_provider_configuration_and_provider_failure_are_safe(operator_client, mock_ai):
     operator, _ = operator_client
     mock_ai.available = False
@@ -399,6 +448,22 @@ def test_missing_provider_configuration_and_provider_failure_are_safe(operator_c
     response = operator.post("/api/ai/proposals", json=proposal_payload())
     assert response.status_code == 503
     assert "private exception content" not in response.text
+
+
+@pytest.mark.parametrize(("provider_error", "status_code", "message_fragment"), [
+    (AIProviderRateLimited("request"), 429, "rate limit"),
+    (AIProviderQuotaExceeded("request"), 402, "insufficient API credits"),
+    (AIProviderConfigurationError("request"), 503, "rejected the configured API key"),
+])
+def test_openai_account_errors_are_safe_and_actionable(operator_client, mock_ai, provider_error, status_code, message_fragment):
+    operator, _ = operator_client
+    mock_ai.error = provider_error
+
+    response = operator.post("/api/ai/proposals", json=proposal_payload())
+
+    assert response.status_code == status_code
+    assert message_fragment in response.json()["detail"]
+    assert "request" not in response.text
 
 
 def test_ai_rate_limit_is_per_user(operator_client, mock_ai, monkeypatch):

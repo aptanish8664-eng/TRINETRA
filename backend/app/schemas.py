@@ -5,6 +5,8 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
 
+from .mission_planning.schemas import MissionPlan
+
 
 class SimulationRequest(BaseModel):
     uav_count: int = Field(default=4, ge=2, le=12)
@@ -185,37 +187,79 @@ def _segments_intersect(a: tuple[float, float], b: tuple[float, float],
 
 class GeographicUavAssignment(BaseModel):
     uav_id: str = Field(min_length=5, max_length=16, pattern=r"^px4-[1-9][0-9]{0,2}$")
-    role: Literal["area_survey", "perimeter_monitoring", "inspection", "search_observation", "communication_relay"]
-    task: str = Field(min_length=1, max_length=300)
+    role: str = Field(default="", max_length=80)
+    individual_objective: str = Field(default="", max_length=180)
+    task: str = Field(default="", max_length=300)
     zone_id: Optional[str] = Field(default=None, max_length=40)
     zone_ids: list[str] = Field(default_factory=list, max_length=20)
     start_location: Optional[GeographicPoint] = None
     destination: Optional[GeographicPoint] = None
     waypoints: list[GeographicPoint] = Field(default_factory=list, max_length=20)
+    constraints: list[str] = Field(default_factory=list, max_length=12)
+    flight_altitude_m: Optional[float] = Field(default=None, gt=0, le=500, allow_inf_nan=False)
+    speed_limit_m_s: Optional[float] = Field(default=None, gt=0, le=50, allow_inf_nan=False)
+    destination_action: str = Field(default="", max_length=80)
+    action_duration_seconds: Optional[int] = Field(default=None, ge=0, le=86400)
+    data_requirements: str = Field(default="", max_length=500)
+    completion_condition: str = Field(default="", max_length=300)
+    expected_result: str = Field(default="", max_length=500)
+    return_destination: Optional[GeographicPoint] = None
+    return_waypoints: list[GeographicPoint] = Field(default_factory=list, max_length=20)
+    return_completion_condition: str = Field(default="", max_length=300)
+    confirmed: bool = False
+
+    @field_validator("role")
+    @classmethod
+    def trim_role(cls, value: str) -> str:
+        return value.strip()
 
     @field_validator("task")
     @classmethod
     def trim_task(cls, value: str) -> str:
-        normalized = value.strip()
-        if not normalized:
-            raise ValueError("Aircraft task cannot be blank")
-        return normalized
+        return value.strip()
 
 
 class GeographicMissionIntent(BaseModel):
-    objective: Literal["area_survey", "perimeter_monitoring", "inspection", "search_observation", "communication_relay"]
+    objective: Literal[
+        "area_survey", "search_rescue", "perimeter_monitoring", "inspection", "disaster_assessment",
+        "agricultural_survey", "mapping_survey", "target_tracking", "environmental_monitoring",
+        "custom_mission", "search_observation", "communication_relay",
+    ]
     start_location: Optional[GeographicPoint] = None
     destination: Optional[GeographicPoint] = None
     survey_zones: list[GeographicZone] = Field(default_factory=list, max_length=20)
     uav_assignments: list[GeographicUavAssignment] = Field(default_factory=list, max_length=20)
     constraints: list[str] = Field(default_factory=list, max_length=12)
     ai_recommendations: list[str] = Field(default_factory=list, max_length=12)
+    objectives: list[str] = Field(default_factory=list, max_length=10)
+    fleet_size: Optional[int] = Field(default=None, ge=1, le=20)
+    required_uav_count: Optional[int] = Field(default=None, ge=1, le=5)
+    activated_uav_ids: list[str] = Field(default_factory=list, max_length=5)
+    mission_description: str = Field(default="", max_length=2000)
+    mission_area_description: str = Field(default="", max_length=500)
+    mission_duration_minutes: Optional[int] = Field(default=None, ge=1, le=1440)
+    workflow_stage: Literal["general", "aircraft", "faults", "review"] = "general"
+    current_uav_step: Literal["role", "task", "start", "destination", "geography", "constraints", "review"] = "role"
+    current_uav_index: int = Field(default=0, ge=0, le=19)
+    selected_uav_ids: list[str] = Field(default_factory=list, max_length=20)
 
     @model_validator(mode="after")
     def validate_assignments(self) -> "GeographicMissionIntent":
         ids = [assignment.uav_id for assignment in self.uav_assignments]
+        if any(not re.fullmatch(r"px4-[1-9][0-9]{0,2}", uav_id) for uav_id in self.selected_uav_ids):
+            raise ValueError("Selected aircraft IDs must be valid PX4 telemetry identities")
+        if self.selected_uav_ids and len(set(self.selected_uav_ids)) != len(self.selected_uav_ids):
+            raise ValueError("Selected aircraft IDs must be unique")
+        if self.fleet_size is not None and self.selected_uav_ids and len(self.selected_uav_ids) != self.fleet_size:
+            raise ValueError("Fleet size must match the selected PX4 aircraft")
+        if len(set(self.activated_uav_ids)) != len(self.activated_uav_ids):
+            raise ValueError("Activated UAV identities must be unique")
+        if self.activated_uav_ids and any(uav_id not in self.selected_uav_ids for uav_id in self.activated_uav_ids):
+            raise ValueError("Activated aircraft must belong to the selected fleet")
         if len(set(ids)) != len(ids):
             raise ValueError("Each PX4 aircraft may have only one mission assignment")
+        if self.selected_uav_ids and any(uav_id not in self.selected_uav_ids for uav_id in ids):
+            raise ValueError("Aircraft mission assignments must belong to the selected fleet")
         zone_ids = {zone.id for zone in self.survey_zones}
         if len(zone_ids) != len(self.survey_zones):
             raise ValueError("Survey zone IDs must be unique")
@@ -227,13 +271,12 @@ class GeographicMissionIntent(BaseModel):
             for assignment in self.uav_assignments
         ):
             raise ValueError("Aircraft assignments must reference an existing survey zone")
-        if self.objective in {"area_survey", "perimeter_monitoring"} and not self.survey_zones:
-            raise ValueError("This mission objective requires at least one survey zone")
         return self
 
 
 class ScenarioUavFaultIntent(BaseModel):
-    uav_id: str = Field(min_length=6, max_length=16, pattern=r"^UAV-(0[1-9]|1[0-2])$")
+    # Abstract simulator identities (UAV-01..12) for legacy scenarios; PX4 aircraft ids (px4-N) for schema-2 plans.
+    uav_id: str = Field(min_length=5, max_length=16, pattern=r"^(UAV-(0[1-9]|1[0-2])|px4-[1-9][0-9]{0,2})$")
     fault_type: Literal[
         "none", "sudden", "gradual", "intermittent", "jump", "freeze",
         "noise", "degradation", "velocity_inconsistency",
@@ -243,18 +286,32 @@ class ScenarioUavFaultIntent(BaseModel):
     spoof_magnitude: float = Field(default=0.0, ge=0, allow_inf_nan=False)
 
 
+class MissionPlannerMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=2000)
+
+
 class ScenarioIntent(BaseModel):
     mission_objectives: list[str] = Field(default_factory=list, max_length=8)
+    mission_description: str = Field(default="", max_length=2000)
     proposed_tasks: list[ScenarioTaskIntent] = Field(default_factory=list, max_length=40)
     uav_role_suggestions: list[ScenarioRoleIntent] = Field(default_factory=list, max_length=12)
     operating_area_notes: str = Field(default="", max_length=1000)
     environment_notes: str = Field(default="", max_length=1000)
     constraints: list[str] = Field(default_factory=list, max_length=12)
     geographic_mission: Optional[GeographicMissionIntent] = None
+    # schema_version 1 = legacy geographic_mission (read-only); 2 = mission_plan with generated routes.
+    schema_version: int = Field(default=1, ge=1, le=2)
+    mission_plan: Optional[MissionPlan] = None
     uav_fault_assignments: list[ScenarioUavFaultIntent] = Field(default_factory=list, max_length=12)
+    planner_conversation: list[MissionPlannerMessage] = Field(default_factory=list, max_length=80)
 
     @model_validator(mode="after")
     def validate_fault_assignments(self) -> "ScenarioIntent":
+        if self.schema_version == 2 and (self.mission_plan is None or self.geographic_mission is not None):
+            raise ValueError("Schema version 2 requires a mission_plan and no legacy geographic_mission")
+        if self.schema_version == 1 and self.mission_plan is not None:
+            raise ValueError("A mission_plan requires schema_version 2")
         ids = [assignment.uav_id for assignment in self.uav_fault_assignments]
         if len(set(ids)) != len(ids):
             raise ValueError("Each abstract simulator UAV may have only one fault assignment")
@@ -267,6 +324,11 @@ class ScenarioIntent(BaseModel):
         if any(not value for value in cleaned):
             raise ValueError("Mission intent entries cannot be blank")
         return cleaned
+
+    @field_validator("mission_description")
+    @classmethod
+    def trim_mission_description(cls, value: str) -> str:
+        return value.strip()
 
 
 ScenarioCreateRequest.model_rebuild()

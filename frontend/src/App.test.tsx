@@ -9,6 +9,7 @@ vi.mock('./services/api', () => ({
     health: vi.fn(),
     session: vi.fn(),
     commandDecisions: vi.fn(),
+    researchModelInfo: vi.fn(async () => ({ available: false, formula: '', live_residual_inputs_available: false })), researchDecisions: vi.fn(async () => []), attackExperiments: vi.fn(async () => []), attackLabLimits: vi.fn(), scenarioList: vi.fn(async () => []),
   },
 }))
 
@@ -17,7 +18,6 @@ vi.mock('gsap/ScrollTrigger', () => ({ ScrollTrigger: {} }))
 vi.mock('./components/AccessPortal', () => ({ AccessPortal: () => null }))
 vi.mock('./components/CommandDecisionPanel', () => ({ CommandDecisionPanel: () => null }))
 vi.mock('./components/Map2D', () => ({ Map2D: () => null }))
-vi.mock('./components/MissionAssistant', () => ({ MissionAssistant: () => null }))
 vi.mock('./components/ScenarioWorkspace', () => ({ ScenarioWorkspace: () => null }))
 vi.mock('./components/Px4MissionControl', () => ({ Px4MissionControl: () => <div data-testid="px4-mission-control">PX4 telemetry view</div> }))
 
@@ -65,9 +65,8 @@ describe('Mission Control routing', () => {
   it('renders Mission Control from a direct link and preserves the session while navigating', async () => {
     const { unmount } = render(<App />)
 
-    expect(await screen.findByRole('heading', { name: 'Build a repeatable mission scenario.' })).toBeTruthy()
+    expect(await screen.findByTestId('px4-mission-control')).toBeTruthy()
     expect(window.location.pathname).toBe('/mission-control')
-    expect(screen.getByRole('button', { name: 'CREATE & DEPLOY FLEET' }).hasAttribute('disabled')).toBe(false)
     expect(screen.queryByText('The backend verifies credentials and returns a revocable session.')).toBeNull()
 
     fireEvent.click(screen.getByRole('button', { name: /^Research$/ }))
@@ -75,14 +74,14 @@ describe('Mission Control routing', () => {
     expect(window.location.pathname).toBe('/research')
 
     fireEvent.click(screen.getByRole('button', { name: /^Mission Control$/ }))
-    expect(await screen.findByRole('heading', { name: 'Build a repeatable mission scenario.' })).toBeTruthy()
+    expect(await screen.findByTestId('px4-mission-control')).toBeTruthy()
     expect(window.location.pathname).toBe('/mission-control')
     expect(apiMock.session).toHaveBeenCalledTimes(1)
 
     unmount()
     window.history.replaceState({}, '', '/mission-control')
     render(<App />)
-    await waitFor(() => expect(screen.getByRole('heading', { name: 'Build a repeatable mission scenario.' })).toBeTruthy())
+    await waitFor(() => expect(screen.getByTestId('px4-mission-control')).toBeTruthy())
   })
 
   it('keeps Operator mission access while hiding General-only navigation', async () => {
@@ -94,20 +93,31 @@ describe('Mission Control routing', () => {
 
     render(<App />)
 
-    expect(await screen.findByRole('heading', { name: 'Build a repeatable mission scenario.' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'CREATE & DEPLOY FLEET' }).hasAttribute('disabled')).toBe(false)
+    expect(await screen.findByTestId('px4-mission-control')).toBeTruthy()
     expect(screen.queryByRole('button', { name: /^GENERAL$/ })).toBeNull()
   })
 
-  it('opens the PX4 telemetry view inside the existing Mission Control route', async () => {
+  it('shows only the live PX4 dashboard in Mission Control and keeps the abstract simulation under Research', async () => {
     render(<App />)
-
-    expect(await screen.findByRole('heading', { name: 'Build a repeatable mission scenario.' })).toBeTruthy()
-    fireEvent.click(screen.getByRole('tab', { name: 'LIVE PX4 TELEMETRY' }))
 
     expect(await screen.findByTestId('px4-mission-control')).toBeTruthy()
     expect(window.location.pathname).toBe('/mission-control')
-    expect(screen.getByRole('tab', { name: 'ABSTRACT RESEARCH SIMULATION' }).getAttribute('aria-selected')).toBe('false')
+    expect(screen.queryByRole('tab', { name: 'ABSTRACT RESEARCH SIMULATION' })).toBeNull()
+    expect(screen.queryByRole('tab', { name: 'LIVE PX4 TELEMETRY' })).toBeNull()
+    expect(screen.queryByRole('heading', { name: 'Build a repeatable mission scenario.' })).toBeNull()
+    expect(screen.queryByText(/Deterministic software simulation/)).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: /^Research$/ }))
+    const offline = await screen.findByRole('region', { name: 'Offline research simulation' })
+    expect(offline.textContent).toMatch(/NOT LIVE PX4/)
+    expect(screen.queryByRole('heading', { name: 'Build a repeatable mission scenario.' })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'OPEN SIMULATION' }))
+    expect(await screen.findByRole('heading', { name: 'Build a repeatable mission scenario.' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'CREATE & DEPLOY FLEET' }).hasAttribute('disabled')).toBe(false)
+
+    fireEvent.click(screen.getByRole('button', { name: /^Mission Control$/ }))
+    expect(await screen.findByTestId('px4-mission-control')).toBeTruthy()
+    expect(screen.queryByRole('heading', { name: 'Build a repeatable mission scenario.' })).toBeNull()
   })
 
   it('shows the signed-in General display name in the General header', async () => {

@@ -1,4 +1,4 @@
-import { AlertTriangle, Battery, BatteryWarning, Box, CheckCircle2, Circle, Layers, LocateFixed, Maximize2, Satellite } from 'lucide-react'
+import { AlertTriangle, Battery, BatteryWarning, Box, CheckCircle2, Layers, LocateFixed, Maximize2, Satellite } from 'lucide-react'
 import type { MissionDeployment } from '../services/auth'
 import type { GazeboPoseSnapshot } from '../types'
 import type { MapLayers, Basemap } from './CesiumLiveMap'
@@ -17,21 +17,21 @@ export function ConnectionChips({ chips }: { chips: StatusChip[] }) {
     <li key={chip.key} className={`mc-chip ${chip.state}`} title={chip.detail}><i aria-hidden="true"/><span>{chip.label}</span><b>{chip.detail}</b></li>)}</ul>
 }
 
-export function HeaderStrip({ deployment, chips, onOpenScenarioLab }: { deployment: MissionDeployment | null; chips: StatusChip[]; onOpenScenarioLab?: () => void }) {
+export function HeaderStrip({ deployment, chips, onOpenScenarioLab, loading = false }: { deployment: MissionDeployment | null; chips: StatusChip[]; onOpenScenarioLab?: () => void; loading?: boolean }) {
   const legacy = isLegacyDeployment(deployment)
   const routes = deployment?.intent.mission_plan?.aircraft.filter(item => item.route).length ?? 0
   const scenarioLab = onOpenScenarioLab ? <button type="button" className="inline-link" onClick={onOpenScenarioLab}>Open Scenario Lab</button> : null
   return <header className="mc-header panel" aria-label="Mission header">
     <div className="mc-header-main">
       <span className="eyebrow">LIVE OPERATIONS · PX4 SITL</span>
-      <h3>{deployment ? deployment.scenario_title : 'No mission deployed'}</h3>
+      <h3>{deployment ? deployment.scenario_title : loading ? 'Loading the deployed mission…' : 'No mission deployed'}</h3>
       <small>{deployment
         ? `${deploymentVersionLabel(deployment)} · ${legacy ? 'legacy (schema 1), no generated routes' : `schema 2 · ${routes} generated route${routes === 1 ? '' : 's'} on the map`} · hash ${deployment.scenario_version_hash.slice(0, 12)}`
-        : 'Use Deploy to Mission Control in Scenario Lab to load a validated mission here.'}</small>
-      {!deployment && scenarioLab}
+        : loading ? 'Reading the latest deployment from the backend.' : 'Use Deploy to Mission Control in Scenario Lab to load a validated mission here.'}</small>
+      {!deployment && !loading && scenarioLab}
     </div>
     <div className="mc-header-status">
-      <span className="mc-status-tag">{deployment ? 'DEPLOYED TO MISSION CONTROL' : 'NOT DEPLOYED'}</span>
+      <span className="mc-status-tag">{deployment ? 'DEPLOYED TO MISSION CONTROL' : loading ? 'LOADING' : 'NOT DEPLOYED'}</span>
       {deployment && <small>{deployment.execution_status.replace(/_/g, ' ').toLowerCase()} · not executing on PX4</small>}
     </div>
     <ConnectionChips chips={chips}/>
@@ -99,30 +99,10 @@ export function AlertsPanel({ alerts, acknowledged, onAcknowledge }: { alerts: A
   </section>
 }
 
-export function MissionStatus({ deployment, rows }: { deployment: MissionDeployment | null; rows: AircraftRow[] }) {
-  return <section className="panel mc-panel" aria-label="Mission status">
-    <div className="panel-heading"><div><span className="eyebrow">MISSION STATUS</span><h3>Deployed mission</h3></div></div>
-    {!deployment ? <div className="mc-empty"><Circle size={18}/><span>No deployed mission.</span></div> : <>
-      <ul className="mc-lifecycle" aria-label="Mission lifecycle">
-        <li className="done"><CheckCircle2 size={13}/>Deployed to Mission Control</li>
-        <li className="na"><Circle size={13}/>Uploaded to PX4 <small>not available yet</small></li>
-        <li className="na"><Circle size={13}/>Executing <small>not available yet</small></li>
-      </ul>
-      <small className="mc-note">Deployment hands the validated plan to this page only. Nothing is uploaded to PX4 and no aircraft is commanded.</small>
-      {isLegacyDeployment(deployment) && <small className="mc-note">This is a legacy (schema 1) deployment: no generated routes are available to draw.</small>}
-      <ul className="mc-mission-rows">{rows.filter(row => row.plan).map(row => <li key={row.id}>
-        <b>{row.id}</b><span>{row.plan?.role ?? 'no role'} · {row.plan?.task_type?.replace(/_/g, ' ') ?? 'no task'}</span>
-        <small>{routeSummary(row.plan)}</small>
-        <small>Progress: {row.vehicle?.mission && row.vehicle.mission.mission_state !== 1 ? `PX4 reports waypoint ${row.vehicle.mission.current_sequence + 1} (not linked to this plan)` : 'not started'}</small>
-      </li>)}</ul>
-    </>}
-  </section>
-}
-
 export function FlightLog({ entries }: { entries: LogEntry[] }) {
   return <section className="panel mc-panel" aria-label="Flight log">
     <div className="panel-heading"><div><span className="eyebrow">FLIGHT LOG · SESSION LOG</span><h3>Observed events <span className="count-tag">{entries.length}</span></h3></div></div>
-    <small className="mc-note">Transitions observed by this browser since the page opened (no backend event feed exists yet). It is not a flight record.</small>
+    <small className="mc-note">Mission execution events (start, upload, arm, take-off, waypoints, final state) come from the backend record. Link and health transitions are observed by this browser since the page opened.</small>
     {entries.length === 0 ? <div className="mc-empty"><span>No transitions observed yet.</span></div>
       : <ol className="mc-log" reversed>{[...entries].reverse().map(entry => <li key={entry.key} className={entry.kind}><time>{new Date(entry.time).toLocaleTimeString()}</time><span>{entry.message}</span></li>)}</ol>}
   </section>

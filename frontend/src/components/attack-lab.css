@@ -27,7 +27,31 @@
 .attack-timeline-bar i{position:absolute;top:1px;bottom:1px;border-radius:2px;background:var(--amber);opacity:.85}.attack-timeline-bar i.over{background:var(--red)}
 .attack-readiness,.attack-measures{display:grid;gap:7px;margin:0;padding:0;list-style:none}
 .attack-readiness li{display:grid;grid-template-columns:auto minmax(0,1fr);gap:8px;align-items:start;font-size:12px}.attack-readiness li.ok svg{color:#56e3b1}.attack-readiness li.todo svg{color:var(--amber)}.attack-readiness span,.attack-measures li{display:grid;gap:2px}.attack-readiness small,.attack-measures small{color:var(--muted);font:10px/1.5 var(--mono)}.attack-measures li{font-size:12px}
-.attack-experiment-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:9px;align-items:start;margin:0;padding:0;list-style:none}
-.attack-experiment-grid li button{display:grid;gap:3px;width:100%;height:auto;align-content:start;padding:10px;border:1px solid var(--border);border-radius:4px;background:var(--bg2);color:var(--text);text-align:left;cursor:pointer}
-.attack-experiment-grid li button.selected{border-color:var(--cyan);background:rgba(85,217,255,.07)}.attack-experiment-grid small{color:var(--muted);font:9px var(--mono)}.attack-experiment-grid small.warn{color:var(--amber)}
+/* Shrinkable fields: a long option text is truncated (full text in the tooltip), never pushed under the right column. */
+.attack-lab-fields{grid-template-columns:repeat(auto-fit,minmax(min(100%,190px),1fr))}
+.attack-lab-fields>label,.attack-row>label{min-width:0}
+.attack-lab-fields select,.attack-lab-fields input,.attack-row select,.attack-row input{min-width:0;width:100%;max-width:100%;box-sizing:border-box;text-overflow:ellipsis;overflow:hidden;white-space:nowrap}
+.attack-version-status{display:block;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted);font:10px var(--mono);letter-spacing:0;text-transform:none}
+.attack-mission-summary dd{min-width:0;overflow-wrap:anywhere}
+/* Saved experiments: full-width responsive cards. */
+.attack-lab-list{width:100%}
+.attack-experiment-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,300px),1fr));gap:12px;align-items:stretch;margin:0;padding:0;list-style:none}
+.attack-exp-card{display:grid;gap:8px;align-content:start;min-width:0;padding:12px;border:1px solid var(--border);border-radius:4px;background:var(--bg2)}
+.attack-exp-card.selected{border-color:var(--cyan);background:rgba(85,217,255,.07)}
+.attack-exp-card.old{opacity:.62}.attack-exp-card.old .attack-exp-actions{opacity:1}
+.attack-exp-card>b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px}
+.attack-exp-card dl{display:grid;grid-template-columns:1fr 1fr;gap:6px 12px;margin:0}.attack-exp-card dt{color:var(--muted);font:9px var(--mono);letter-spacing:.05em}.attack-exp-card dd{margin:1px 0 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}
+.attack-exp-card small{color:var(--muted);font:10px/1.5 var(--mono)}.attack-exp-card small.warn{color:var(--amber)}
+.attack-exp-actions{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:2px}.attack-exp-actions button{min-height:28px;padding:0 10px;font-size:10px}
+.attack-confirm{display:flex;flex-wrap:wrap;gap:6px;align-items:center;flex-basis:100%;padding:6px 8px;border:1px solid var(--amber);border-radius:3px}
 @media(max-width:1099px){.attack-lab-grid,.attack-lab-head{grid-template-columns:minmax(0,1fr)}.attack-lab-right{position:static;max-height:none;overflow:visible}}
+
+/* The overview column follows the page while the long builder scrolls (the top bar is not pinned, so it sits near the top edge). */
+.attack-lab-right{top:16px;max-height:calc(100vh - 32px)}
+/* The status under the version selector is the full text on its own line(s); only the selector itself is truncated. */
+.attack-version-status{white-space:normal;overflow:visible;text-overflow:clip;overflow-wrap:anywhere}
+/* Saved experiments: cards share the full width (no empty column), and their actions line up along the bottom edge. */
+.attack-experiment-grid{grid-template-columns:repeat(auto-fit,minmax(min(100%,300px),1fr))}
+.attack-exp-card{display:flex;flex-direction:column}
+.attack-exp-card dl{grid-template-columns:repeat(auto-fit,minmax(120px,1fr))}
+.attack-exp-actions{margin-top:auto;padding-top:4px}

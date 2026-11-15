@@ -229,3 +229,72 @@ def test_no_static_api_path_is_captured_by_an_earlier_parameterised_route(genera
             scope = {"type": "http", "path": route.path, "method": method, "root_path": ""}
             shadowing = [earlier.path for earlier in routes[:index] if earlier.matches(scope)[0] == Match.FULL]
             assert not shadowing, f"{method} {route.path} is shadowed by {shadowing}"
+
+
+# --- the same walk, continued to "Start in simulation" (fake executor running the real state machine) -----------------
+
+from test_mission_execution_api import sim, vehicle  # noqa: E402,F401  (sim is a fixture)
+
+
+def _start(client, deployment_id):
+    return client.post("/api/mission-control/executions", json={"deployment_id": deployment_id, "confirm": True})
+
+
+def _finish_flight(sim):  # noqa: F811
+    executor, fake = sim.fly()
+    last = len(sim.runs[0]["mission"]["items"]) - 1
+    for seq in range(0, last + 1):
+        fake.reach(seq)
+    fake.current(last, mission_state=5)
+    sim.advance(2)
+    fake.armed = False
+    sim.advance(3)
+    return executor
+
+
+def test_general_plans_deploys_and_starts_in_simulation_then_a_new_version_must_be_redeployed(general_client, sim):  # noqa: F811
+    client, _ = general_client
+    plan = _generate_routes_and_confirm(client, _draft())
+    saved = client.post("/api/scenarios", json=_body(plan, "Flow start")).json()
+    scenario_id, first = saved["id"], saved["versions"][0]["id"]
+    deployment = client.post(f"/api/scenarios/{scenario_id}/versions/{first}/deploy").json()
+    assert client.get(f"/api/mission-control/executions/preflight?deployment_id={deployment['id']}").json()["can_start"] is True
+    started = _start(client, deployment["id"])
+    assert started.status_code == 201, started.text
+    execution_id = started.json()["id"]
+    _finish_flight(sim)
+    done = client.get("/api/mission-control/executions/latest").json()["execution"]
+    assert (done["id"], done["state"], done["percent"], done["deployment_id"]) == (execution_id, "completed", 100.0, deployment["id"])
+    kinds = [event["type"] for event in client.get(f"/api/mission-control/executions/{execution_id}/events").json()["events"]]
+    assert kinds[0] == "start_requested" and kinds[-1] == "completed" and "uploaded" in kinds and "armed" in kinds
+    # Mission Control still shows the deployment; the mission plan in it carries no execution or attack data.
+    shown = _mission_control(client)
+    assert shown["id"] == deployment["id"] and not forbidden_fields(_all_keys(shown))
+    # Back in Scenario Lab a new version is saved: the deployed one is superseded and can no longer be started.
+    second = client.put(f"/api/scenarios/{scenario_id}", json=_body({**plan, "notes": "v2"}, "Flow start")).json()["versions"][0]["id"]
+    refused = _start(client, deployment["id"])
+    assert refused.status_code == 409 and refused.json()["detail"]["code"] == "version_superseded"
+    redeployed = client.post(f"/api/scenarios/{scenario_id}/versions/{second}/deploy").json()
+    again = _start(client, redeployed["id"])
+    assert again.status_code == 201 and again.json()["scenario_version_id"] == second
+
+
+def test_operator_submits_is_approved_deploys_and_starts_and_a_general_can_abort(general_client, operator_client, sim):  # noqa: F811
+    general, _ = general_client
+    operator, user = operator_client
+    plan = _generate_routes_and_confirm(operator, _draft())
+    saved = operator.post("/api/scenarios", json=_body(plan, "Operator flow start")).json()
+    scenario_id, version_id = saved["id"], saved["versions"][0]["id"]
+    assert operator.post(f"/api/scenarios/{scenario_id}/versions/{version_id}/deploy").json()["detail"]["code"] == "approval_required"
+    request_id = operator.post(f"/api/scenarios/{scenario_id}/versions/{version_id}/submit").json()["id"]
+    assert general.post(f"/api/general/scenario-approvals/{request_id}/decision", json={"decision": "approve", "reason": "Routes reviewed."}).status_code == 200
+    deployment = operator.post(f"/api/scenarios/{scenario_id}/versions/{version_id}/deploy").json()
+    preflight = operator.get(f"/api/mission-control/executions/preflight?deployment_id={deployment['id']}").json()
+    assert preflight["can_start"] is True and preflight["role_rule"]["code"] == "approved"
+    started = _start(operator, deployment["id"])
+    assert started.status_code == 201 and started.json()["started_by_name"] == user.full_name
+    sim.fly()
+    aborted = general.post(f"/api/mission-control/executions/{started.json()['id']}/abort")
+    assert aborted.status_code == 200
+    sim.advance(3)
+    assert operator.get("/api/mission-control/executions/latest").json()["execution"]["state"] == "returning"

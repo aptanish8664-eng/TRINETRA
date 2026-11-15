@@ -4,6 +4,7 @@ import asyncio
 import logging
 import math
 import time
+from collections import deque
 from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any
@@ -17,8 +18,18 @@ _MAVLINK_FRAME_STARTS = {0xFE, 0xFD}
 _SUPPORTED_TYPES = {
     "HEARTBEAT", "GLOBAL_POSITION_INT", "ATTITUDE", "GPS_RAW_INT",
     "HIGHRES_IMU", "SYS_STATUS", "BATTERY_STATUS", "MISSION_CURRENT",
+    "LOCAL_POSITION_NED", "ESTIMATOR_STATUS", "VIBRATION",
 }
 _TRAIL_MAX_POINTS = 3000
+_RATE_WINDOW_S = 5.0
+# Raw detector streams kept since arming (PX4-clock stamps). Sized for the detector's 300 s window at the requested rates.
+_DETECTOR_GPS_MAX = 4000
+_DETECTOR_VELOCITY_MAX = 9000
+
+
+def _new_detector_buffer() -> dict[str, Any]:
+    return {"gps": deque(maxlen=_DETECTOR_GPS_MAX), "velocity": deque(maxlen=_DETECTOR_VELOCITY_MAX),
+            "flight_start_t": None, "origin": None, "armed_at_monotonic": None, "disarmed_at_monotonic": None}
 
 
 def _utc_now() -> str:
@@ -94,6 +105,8 @@ class Px4TelemetryStore:
         kind = message.get_type()
         if kind not in _SUPPORTED_TYPES:
             return
+        if kind == "HEARTBEAT" and int(message.autopilot) != mavlink2.MAV_AUTOPILOT_PX4 and f"px4-{system_id}" not in self._vehicles:
+            return   # a ground-station or companion heartbeat (for example the mission executor's) is not an aircraft
         # MAVLink system IDs identify aircraft; component IDs identify autopilot,
         # IMU, gimbal and other subsystems within that same aircraft.
         vehicle_key = f"px4-{system_id}"
@@ -113,7 +126,7 @@ class Px4TelemetryStore:
             "mission": None,
             "threat_assessment": {
                 "status": "not_available",
-                "reason": "PX4 sensor stream is not yet validated with the TRINETRA detector.",
+                "reason": "Not part of this snapshot. Live assessments are served by GET /api/research/live.",
             },
             "last_heartbeat_at": None,
             "last_message_at": received_at,
@@ -121,7 +134,19 @@ class Px4TelemetryStore:
             "_last_heartbeat_monotonic": None,
             "_source": source,
             "_trail": [],
+            "estimator_status": None,
+            "vibration": None,
+            "_detector": _new_detector_buffer(),
+            "_rates": {},
+            "_received": {},
         })
+        rate = vehicle["_rates"].setdefault(kind, [0, received_monotonic, None])
+        rate[0] += 1
+        if received_monotonic - rate[1] >= _RATE_WINDOW_S:
+            rate[2] = rate[0] / (received_monotonic - rate[1])
+            rate[0], rate[1] = 0, received_monotonic
+        vehicle["_received"][kind] = received_monotonic
+        detector = vehicle["_detector"]
         vehicle["last_message_at"] = received_at
         vehicle["_last_message_monotonic"] = received_monotonic
         vehicle["_source"] = source
@@ -130,6 +155,11 @@ class Px4TelemetryStore:
                 return
             vehicle["component_id"] = component_id
             armed_flag = bool(message.base_mode & mavlink2.MAV_MODE_FLAG_SAFETY_ARMED)
+            if armed_flag and not vehicle["armed"]:      # a new flight: the detector window starts again
+                vehicle["_detector"] = detector = _new_detector_buffer()
+                detector["armed_at_monotonic"] = received_monotonic
+            elif not armed_flag and vehicle["armed"]:    # the flight ended: PX4 disarmed (after landing)
+                detector["disarmed_at_monotonic"] = received_monotonic
             vehicle["armed"] = armed_flag
             vehicle["heartbeat"] = {
                 "vehicle_type": int(message.type),
@@ -191,7 +221,22 @@ class Px4TelemetryStore:
 
         elif kind == "GPS_RAW_INT":
             fix_type = int(message.fix_type)
+            speed = None if int(message.vel) == 65535 else int(message.vel) / 100.0
+            course = None if int(message.cog) == 65535 else int(message.cog) / 100.0
+            if vehicle["armed"] and fix_type >= 3:
+                stamp = int(message.time_usec) / 1e6
+                if detector["flight_start_t"] is None:
+                    detector["flight_start_t"] = stamp
+                    detector["origin"] = (int(message.lat) / 1e7, int(message.lon) / 1e7, int(message.alt) / 1000.0)
+                moving = speed is not None and course is not None
+                detector["gps"].append((
+                    stamp, int(message.lat) / 1e7, int(message.lon) / 1e7, int(message.alt) / 1000.0,
+                    speed * math.cos(math.radians(course)) if moving else math.nan,
+                    speed * math.sin(math.radians(course)) if moving else math.nan,
+                ))
             vehicle["gps_raw"] = {
+                "ground_speed_m_s": speed,
+                "course_deg": course,
                 "latitude": int(message.lat) / 1e7,
                 "longitude": int(message.lon) / 1e7,
                 "altitude_m": int(message.alt) / 1000.0,
@@ -224,6 +269,32 @@ class Px4TelemetryStore:
                 ],
                 "temperature_c": _updated_imu_value(message.temperature, fields_updated, 4096),
                 "fields_updated": fields_updated,
+                "source_message": kind,
+                "source_time_usec": int(message.time_usec),
+                "received_at": received_at,
+            }
+
+        elif kind == "LOCAL_POSITION_NED":
+            if vehicle["armed"]:
+                detector["velocity"].append((int(message.time_boot_ms) / 1e3, float(message.vx), float(message.vy), float(message.vz)))
+
+        elif kind == "ESTIMATOR_STATUS":
+            vehicle["estimator_status"] = {
+                "flags": int(message.flags),
+                "velocity_test_ratio": _finite_or_none(float(message.vel_ratio)),
+                "horizontal_position_test_ratio": _finite_or_none(float(message.pos_horiz_ratio)),
+                "vertical_position_test_ratio": _finite_or_none(float(message.pos_vert_ratio)),
+                "magnetometer_test_ratio": _finite_or_none(float(message.mag_ratio)),
+                "horizontal_position_accuracy_m": _finite_or_none(float(message.pos_horiz_accuracy)),
+                "source_message": kind,
+                "source_time_usec": int(message.time_usec),
+                "received_at": received_at,
+            }
+
+        elif kind == "VIBRATION":
+            vehicle["vibration"] = {
+                "vibration_m_s2": [_finite_or_none(float(value)) for value in (message.vibration_x, message.vibration_y, message.vibration_z)],
+                "accelerometer_clipping": [int(message.clipping_0), int(message.clipping_1), int(message.clipping_2)],
                 "source_message": kind,
                 "source_time_usec": int(message.time_usec),
                 "received_at": received_at,
@@ -317,6 +388,52 @@ class Px4TelemetryStore:
             },
             "vehicles": vehicles,
         }
+
+    def detector_inputs(self, vehicle_id: str, *, now_monotonic: float | None = None) -> dict[str, Any] | None:
+        """Raw detector streams for one aircraft since arming, with per-message ages and measured rates.
+
+        Sensors only: nothing here comes from simulator truth.
+        """
+        current = self._vehicles.get(vehicle_id)
+        if current is None:
+            return None
+        now = time.monotonic() if now_monotonic is None else now_monotonic
+        detector = current["_detector"]
+        heartbeat_time = current["_last_heartbeat_monotonic"]
+        heartbeat_age = None if heartbeat_time is None else max(0.0, now - heartbeat_time)
+        message_age = max(0.0, now - current["_last_message_monotonic"])
+        if heartbeat_age is None or heartbeat_age > self.disconnected_after_seconds or message_age > self.disconnected_after_seconds:
+            status = "disconnected"
+        elif message_age > self.stale_after_seconds:
+            status = "stale"
+        else:
+            # A late heartbeat (1 Hz) while position and attitude keep arriving is a busy host, not a lost link.
+            status = "connected"
+        rates = {}
+        for kind, (_count, _started, rate) in list(current["_rates"].items()):
+            age = now - current["_received"][kind]
+            # a stream that stopped must not keep showing its last measured rate
+            rates[kind] = None if rate is None else (0.0 if age > _RATE_WINDOW_S else round(rate, 2))
+        return {
+            "id": vehicle_id, "status": status, "armed": current["armed"],
+            "telemetry_age_seconds": round(max(0.0, now - current["_last_message_monotonic"]), 3),
+            "heartbeat_age_seconds": None if heartbeat_age is None else round(heartbeat_age, 3),
+            "ages_seconds": {kind: round(max(0.0, now - at), 3) for kind, at in list(current["_received"].items())},
+            "rates_hz": rates,
+            "gps": list(detector["gps"]), "velocity": list(detector["velocity"]),
+            "flight_start_t": detector["flight_start_t"], "origin": detector["origin"],
+            "armed_for_seconds": None if detector["armed_at_monotonic"] is None or not current["armed"] else round(now - detector["armed_at_monotonic"], 1),
+            "disarmed_for_seconds": None if detector["disarmed_at_monotonic"] is None or current["armed"] else round(max(0.0, now - detector["disarmed_at_monotonic"]), 1),
+            "battery": deepcopy(current["battery"]), "mission": deepcopy(current["mission"]),
+            "gps_raw": deepcopy(current["gps_raw"]), "imu_raw": deepcopy(current["imu_raw"]),
+            "estimator_status": deepcopy(current["estimator_status"]), "vibration": deepcopy(current["vibration"]),
+            "flight_mode": (current["heartbeat"] or {}).get("flight_mode"),
+        }
+
+    def vehicle_ids(self) -> list[str]:
+        """Aircraft that have sent a PX4 autopilot heartbeat (other MAVLink senders on the link are not aircraft)."""
+        return sorted((key for key, item in self._vehicles.items() if item["_last_heartbeat_monotonic"] is not None),
+                      key=lambda key: self._vehicles[key]["system_id"])
 
     def stream_snapshot(self, *, since: str | None = None) -> dict[str, Any]:
         """Return a full first frame or compact trail deltas after a cursor."""

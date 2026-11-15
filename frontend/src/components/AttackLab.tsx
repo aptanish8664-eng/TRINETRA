@@ -75,6 +75,7 @@ export function AttackLab({ canEdit, initialScenarioId = null, onOpenScenarioLab
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   const [loaded, setLoaded] = useState(false)
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
 
   const refresh = useCallback(async () => {
     const [list, picker] = await Promise.all([api.attackExperiments(), api.attackLabMissions()])
@@ -119,7 +120,7 @@ export function AttackLab({ canEdit, initialScenarioId = null, onOpenScenarioLab
 
   const open = (experiment: Experiment) => {
     setEditingId(experiment.id)
-    setReadOnly(experiment.status !== 'draft')
+    setReadOnly(false)
     setDraft({ name: experiment.name, scenario_id: experiment.scenario_id, scenario_version_id: experiment.scenario_version_id, preset_id: experiment.preset_id, seed: experiment.seed, config: experiment.config, status: experiment.status })
     setIssues([]); setError(''); setMessage(''); setValidated(null)
     window.scrollTo?.({ top: 0, behavior: 'smooth' })
@@ -160,12 +161,16 @@ export function AttackLab({ canEdit, initialScenarioId = null, onOpenScenarioLab
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'Validation failed.') } finally { setBusy(false) }
   }
 
+  const editing = experiments.find(item => item.id === editingId) ?? null
+  const asCopy = Boolean(editing?.has_results)
   const save = async (status: 'draft' | 'ready') => {
     setBusy(true); setError(''); setIssues([])
     try {
-      const saved = editingId ? await api.updateExperiment(editingId, payload(status)) : await api.createExperiment(payload(status))
-      setEditingId(saved.id); setReadOnly(saved.status !== 'draft'); setValidated(true)
-      setMessage(`Saved “${saved.name}” as ${saved.status}. Nothing was executed.`)
+      const saved = !editingId ? await api.createExperiment(payload(status))
+        : asCopy ? await api.copyExperiment(editingId, payload(status)) : await api.updateExperiment(editingId, payload(status))
+      setEditingId(saved.id); setReadOnly(false); setValidated(true)
+      setDraft(current => ({ ...current, name: saved.name }))
+      setMessage(asCopy ? `Saved as a copy: “${saved.name}”. The original and its results are unchanged. Nothing was executed.` : `Saved “${saved.name}” as ${saved.status}. Nothing was executed.`)
       await refresh()
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'The experiment could not be saved.')
@@ -174,11 +179,26 @@ export function AttackLab({ canEdit, initialScenarioId = null, onOpenScenarioLab
     } finally { setBusy(false) }
   }
 
-  const remove = async () => {
-    if (!editingId) return
-    setBusy(true)
-    try { await api.deleteExperiment(editingId); startNew(); await refresh(); setMessage('Draft deleted.') }
-    catch (cause) { setError(cause instanceof Error ? cause.message : 'The draft could not be deleted.') } finally { setBusy(false) }
+  const remove = async (target: Experiment) => {
+    setBusy(true); setConfirmDelete(null)
+    try {
+      await api.deleteExperiment(target.id)
+      if (editingId === target.id) startNew()
+      await refresh()
+      setMessage(target.has_results ? `Deleted “${target.name}”. Its ${target.result_count} stored result(s) were kept, marked “from a deleted experiment”.` : `Deleted “${target.name}”.`)
+    } catch (cause) { setError(cause instanceof Error ? cause.message : 'The experiment could not be deleted.') } finally { setBusy(false) }
+  }
+  const repin = async (target: Experiment) => {
+    setBusy(true); setError('')
+    try {
+      const moved = await api.repinExperiment(target.id)
+      await refresh()
+      setMessage(moved.id === target.id ? `“${target.name}” now uses the latest version; its attacks were not changed.`
+        : `“${target.name}” has results, so the update was saved as a copy: “${moved.name}” (latest version). The original is unchanged.`)
+    } catch (cause) {
+      const found = (cause as { detail?: { issues?: ExperimentIssue[] } } | null)?.detail?.issues
+      setError(cause instanceof Error ? `${cause.message}${found?.length ? `: ${found.map(item => item.message).join('; ')}` : ''}` : 'The experiment could not be re-pinned.')
+    } finally { setBusy(false) }
   }
 
   return <section className="attack-lab" aria-label={ATTACK_LAB_NAME}>
@@ -198,17 +218,18 @@ export function AttackLab({ canEdit, initialScenarioId = null, onOpenScenarioLab
     <div className="attack-lab-grid">
       <div className="attack-lab-left">
         <section className="panel attack-card" aria-label="Mission and version">
-          <div className="panel-heading"><div><span className="eyebrow">{editingId ? (readOnly ? 'VIEWING · LOCKED' : 'EDITING DRAFT') : 'NEW EXPERIMENT'} · STEP 1</span><h3><FlaskConical size={15}/> Mission and version</h3></div>
+          <div className="panel-heading"><div><span className="eyebrow">{editingId ? (readOnly ? 'VIEWING' : asCopy ? 'EDITING · SAVES AS A COPY' : 'EDITING') : 'NEW EXPERIMENT'} · STEP 1</span><h3><FlaskConical size={15}/> Mission and version</h3></div>
             {canEdit && <button type="button" className="button-secondary" onClick={startNew}><Plus size={13}/> NEW EXPERIMENT</button>}</div>
           <fieldset disabled={locked || busy} className="attack-lab-fields">
             <label>EXPERIMENT NAME<input value={draft.name} maxLength={120} onChange={event => update({ name: event.target.value })} placeholder="Name this experiment"/></label>
-            <label>MISSION (saved schema-2 scenarios)<select aria-label="Mission" value={draft.scenario_id} onChange={event => {
+            <label>MISSION (saved schema-2 scenarios)<select aria-label="Mission" title={mission?.title} value={draft.scenario_id} onChange={event => {
               const next = missions.find(item => item.scenario_id === event.target.value)
               update({ scenario_id: event.target.value, scenario_version_id: next?.versions[0]?.id ?? '', preset_id: null, config: { ...draft.config, attacks: [] } })
             }}>
               <option value="">Choose a saved mission</option>{missions.map(item => <option key={item.scenario_id} value={item.scenario_id}>{item.title} · {item.versions.length} version{item.versions.length === 1 ? '' : 's'}</option>)}</select></label>
-            <label>VERSION<select aria-label="Version" value={draft.scenario_version_id} disabled={!mission} onChange={event => update({ scenario_version_id: event.target.value })}>
-              <option value="">Choose an exact version</option>{(mission?.versions ?? []).map(item => <option key={item.id} value={item.id}>v{item.version_number} · {versionMarks(item)}</option>)}</select></label>
+            <label className="attack-version">VERSION<select aria-label="Version" title={version ? `v${version.version_number} · ${versionMarks(version)}` : 'Choose an exact version'} value={draft.scenario_version_id} disabled={!mission} onChange={event => update({ scenario_version_id: event.target.value })}>
+              <option value="">Choose an exact version</option>{(mission?.versions ?? []).map(item => <option key={item.id} value={item.id} title={`v${item.version_number} · ${versionMarks(item)}`}>v{item.version_number} · {versionMarks(item)}</option>)}</select>
+              <small className="attack-version-status" role="status">{version ? `v${version.version_number}: ${versionMarks(version)}` : mission ? 'No version chosen' : 'Choose a mission first'}</small></label>
           </fieldset>
           {loaded && missions.length === 0 && <p className="planner-empty">No saved schema-2 scenario yet. Plan and save one in Scenario Lab; it will be listed here.{legacyOnly > 0 ? ` ${legacyOnly} legacy scenario(s) are not listed because they have no route plan.` : ''}</p>}
           {mission && !version && <p className="planner-empty">Choose the exact version to pin this experiment to.</p>}
@@ -275,11 +296,10 @@ export function AttackLab({ canEdit, initialScenarioId = null, onOpenScenarioLab
             <ul aria-label="Experiment issues">{issues.map((issue, index) => <li key={`${issue.code}-${index}`}>{issue.message}</li>)}</ul></div>}
           {!locked && <div className="scenario-library-actions">
             <button type="button" className="button-secondary" disabled={busy || !draft.scenario_version_id} onClick={() => void validate()}>VALIDATE</button>
-            <button type="button" className="button-primary" disabled={busy || !draft.name.trim() || !draft.scenario_version_id} onClick={() => void save('draft')}><Save size={14}/> SAVE DRAFT</button>
-            <button type="button" className="button-secondary" disabled={busy || !draft.name.trim() || !draft.scenario_version_id} onClick={() => void save('ready')} title="Marks the experiment ready and locks it from further edits">SAVE AS READY (LOCKS)</button>
-            {editingId && <button type="button" className="button-quiet" disabled={busy} onClick={() => void remove()}><Trash2 size={13}/> DELETE DRAFT</button>}
+            <button type="button" className="button-primary" disabled={busy || !draft.name.trim() || !draft.scenario_version_id} onClick={() => void save('draft')}><Save size={14}/> {asCopy ? 'SAVE AS COPY' : 'SAVE DRAFT'}</button>
+            <button type="button" className="button-secondary" disabled={busy || !draft.name.trim() || !draft.scenario_version_id} onClick={() => void save('ready')} title="Marks the experiment ready to run. It can still be edited in place until it has results.">SAVE AS READY</button>
           </div>}
-          {readOnly && editingId && <p className="permission-note">Ready experiments are locked. Create a new experiment to change them.</p>}
+          {asCopy && editing && <p className="attack-flag warn" role="note">This experiment has {editing.result_count} stored result(s), so it cannot be changed in place. Saving creates a new draft, “{draft.name}” renamed with a version suffix, and leaves the original and its results as they are.</p>}
         </section>
       </div>
 
@@ -317,13 +337,31 @@ export function AttackLab({ canEdit, initialScenarioId = null, onOpenScenarioLab
 
     <section className="panel attack-card attack-lab-list" aria-label="Experiments">
       <div className="panel-heading"><div><span className="eyebrow">SAVED EXPERIMENTS</span><h3>Experiments <span className="count-tag">{experiments.length}</span></h3></div></div>
-      {experiments.length === 0 ? <p className="planner-empty">No experiments yet. Build one above and save it.</p> : <ul className="attack-experiment-grid">{experiments.map(item => <li key={item.id}>
-        <button type="button" className={editingId === item.id ? 'selected' : ''} onClick={() => open(item)} aria-label={`Open experiment ${item.name}`}>
-          <b>{item.name}</b>
-          <small>{item.status.toUpperCase()}{presetLabel(item.preset_id) ? ` · ${presetLabel(item.preset_id)}` : ' · custom'} · {item.config.attacks.length} attack(s)</small>
-          <small>{missionOf(item)}</small>
-          {item.superseded && <small className="warn">Mission version superseded; the experiment stays pinned to it</small>}
-        </button></li>)}</ul>}
+      {experiments.length === 0 ? <p className="planner-empty">No experiments yet. Build one above and save it.</p> : <ul className="attack-experiment-grid">{experiments.map(item => {
+        const old = item.superseded
+        const pinned = missions.find(entry => entry.scenario_id === item.scenario_id)?.versions.find(entry => entry.id === item.scenario_version_id)
+        return <li key={item.id} className={`attack-exp-card ${old ? 'old' : ''} ${editingId === item.id ? 'selected' : ''}`} aria-label={`Experiment ${item.name}`}>
+          <b title={item.name}>{item.name}</b>
+          <dl>
+            <div><dt>Preset</dt><dd>{presetLabel(item.preset_id) ?? 'custom'}</dd></div>
+            <div><dt>Attacks</dt><dd>{item.config.attacks.length}</dd></div>
+            <div><dt>Mission</dt><dd title={missionOf(item)}>{missions.find(entry => entry.scenario_id === item.scenario_id)?.title ?? 'not available'}</dd></div>
+            <div><dt>Pinned version</dt><dd>{pinned ? `v${pinned.version_number}` : 'unknown'}</dd></div>
+          </dl>
+          <small>{item.has_results ? `${item.result_count} stored result(s): edits are saved as a copy` : 'Never run: can be edited in place'}</small>
+          {old && <small className="warn">Greyed: a newer version of this mission exists, so this experiment is pinned to an older one.</small>}
+          <div className="attack-exp-actions">
+            <button type="button" className="button-secondary" onClick={() => open(item)} aria-label={`Open experiment ${item.name}`}>{canEdit ? 'OPEN / EDIT' : 'OPEN'}</button>
+            {canEdit && old && <button type="button" className="button-secondary" disabled={busy} onClick={() => void repin(item)} aria-label={`Re-pin ${item.name} to latest`}>RE-PIN TO LATEST</button>}
+            {canEdit && (confirmDelete === item.id
+              ? <span className="attack-confirm" role="group" aria-label={`Confirm delete ${item.name}`}>
+                <small>{item.has_results ? `Delete this experiment? Its ${item.result_count} result(s) are kept.` : 'Delete this experiment?'}</small>
+                <button type="button" className="button-primary" disabled={busy} onClick={() => void remove(item)}>DELETE</button>
+                <button type="button" className="button-quiet" onClick={() => setConfirmDelete(null)}>CANCEL</button></span>
+              : <button type="button" className="button-quiet" disabled={busy} onClick={() => setConfirmDelete(item.id)} aria-label={`Delete ${item.name}`}><Trash2 size={13}/> DELETE</button>)}
+          </div>
+        </li>
+      })}</ul>}
     </section>
   </section>
 }

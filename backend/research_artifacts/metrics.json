@@ -1,6 +1,6 @@
 {
   "model_id": "049e3cff124a",
-  "trained_at": "2026-11-13T04:20:08.910813+00:00",
+  "trained_at": "2026-11-14T17:36:04.705210+00:00",
   "artifact_sha256": "049e3cff124a861a5d8d5c4b7a1962bc7a19b50334a424831a5e2651dd6fe17e",
   "selected_model": "hist_gradient_boosting",
   "selection_rule": "highest validation recall subject to <= 1 sustained false alarm(s) per hour; a more complex detector must beat a simpler one by >= 0.02 recall; not precision",

@@ -93,7 +93,7 @@ def test_incomplete_far_and_tampered_plans_are_rejected_with_structured_issues(g
     rejected = client.put(f"/api/scenarios/{saved['id']}", json=incomplete)
     assert rejected.status_code == 422 and rejected.json()["detail"]["code"] == "mission_plan_invalid"
     assert {item["code"] for item in rejected.json()["detail"]["issues"]} >= {"missing_field"}
-    far = complete_plan().model_copy(update={"aircraft": [complete_plan().aircraft[0].model_copy(update={"start_location": {"latitude": 15.7, "longitude": 77.5946}})]})
+    far = complete_plan().model_copy(update={"aircraft": [complete_plan().aircraft[0].model_copy(update={"start_location": {"latitude": 25.5, "longitude": 77.5946}})]})
     far_response = client.post("/api/scenarios", json=body(far))
     assert far_response.status_code == 422
     assert "start_too_far_from_area" in {item["code"] for item in far_response.json()["detail"]["issues"]}

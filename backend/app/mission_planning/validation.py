@@ -4,7 +4,7 @@ from __future__ import annotations
 import math
 from typing import Optional
 
-from .generators import PlanningLimits, RouteError, area_polygon_enu, generate_route
+from .generators import LONG_LEG_ADVICE, PLANAR_TASKS, PlanningLimits, RouteError, area_polygon_enu, generate_route
 from .geometry import distance_m, point_in_polygon, to_enu
 from .schemas import AircraftPlan, GeneratedRoute, GeoPoint, MissionPlan, OperatingArea, StrictModel
 from .start import takeoff_point
@@ -66,6 +66,10 @@ def start_to_area_distance_m(area: OperatingArea, start: GeoPoint) -> float:
 def effective_max_altitude(plan: MissionPlan, limits: PlanningLimits) -> float:
     cap = plan.constraints.max_altitude_m
     return min(limits.max_altitude_m, cap) if cap is not None else limits.max_altitude_m
+
+
+POINT_LABELS = {"datum": "the search datum", "hold_point": "the hold point", "drop_point": "the drop point",
+                "points": "A route waypoint", "path": "A patrol path point"}
 
 
 def reference_points(aircraft: AircraftPlan) -> list[tuple[str, GeoPoint]]:
@@ -144,13 +148,18 @@ def validate_aircraft(aircraft: AircraftPlan, plan: MissionPlan, limits: Plannin
     elif plan.operating_area is not None:
         for name, point in reference_points(aircraft):
             if not point_in_area(plan.operating_area, point):
-                add("point_outside_area", f"A {name} point lies outside the operating area.", name)
+                label = POINT_LABELS.get(name, name.replace("_", " "))
+                add("point_outside_area", f"{label[0].upper() + label[1:]} lies outside the operating area. Move it inside the area, or enlarge the area.", name)
                 break
 
     if plan.operating_area is not None:
         gap = start_to_area_distance_m(plan.operating_area, aircraft.start_location)
-        if gap > limits.max_start_to_area_m:
-            add("start_too_far_from_area", f"The start is {gap / 1000:.1f} km from the operating area; the limit is {limits.max_start_to_area_m / 1000:g} km for SITL.", "start_location")
+        # Area patterns use a flat local plane, so their start-to-area range is the (smaller) planar limit.
+        planar = kind in PLANAR_TASKS
+        gap_limit = min(limits.max_start_to_area_m, limits.max_planar_extent_m) if planar else limits.max_start_to_area_m
+        if gap > gap_limit:
+            add("start_too_far_from_area", f"The start is {gap / 1000:.1f} km from the operating area; the limit is {gap_limit / 1000:g} km"
+                + (f" for this area pattern, which uses a flat local plane. {LONG_LEG_ADVICE}" if planar and gap_limit < limits.max_start_to_area_m else " for SITL."), "start_location")
 
     if issues:
         return issues, None
@@ -206,7 +215,7 @@ def validate_plan(plan: MissionPlan, limits: PlanningLimits, *, complete: bool) 
 
     count = plan.required_uav_count
     if count is None or len(plan.selected_uav_ids) != count or len(plan.activated_uav_ids) != count or len(plan.aircraft) != count:
-        add("fleet_mismatch", "Requested, activated, selected and assigned UAV counts must match.", "required_uav_count")
+        add("fleet_mismatch", "Requested, activated, selected and assigned UAV counts must match. Tick the aircraft, then press ACTIVATE AND VERIFY PX4 / GAZEBO FLEET in Section A.", "required_uav_count")
     elif set(plan.activated_uav_ids) != set(plan.selected_uav_ids) or {a.uav_id for a in plan.aircraft} != set(plan.selected_uav_ids):
         add("fleet_mismatch", "Every selected UAV needs exactly one assignment and a verified activation.", "selected_uav_ids")
     if not plan.objectives:

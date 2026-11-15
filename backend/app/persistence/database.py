@@ -4,6 +4,7 @@ import json
 import hashlib
 import os
 import secrets
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -270,6 +271,24 @@ class AttackExperimentRecord(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow_naive, onupdate=utcnow_naive)
 
 
+class ExperimentResultRecord(Base):
+    """A stored result of running an Attack Lab experiment. It deliberately has no foreign key to the experiment: deleting an
+    experiment keeps its results (they are then marked as coming from a deleted experiment). The runner that writes these
+    does not exist yet; the data rules are in place and tested."""
+    __tablename__ = "experiment_results"
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    experiment_id: Mapped[str] = mapped_column(String, index=True)
+    experiment_name: Mapped[str] = mapped_column(String(120))
+    owner_user_id: Mapped[str] = mapped_column(String, index=True)
+    scenario_id: Mapped[str] = mapped_column(String)
+    scenario_version_id: Mapped[str] = mapped_column(String)
+    config_hash: Mapped[str] = mapped_column(String(64))
+    config_json: Mapped[str] = mapped_column(Text)          # the exact attack definition that produced the result
+    payload_json: Mapped[str] = mapped_column(Text)
+    experiment_deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow_naive, index=True)
+
+
 class ResearchDecisionRecord(Base):
     """An operator's chosen response to a threat assessment. Recorded only; nothing is executed."""
     __tablename__ = "research_decisions"
@@ -284,6 +303,43 @@ class ResearchDecisionRecord(Base):
     tier: Mapped[Optional[str]] = mapped_column(String(12), nullable=True)
     threat_score: Mapped[Optional[float]] = mapped_column(nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow_naive, index=True)
+
+
+class MissionExecutionRecord(Base):
+    """One run of a deployed mission on the managed PX4 SITL instance (software simulation only)."""
+    __tablename__ = "mission_executions"
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    deployment_id: Mapped[str] = mapped_column(ForeignKey("mission_deployments.id", ondelete="CASCADE"), index=True)
+    scenario_id: Mapped[str] = mapped_column(ForeignKey("scenarios.id", ondelete="CASCADE"), index=True)
+    scenario_version_id: Mapped[str] = mapped_column(ForeignKey("scenario_versions.id", ondelete="CASCADE"), index=True)
+    aircraft_id: Mapped[str] = mapped_column(String(16), index=True)
+    instance_number: Mapped[int] = mapped_column(Integer)
+    started_by: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    started_by_name: Mapped[str] = mapped_column(String(120))
+    started_by_role: Mapped[str] = mapped_column(String(16))
+    state: Mapped[str] = mapped_column(String(24), index=True)
+    reason: Mapped[str] = mapped_column(Text, default="")
+    progress_json: Mapped[str] = mapped_column(Text, default="{}")
+    last_event_index: Mapped[int] = mapped_column(Integer, default=-1)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow_naive, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow_naive)
+    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
+class MissionExecutionEventRecord(Base):
+    """Every command and state change of an execution: who, when, what. Append-only."""
+    __tablename__ = "mission_execution_events"
+    __table_args__ = (UniqueConstraint("execution_id", "executor_index", name="uq_execution_event_index"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    execution_id: Mapped[str] = mapped_column(ForeignKey("mission_executions.id", ondelete="CASCADE"), index=True)
+    source: Mapped[str] = mapped_column(String(16))  # user | backend | executor
+    type: Mapped[str] = mapped_column(String(48))
+    message: Mapped[str] = mapped_column(Text)
+    data_json: Mapped[str] = mapped_column(Text, default="{}")
+    actor_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    actor_name: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    executor_index: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow_naive, index=True)
 
 
 class MissionProposalRecord(Base):
@@ -1300,14 +1356,82 @@ def list_attack_experiments(user_id: str, include_all: bool = False) -> list[dic
 
 
 def delete_attack_experiment(experiment_id: str) -> bool:
+    """Deletes the experiment definition. Stored results are kept and marked as coming from a deleted experiment."""
     with SessionLocal() as session:
         begin_write_transaction(session)
         record = session.get(AttackExperimentRecord, experiment_id)
         if record is None:
             return False
+        if experiment_results_available():
+            for result in session.scalars(select(ExperimentResultRecord).where(ExperimentResultRecord.experiment_id == experiment_id)):
+                result.experiment_deleted_at = utcnow_naive()
         session.delete(record)
         session.commit()
         return True
+
+
+RESULTS_STORAGE_MISSING = ("Experiment result storage is not available: the `experiment_results` table does not exist. "
+                           "Restart the backend (SQLite creates it at startup) or run `alembic upgrade head` (PostgreSQL).")
+_results_table = {"present": False, "checked_at": 0.0}
+
+
+def experiment_results_available() -> bool:
+    """True when the `experiment_results` table exists. Without it no experiment can have results, so experiments are
+    simply treated as never run (edit in place, delete outright) instead of failing with a database error."""
+    if _results_table["present"]:
+        return True
+    now = time.monotonic()
+    if now - _results_table["checked_at"] < 15.0 and _results_table["checked_at"]:
+        return False
+    _results_table["checked_at"] = now
+    _results_table["present"] = inspect(engine).has_table(ExperimentResultRecord.__tablename__)
+    return _results_table["present"]
+
+
+def _result_view(record: ExperimentResultRecord) -> dict:
+    return {"id": record.id, "experiment_id": record.experiment_id, "experiment_name": record.experiment_name, "scenario_id": record.scenario_id,
+            "scenario_version_id": record.scenario_version_id, "config_hash": record.config_hash, "config": json.loads(record.config_json),
+            "result": json.loads(record.payload_json), "created_at": record.created_at.isoformat() + "Z",
+            "from_deleted_experiment": record.experiment_deleted_at is not None,
+            "label": "from a deleted experiment" if record.experiment_deleted_at is not None else None}
+
+
+def save_experiment_result(experiment_id: str, payload: dict) -> dict:
+    """Stores a result with a snapshot of the experiment as it was run (used by the experiment runner, once it exists)."""
+    if not experiment_results_available():
+        raise RuntimeError(RESULTS_STORAGE_MISSING)
+    with SessionLocal() as session:
+        begin_write_transaction(session)
+        experiment = session.get(AttackExperimentRecord, experiment_id)
+        if experiment is None:
+            raise ValueError("Unknown experiment")
+        record = ExperimentResultRecord(
+            id=uuid.uuid4().hex, experiment_id=experiment.id, experiment_name=experiment.name, owner_user_id=experiment.owner_user_id,
+            scenario_id=experiment.scenario_id, scenario_version_id=experiment.scenario_version_id, config_hash=experiment.config_hash,
+            config_json=experiment.config_json, payload_json=json.dumps(payload, sort_keys=True, allow_nan=False))
+        session.add(record)
+        session.commit()
+        session.refresh(record)
+        return _result_view(record)
+
+
+def experiment_result_counts(experiment_ids: list[str]) -> dict[str, int]:
+    if not experiment_ids or not experiment_results_available():
+        return {}
+    with SessionLocal() as session:
+        rows = session.execute(select(ExperimentResultRecord.experiment_id, func.count()).where(
+            ExperimentResultRecord.experiment_id.in_(experiment_ids)).group_by(ExperimentResultRecord.experiment_id)).all()
+        return {experiment_id: int(count) for experiment_id, count in rows}
+
+
+def list_experiment_results(owner_user_id: str, include_all: bool = False, limit: int = 200) -> list[dict]:
+    if not experiment_results_available():
+        return []
+    with SessionLocal() as session:
+        query = select(ExperimentResultRecord)
+        if not include_all:
+            query = query.where(ExperimentResultRecord.owner_user_id == owner_user_id)
+        return [_result_view(row) for row in session.scalars(query.order_by(ExperimentResultRecord.created_at.desc()).limit(limit))]
 
 
 def _decision_view(record: ResearchDecisionRecord) -> dict:
@@ -1337,3 +1461,120 @@ def list_research_decisions(limit: int = 50) -> list[dict]:
     with SessionLocal() as session:
         rows = session.scalars(select(ResearchDecisionRecord).order_by(ResearchDecisionRecord.created_at.desc()).limit(limit)).all()
         return [_decision_view(row) for row in rows]
+
+
+# --- mission executions (PX4 SITL) -------------------------------------------------------------------------------
+
+def get_mission_deployment(deployment_id: str) -> dict | None:
+    with SessionLocal() as session:
+        record = session.get(MissionDeploymentRecord, deployment_id)
+        return _deployment_view(record) if record else None
+
+
+def _execution_view(record: MissionExecutionRecord) -> dict:
+    return {"id": record.id, "deployment_id": record.deployment_id, "scenario_id": record.scenario_id,
+            "scenario_version_id": record.scenario_version_id, "aircraft_id": record.aircraft_id,
+            "instance_number": record.instance_number, "started_by": record.started_by, "started_by_name": record.started_by_name,
+            "started_by_role": record.started_by_role, "state": record.state, "reason": record.reason,
+            "progress": json.loads(record.progress_json or "{}"), "last_event_index": record.last_event_index,
+            "created_at": record.created_at.isoformat() + "Z", "updated_at": record.updated_at.isoformat() + "Z",
+            "finished_at": record.finished_at.isoformat() + "Z" if record.finished_at else None, "active": record.finished_at is None}
+
+
+def create_mission_execution(*, execution_id: str, deployment_id: str, scenario_id: str, scenario_version_id: str, aircraft_id: str,
+                             instance_number: int, user_id: str, user_name: str, role: str) -> dict:
+    """Create the run, refusing a second active run on the same aircraft inside one write transaction."""
+    with SessionLocal() as session:
+        begin_write_transaction(session)
+        active = session.scalar(select(MissionExecutionRecord).where(
+            MissionExecutionRecord.aircraft_id == aircraft_id, MissionExecutionRecord.finished_at.is_(None)))
+        if active is not None:
+            raise ValueError(f"execution {active.id} is already running on {aircraft_id}")
+        record = MissionExecutionRecord(
+            id=execution_id, deployment_id=deployment_id, scenario_id=scenario_id, scenario_version_id=scenario_version_id,
+            aircraft_id=aircraft_id, instance_number=instance_number, started_by=user_id, started_by_name=user_name,
+            started_by_role=role, state="connecting", reason="", progress_json="{}", last_event_index=-1)
+        session.add(record)
+        session.commit()
+        session.refresh(record)
+        return _execution_view(record)
+
+
+def get_mission_execution(execution_id: str) -> dict | None:
+    with SessionLocal() as session:
+        record = session.get(MissionExecutionRecord, execution_id)
+        return _execution_view(record) if record else None
+
+
+def latest_mission_execution(user_id: str, *, include_all: bool = False) -> dict | None:
+    with SessionLocal() as session:
+        query = select(MissionExecutionRecord).join(ScenarioRecord, MissionExecutionRecord.scenario_id == ScenarioRecord.id)
+        if not include_all:
+            query = query.where(ScenarioRecord.owner_user_id == user_id)
+        record = session.scalar(query.order_by(MissionExecutionRecord.created_at.desc()).limit(1))
+        return _execution_view(record) if record else None
+
+
+def active_mission_execution(aircraft_id: str) -> dict | None:
+    with SessionLocal() as session:
+        record = session.scalar(select(MissionExecutionRecord).where(
+            MissionExecutionRecord.aircraft_id == aircraft_id, MissionExecutionRecord.finished_at.is_(None))
+            .order_by(MissionExecutionRecord.created_at.desc()).limit(1))
+        return _execution_view(record) if record else None
+
+
+def update_mission_execution(execution_id: str, *, state: str | None = None, reason: str | None = None, progress: dict | None = None,
+                             last_event_index: int | None = None, finished: bool = False) -> dict | None:
+    with SessionLocal() as session:
+        begin_write_transaction(session)
+        record = session.get(MissionExecutionRecord, execution_id)
+        if record is None:
+            return None
+        if record.finished_at is None:  # a finished run is never rewritten
+            if state is not None:
+                record.state = state
+            if reason is not None:
+                record.reason = reason
+            if progress is not None:
+                record.progress_json = json.dumps(progress, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+            if last_event_index is not None:
+                record.last_event_index = max(record.last_event_index, last_event_index)
+            record.updated_at = utcnow_naive()
+            if finished:
+                record.finished_at = utcnow_naive()
+        session.commit()
+        session.refresh(record)
+        return _execution_view(record)
+
+
+def add_mission_execution_events(execution_id: str, events: list[dict]) -> int:
+    """Append events. Executor events carry `executor_index` and are stored once, whatever the polling overlap."""
+    stored = 0
+    with SessionLocal() as session:
+        begin_write_transaction(session)
+        known = set(session.scalars(select(MissionExecutionEventRecord.executor_index).where(
+            MissionExecutionEventRecord.execution_id == execution_id, MissionExecutionEventRecord.executor_index.is_not(None))))
+        for item in events:
+            index = item.get("executor_index")
+            if index is not None and index in known:
+                continue
+            session.add(MissionExecutionEventRecord(
+                execution_id=execution_id, source=item["source"], type=item["type"][:48], message=item["message"],
+                data_json=json.dumps(item.get("data") or {}, sort_keys=True, separators=(",", ":"), ensure_ascii=False),
+                actor_id=item.get("actor_id"), actor_name=item.get("actor_name"), executor_index=index,
+                occurred_at=item.get("occurred_at") or utcnow_naive()))
+            if index is not None:
+                known.add(index)
+            stored += 1
+        session.commit()
+    return stored
+
+
+def list_mission_execution_events(execution_id: str, *, after_id: int = 0, limit: int = 500) -> list[dict]:
+    with SessionLocal() as session:
+        records = session.scalars(select(MissionExecutionEventRecord).where(
+            MissionExecutionEventRecord.execution_id == execution_id, MissionExecutionEventRecord.id > after_id)
+            .order_by(MissionExecutionEventRecord.id).limit(limit)).all()
+        return [{"id": record.id, "execution_id": record.execution_id, "source": record.source, "type": record.type,
+                 "message": record.message, "data": json.loads(record.data_json or "{}"), "actor_name": record.actor_name,
+                 "occurred_at": record.occurred_at.isoformat() + "Z"} for record in records]

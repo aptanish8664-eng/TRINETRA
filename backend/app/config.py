@@ -63,6 +63,9 @@ AI_MAX_OUTPUT_TOKENS = env_int("TRINETRA_AI_MAX_OUTPUT_TOKENS", 1800, 128, 6000)
 AI_REQUESTS_PER_HOUR = env_int("TRINETRA_AI_REQUESTS_PER_HOUR", 20, 1, 500)
 AI_DAILY_OUTPUT_TOKEN_LIMIT = env_int("TRINETRA_AI_DAILY_OUTPUT_TOKEN_LIMIT", 20000, 128, 1000000)
 MAX_HTTP_BODY_BYTES = env_int("TRINETRA_MAX_HTTP_BODY_BYTES", 65536, 1024, 1000000)
+# Threat monitor: the server refuses a handover to an aircraft below this battery level; live assessments are computed at most this often.
+MIN_HANDOVER_BATTERY_PCT = env_int("TRINETRA_MIN_HANDOVER_BATTERY_PCT", 40, 0, 100)
+LIVE_ASSESSMENT_INTERVAL_S = 1.0
 PX4_UDP_ENABLED = env_bool("TRINETRA_PX4_UDP_ENABLED")
 PX4_UDP_BIND_HOST = os.environ.get("TRINETRA_PX4_UDP_BIND_HOST", "127.0.0.1").strip() or "127.0.0.1"
 PX4_UDP_BIND_PORT = env_int("TRINETRA_PX4_UDP_BIND_PORT", 14600, 1024, 65535)
@@ -76,10 +79,28 @@ GAZEBO_POSE_UDP_ALLOWED_SOURCE_IP = os.environ.get("TRINETRA_GAZEBO_POSE_UDP_ALL
 GAZEBO_POSE_UDP_ALLOWED_SOURCE_PORT = env_int("TRINETRA_GAZEBO_POSE_UDP_ALLOWED_SOURCE_PORT", 14611, 1, 65535)
 
 # Mission route planning limits (software-only SITL planning; enforced by the backend validator).
-MP_MAX_WAYPOINTS = env_int("TRINETRA_MP_MAX_WAYPOINTS", 200, 10, 2000)
-MP_MAX_START_TO_AREA_M = env_int("TRINETRA_MP_MAX_START_TO_AREA_M", 20000, 100, 200000)
-MP_MIN_SPEED_MPS = env_int("TRINETRA_MP_MIN_SPEED_MPS", 1, 1, 50)
-MP_MAX_SPEED_MPS = env_int("TRINETRA_MP_MAX_SPEED_MPS", 20, 1, 50)
+# Defaults (2026-11-14) allow long-distance simulated flights such as Bengaluru to Chennai (about 290 km, 580 km out
+# and back). Every value below is served by GET /api/mission-plans/limits and the UI reads it from there.
+# PX4 SITL stores up to CONFIG_NUM_MISSION_ITEMS_SUPPORTED=10000 mission items in this checkout (boards/px4/sitl/default.px4board).
+MP_MAX_WAYPOINTS = env_int("TRINETRA_MP_MAX_WAYPOINTS", 500, 10, 5000)
+MP_MAX_START_TO_AREA_M = env_int("TRINETRA_MP_MAX_START_TO_AREA_M", 1_000_000, 100, 20_000_000)
+# Area generators (coverage, expanding square, sector search, perimeter patrol) work on a local flat plane that is only
+# valid for a few km; an area further than this from the start, or wider than this, is rejected instead of drawn wrong.
+MP_MAX_PLANAR_EXTENT_M = env_int("TRINETRA_MP_MAX_PLANAR_EXTENT_M", 20_000, 1000, 100_000)
+# Point-to-point routes whose farthest point from the start is beyond this use geodesic (WGS84) lengths and the points' own coordinates.
+MP_GEODESIC_ABOVE_M = env_int("TRINETRA_MP_GEODESIC_ABOVE_M", 20_000, 1000, 100_000)
+
+# Long-range simulation profile: PX4 parameters applied to every SITL instance the fleet manager STARTS (never to a real
+# vehicle) so the simulated X500 can actually fly the planned speeds and distances. Off restores PX4's own defaults.
+LONG_RANGE_PROFILE_ENABLED = env_bool("TRINETRA_LONG_RANGE_PROFILE", True)
+LONG_RANGE_ACCEL_MPS2 = env_int("TRINETRA_LONG_RANGE_ACCEL_MPS2", 10, 1, 30)
+LONG_RANGE_TILT_DEG = env_int("TRINETRA_LONG_RANGE_TILT_DEG", 60, 20, 85)
+# Gazebo's stock `default` world has no ground under an aircraft flown a few km from the origin (measured: it falls through and never
+# lands; the ground plane's declared size is not honoured). The profile runs Gazebo with a runtime copy of the world (the PX4 tree is
+# not edited) whose ground is a static box this many metres wide: +-1,050 km, enough for the 1,000 km route limit.
+LONG_RANGE_GROUND_EXTENT_M = env_int("TRINETRA_LONG_RANGE_GROUND_EXTENT_M", 2_100_000, 1000, 20_000_000)
+MP_MIN_SPEED_MPS = env_int("TRINETRA_MP_MIN_SPEED_MPS", 1, 1, 150)
+MP_MAX_SPEED_MPS = env_int("TRINETRA_MP_MAX_SPEED_MPS", 90, 1, 150)  # measured ceiling ~100 m/s on the simulated X500 (tilt cap 60 deg), minus ~10%
 MP_MIN_ALTITUDE_M = env_int("TRINETRA_MP_MIN_ALTITUDE_M", 2, 1, 100)
 MP_MAX_ALTITUDE_M = env_int("TRINETRA_MP_MAX_ALTITUDE_M", 120, 5, 500)
 MP_MIN_HOVER_S = env_int("TRINETRA_MP_MIN_HOVER_S", 1, 0, 600)
@@ -87,5 +108,5 @@ MP_MAX_HOVER_S = env_int("TRINETRA_MP_MAX_HOVER_S", 600, 1, 3600)
 # Simulated X500 endurance used by every route check (generation preview, save, review, deploy). It is a planning
 # limit for the software simulation, not a measured battery model: one flight may take at most this long and cover
 # at most this distance, whether or not the plan sets its own (stricter) max_duration_minutes.
-MP_MAX_FLIGHT_MINUTES = env_int("TRINETRA_MP_MAX_FLIGHT_MINUTES", 20, 1, 240)
-MP_MAX_FLIGHT_DISTANCE_M = env_int("TRINETRA_MP_MAX_FLIGHT_DISTANCE_M", 15000, 100, 500000)
+MP_MAX_FLIGHT_MINUTES = env_int("TRINETRA_MP_MAX_FLIGHT_MINUTES", 300, 1, 1440)
+MP_MAX_FLIGHT_DISTANCE_M = env_int("TRINETRA_MP_MAX_FLIGHT_DISTANCE_M", 1_000_000, 100, 20_000_000)

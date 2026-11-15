@@ -121,7 +121,7 @@ export function computeMissionMissing({ title, mission, fleetVerified, available
     !(mission.objectives?.length) ? 'Select at least one mission objective.' : '',
     !mission.mission_description?.trim() ? 'Add a mission description.' : '',
     !selectedAircraftIds.length ? 'Select at least one connected PX4 aircraft.' : '',
-    !mission.required_uav_count || mission.required_uav_count !== selectedAircraftIds.length ? 'Requested, activated and assigned UAV counts must match.' : '',
+    !mission.required_uav_count || mission.required_uav_count !== selectedAircraftIds.length ? 'Requested, activated and assigned UAV counts must match. Tick the aircraft, then press ACTIVATE AND VERIFY PX4 / GAZEBO FLEET in Section A.' : '',
     (mission.activated_uav_ids?.length ?? 0) !== (mission.required_uav_count ?? 0) || mission.activated_uav_ids?.some(id => !selectedAircraftIds.includes(id)) ? 'The requested PX4/Gazebo fleet activation is not recorded for this exact selection.' : '',
     !fleetVerified ? 'The selected PX4 processes, telemetry and Gazebo models have not been freshly verified.' : '',
     !mission.mission_area_description?.trim() ? 'Mission area description is required.' : '',

@@ -38,7 +38,7 @@ export const ASSIGNMENT_FIELDS: FieldDef[] = (() => {
     { key: 'task_type', label: 'task type', type: 'enum', choices: TASK_SPECS.map(({ value, label }) => ({ value, label })), param: false, aliases: ['task type', 'task'] },
     { key: 'return_mode', label: 'return mode', type: 'enum', choices: RETURN_MODES, param: false, aliases: ['return mode', 'return'] },
     { key: 'altitude_m', label: 'altitude (m)', type: 'number', min: 0.1, max: 500, param: false, aliases: ['altitude', 'cruise altitude'] },
-    { key: 'speed_mps', label: 'speed (m/s)', type: 'number', min: 0.1, max: 50, param: false, aliases: ['speed', 'speed limit'] },
+    { key: 'speed_mps', label: 'speed (m/s)', type: 'number', min: 0.1, max: 90, param: false, aliases: ['speed', 'speed limit'] },
     { key: 'loiter_duration_s', label: 'loiter duration (s)', type: 'number', min: 0, max: 3600, param: false, aliases: ['loiter', 'loiter duration'] },
   ]
   const seen = new Set<string>()

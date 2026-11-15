@@ -3,14 +3,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AttackLab, computeReadiness } from './AttackLab'
 import {
   ATTACK_FIELD_HELP, ATTACK_LAB_NAME, ATTACK_TYPE_SPECS, DEFAULT_CONFIG, GROUND_TRUTH_NOTE, HIDDEN_SCHEDULE_NOTE, PRESET_SPECS, presetsForPlan,
-  type AttackLimits, type PickerMission, type PickerVersion,
+  type AttackLimits, type Experiment, type PickerMission, type PickerVersion,
 } from './attackLabTypes'
 import { buildAssessPayload } from './ThreatReplayPanel'
 import { findGroundTruthKeys } from './threatSession'
 
 const apiMock = vi.hoisted(() => ({
   attackLabLimits: vi.fn(), attackExperiments: vi.fn(), attackLabMissions: vi.fn(), applyAttackPreset: vi.fn(),
-  validateExperiment: vi.fn(), createExperiment: vi.fn(), updateExperiment: vi.fn(), deleteExperiment: vi.fn(),
+  validateExperiment: vi.fn(), createExperiment: vi.fn(), updateExperiment: vi.fn(), deleteExperiment: vi.fn(), copyExperiment: vi.fn(), repinExperiment: vi.fn(),
 }))
 vi.mock('../services/api', () => ({ api: apiMock }))
 
@@ -110,5 +110,88 @@ describe('replay assessment payload', () => {
     expect(JSON.stringify(payload)).not.toMatch(/attack|schedule|label|truth/i)
     expect(payload.samples.length).toBeLessThanOrEqual(40)
     expect(payload.handover_candidates[0].aircraft_id).toBe('px4-2')
+  })
+})
+
+
+const experimentRecord = (patch: Partial<Experiment> = {}): Experiment => ({
+  id: 'e1', owner_user_id: 'u', name: 'Drift test', scenario_id: 's1', scenario_version_id: 'v1', preset_id: 'slow_drift', seed: 1, status: 'draft',
+  config: { ...DEFAULT_CONFIG, attacks: [{ target_aircraft: 'px4-1', type: 'drift', start_s: 30, duration_s: 30, magnitude: 1, direction_deg: null }] },
+  config_hash: 'h', superseded: false, executed: false, note: '', created_at: 't', updated_at: 't', latest_version_id: 'v1', result_count: 0, has_results: false, edit_mode: 'in_place', delete_keeps_results: false, ...patch,
+})
+
+describe('AttackLab saved experiments and layout', () => {
+  beforeEach(() => {
+    apiMock.attackLabMissions.mockResolvedValue({ missions: [mission([version({ id: 'v2', version_number: 2 }), version({ id: 'v1', latest: false, superseded: true })])], legacy_only_count: 0 })
+  })
+
+  it('shows the full version text on hover and the deployment status on its own line', async () => {
+    render(<AttackLab canEdit initialScenarioId="s1"/>)
+    const select = await screen.findByLabelText('Version') as HTMLSelectElement
+    await waitFor(() => expect(select.value).toBe('v2'))
+    expect(select.title).toBe('v2 · latest · not deployed')
+    expect(Array.from(select.options).every(option => option.title !== '' || option.value === '')).toBe(true)
+    expect(select.closest('label')?.querySelector('.attack-version-status')?.textContent).toBe('v2: latest · not deployed')
+  })
+
+  it('cards show name, preset, attack count, mission and pinned version, with confirmed delete', async () => {
+    apiMock.attackExperiments.mockResolvedValue([experimentRecord()])
+    apiMock.deleteExperiment.mockResolvedValue(undefined)
+    render(<AttackLab canEdit/>)
+    const card = await screen.findByRole('listitem', { name: 'Experiment Drift test' })
+    expect(within(card).getByText('Slow drift')).toBeTruthy()
+    expect(within(card).getByText('1')).toBeTruthy()
+    expect(within(card).getByText('Coastal plan')).toBeTruthy()
+    expect(within(card).getByText('v1')).toBeTruthy()
+    expect(within(card).getByText(/Never run: can be edited in place/)).toBeTruthy()
+    fireEvent.click(within(card).getByRole('button', { name: 'Delete Drift test' }))
+    expect(apiMock.deleteExperiment).not.toHaveBeenCalled()
+    fireEvent.click(within(card).getByRole('button', { name: 'DELETE' }))
+    await waitFor(() => expect(apiMock.deleteExperiment).toHaveBeenCalledWith('e1'))
+  })
+
+  it('an experiment with results says that delete keeps them and is edited as a copy', async () => {
+    apiMock.attackExperiments.mockResolvedValue([experimentRecord({ has_results: true, result_count: 2, edit_mode: 'copy', delete_keeps_results: true })])
+    apiMock.copyExperiment.mockResolvedValue(experimentRecord({ id: 'e2', name: 'Drift test v2' }))
+    render(<AttackLab canEdit/>)
+    const card = await screen.findByRole('listitem', { name: 'Experiment Drift test' })
+    expect(within(card).getByText(/2 stored result\(s\): edits are saved as a copy/)).toBeTruthy()
+    fireEvent.click(within(card).getByRole('button', { name: 'Delete Drift test' }))
+    expect(within(card).getByText(/Its 2 result\(s\) are kept/)).toBeTruthy()
+    fireEvent.click(within(card).getByRole('button', { name: /Cancel|CANCEL/ }))
+    fireEvent.click(within(card).getByRole('button', { name: 'Open experiment Drift test' }))
+    expect(await screen.findByText(/EDITING · SAVES AS A COPY/)).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: /SAVE AS COPY/ }))
+    await waitFor(() => expect(apiMock.copyExperiment).toHaveBeenCalledWith('e1', expect.objectContaining({ name: 'Drift test' })))
+    expect(apiMock.updateExperiment).not.toHaveBeenCalled()
+    expect(await screen.findByText(/Saved as a copy: “Drift test v2”/)).toBeTruthy()
+  })
+
+  it('an experiment pinned to an older version is greyed with the reason and can be re-pinned in one click', async () => {
+    apiMock.attackExperiments.mockResolvedValue([experimentRecord({ superseded: true, latest_version_id: 'v2' })])
+    apiMock.repinExperiment.mockResolvedValue(experimentRecord({ scenario_version_id: 'v2', superseded: false }))
+    render(<AttackLab canEdit/>)
+    const card = await screen.findByRole('listitem', { name: 'Experiment Drift test' })
+    expect(card.className).toMatch(/\bold\b/)
+    expect(within(card).getByText(/newer version of this mission exists/)).toBeTruthy()
+    fireEvent.click(within(card).getByRole('button', { name: 'Re-pin Drift test to latest' }))
+    await waitFor(() => expect(apiMock.repinExperiment).toHaveBeenCalledWith('e1'))
+    expect(apiMock.createExperiment).not.toHaveBeenCalled()
+    expect(await screen.findByText(/now uses the latest version; its attacks were not changed/)).toBeTruthy()
+  })
+
+  it('operator accounts can open an experiment but not delete or re-pin it', async () => {
+    apiMock.attackExperiments.mockResolvedValue([experimentRecord({ superseded: true })])
+    render(<AttackLab canEdit={false}/>)
+    const card = await screen.findByRole('listitem', { name: 'Experiment Drift test' })
+    expect(within(card).getByRole('button', { name: 'Open experiment Drift test' })).toBeTruthy()
+    expect(within(card).queryByRole('button', { name: /Delete|Re-pin/ })).toBeNull()
+  })
+
+  it('has no arm-for-run box or runner yet', async () => {
+    render(<AttackLab canEdit/>)
+    await screen.findByRole('heading', { name: ATTACK_LAB_NAME })
+    expect(document.body.textContent?.toLowerCase()).not.toMatch(/arm for run|armed for run/)
+    expect(screen.queryByRole('checkbox', { name: /arm/i })).toBeNull()
   })
 })

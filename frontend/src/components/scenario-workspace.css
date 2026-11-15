@@ -21,3 +21,8 @@
 .scenario-objective-choice input[type="checkbox"],.scenario-aircraft-options input[type="checkbox"],.attack-inline input[type="checkbox"]{flex:none;width:auto;min-width:0;height:auto;min-height:0;margin:2px 0 0;padding:0}
 .scenario-review-summary{align-items:start}
 .scenario-fault-values{align-items:start}
+.scenario-limits-line{display:block;color:var(--muted);font:10px/1.6 var(--mono)}
+
+/* A failed save used to show its error at the top of a very long page, out of sight beside the Save button. The banners now follow the
+   scroll inside Scenario Lab, so the reason is always visible. */
+.scenario-lab-workspace>.scenario-library-error,.scenario-lab-workspace>.scenario-library-message{position:sticky;top:10px;z-index:25;box-shadow:0 6px 18px rgba(0,0,0,.45)}

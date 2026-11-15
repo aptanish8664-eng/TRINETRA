@@ -278,9 +278,11 @@ describe('ScenarioWorkspace (schema 2 mission plan)', () => {
       fireEvent.change(screen.getByLabelText(/ROLE/), { target: { value: 'primary' } })
       say('what is left for UAV 1?')
       await waitFor(() => expect(lastReply()).toMatch(/still needs/))
-      for (const label of ['Task type', 'Start location (map)', 'Cruise altitude (m)', 'Speed (m/s)']) expect(lastReply()).toContain(label)
+      for (const label of ['Task type', 'Start location (map)']) expect(lastReply()).toContain(label)
+      expect(lastReply()).toContain('still needs 2 item(s)')
+      expect(lastReply()).not.toContain('Cruise altitude (m)')               // a new aircraft starts with 30 m and 8 m/s, so they are not "missing"
+      expect(lastReply()).not.toContain('Speed (m/s)')
       expect(lastReply()).not.toMatch(/INDIVIDUAL OBJECTIVE|DATA REQUIREMENTS|COMPLETION CONDITION/)
-      expect(lastReply()).toContain('Say "set altitude to 30"')
     })
 
     it('explains task types including the simulated payload drop-off, and Section C (review)', async () => {

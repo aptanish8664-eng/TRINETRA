@@ -35,6 +35,14 @@ type Props = {
 }
 
 const ENTITY_PREFIX = 'mission-planner:'
+
+/**
+ * Markers and vertices swallow a map click; the operating area's fill, its outline and the route line do not, so a start or waypoint can
+ * be placed inside the operating area (the common case) instead of the click doing nothing.
+ */
+export function isMapMarkerEntity(entityId: string): boolean {
+  return entityId.startsWith(ENTITY_PREFIX) && !/:(polygon|outline)$/.test(entityId) && !entityId.startsWith(`${ENTITY_PREFIX}route:`)
+}
 const ROUTE_COLORS = ['#55d9ff', '#f5b94c', '#56e3b1', '#d28cff', '#ff7890', '#a7e8ff']
 const STREET_MAP_URL = 'https://services.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer'
 const SATELLITE_MAP_URL = 'https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer'
@@ -161,7 +169,9 @@ export function MissionPlannerMap({
           callbacksRef.current.onSelectVertex(vertexMatch[1], Number(vertexMatch[2]))
           return
         }
-        if (entityId.startsWith(ENTITY_PREFIX)) return
+        // Markers and vertices are not map ground; the area's fill, its outline and the route line are, so a start or waypoint can be
+        // placed inside the operating area (the common case) instead of the click being swallowed.
+        if (isMapMarkerEntity(entityId)) return
         const point = viewer ? fromScreenPosition(Cesium, viewer, event.position) : null
         if (!point) return
         if (modeRef.current === 'set_start') callbacksRef.current.onStartChange(point)
@@ -373,6 +383,8 @@ export function MissionPlannerMap({
     setSearchResults([])
   }
 
+  const framedRef = useRef(false)
+
   useEffect(() => {
     const viewer = viewerRef.current
     if (!viewerReady || !viewer || viewer.isDestroyed()) return
@@ -380,6 +392,21 @@ export function MissionPlannerMap({
     if (!loaded) return  // set before viewerReady, so this only guards against a torn-down viewer
     void Promise.resolve(loaded).then(Cesium => {
       if (viewer.isDestroyed()) return
+      // When the map opens with something to show (an operating area chosen in Section A, an aircraft start), look at it once
+      // instead of the whole Earth; after that the camera is the user's.
+      if (!framedRef.current) {
+        framedRef.current = true
+        const points = [...zones.flatMap(zone => zone.vertices), ...(start ? [start] : []), ...(destination ? [destination] : []),
+          ...assignments.flatMap(item => [item.start_location, item.destination, ...(item.waypoints ?? [])].filter((point): point is GeographicPoint => Boolean(point)))]
+        if (points.length) {
+          const latitudes = points.map(point => point.latitude), longitudes = points.map(point => point.longitude)
+          const padLat = Math.max((Math.max(...latitudes) - Math.min(...latitudes)) * 0.4, 0.002)
+          const padLon = Math.max((Math.max(...longitudes) - Math.min(...longitudes)) * 0.4, 0.002)
+          try {
+            if (typeof Cesium.Rectangle?.fromDegrees === 'function') viewer.camera.setView({ destination: Cesium.Rectangle.fromDegrees(Math.min(...longitudes) - padLon, Math.min(...latitudes) - padLat, Math.max(...longitudes) + padLon, Math.max(...latitudes) + padLat) })
+          } catch { /* framing is a convenience: the map stays usable at the default view */ }
+        }
+      }
       for (const entity of viewer.entities.values.slice()) {
         if (entity.id.startsWith(ENTITY_PREFIX)) viewer.entities.remove(entity)
       }

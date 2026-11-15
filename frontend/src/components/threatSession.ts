@@ -35,6 +35,9 @@ export interface ThreatSession {
   updatedAt: number
   minBatteryPct: number
   aircraft: Record<string, SessionAircraft>
+  /** Lets the backend check a handover candidate's battery at this moment of the replay. */
+  replayId?: string
+  clockS?: number
 }
 
 let current: ThreatSession | null = null

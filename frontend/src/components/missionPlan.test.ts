@@ -118,3 +118,32 @@ describe('aircraft endurance (mirror of the backend limit)', () => {
     expect(enduranceIssues({ duration_s: 99999, length_m: 1 }, null)).toEqual([])
   })
 })
+
+describe('planning limits summary (all numbers come from the backend)', () => {
+  it('states every served limit and says nothing before they are known', async () => {
+    const { limitsSummary } = await import('./missionPlan')
+    expect(limitsSummary(null)).toBe('')
+    expect(limitsSummary({ min_speed_mps: 1, max_speed_mps: 90, max_flight_s: 18000, max_flight_distance_m: 1_000_000, max_waypoints: 500, max_altitude_m: 120, max_planar_extent_m: 20000 }))
+      .toBe('Limits: speed 1–90 m/s · flight time 300 min · route length 1000 km · 500 waypoints · altitude up to 120 m · area patterns within 20 km of the start (use a waypoint route for long legs).')
+  })
+})
+
+
+describe('walkthrough fixes: defaults and messages', () => {
+  it('a new aircraft starts with a cruise altitude and speed the user can change', async () => {
+    const { newAircraft, DEFAULT_ALTITUDE_M, DEFAULT_SPEED_MPS, missingAircraftInputs } = await import('./missionPlan')
+    const aircraft = newAircraft('px4-1', 0)
+    expect([aircraft.altitude_m, aircraft.speed_mps]).toEqual([DEFAULT_ALTITUDE_M, DEFAULT_SPEED_MPS])
+    expect([DEFAULT_ALTITUDE_M, DEFAULT_SPEED_MPS]).toEqual([30, 8])
+    expect(missingAircraftInputs(aircraft).map(item => item.key)).not.toContain('altitude_m')
+    expect(missingAircraftInputs(aircraft).map(item => item.key)).not.toContain('speed_mps')
+    expect(missingAircraftInputs({ ...aircraft, altitude_m: null, speed_mps: null }).map(item => item.key)).toEqual(expect.arrayContaining(['altitude_m', 'speed_mps']))   // still required if cleared
+  })
+
+  it('the counts message says what to press', async () => {
+    const { EMPTY_PLAN, computePlanMissing } = await import('./missionPlan')
+    const items = computePlanMissing({ title: 'x', plan: { ...EMPTY_PLAN, selected_uav_ids: ['px4-1'] }, fleetVerified: true, availableVehicleIds: ['px4-1'] })
+    const counts = items.find(item => /counts must match/.test(item))
+    expect(counts).toBe('Requested, activated and assigned UAV counts must match. Tick the aircraft, then press ACTIVATE AND VERIFY PX4 / GAZEBO FLEET in Section A.')
+  })
+})

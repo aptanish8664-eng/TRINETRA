@@ -13,7 +13,7 @@ import { PlanMapEditor } from './PlanMapEditor'
 import {
   AIRCRAFT_ROLES, allowedTaskTypes, EMPTY_PLAN, MISSION_DURATION_RANGE_MINUTES, MISSION_OBJECTIVES, OBJECTIVE_DEFAULT_TASK, PAYLOAD_CATEGORIES,
   RETURN_MODES, SCHEMA_VERSION, TASK_SPECS, TRACKING_NOTE, TRACKING_ONLY_OBJECTIVES, UAV_COUNT_RANGE,
-  FLEET_VERIFICATION_LABEL, computeNextAction, enduranceIssues, type EnduranceLimit, computePlanDeployBlockers, computePlanMissing, isPlanComplete, missingAircraftInputs, newAircraft, normalizePlan, taskSpec,
+  FLEET_VERIFICATION_LABEL, computeNextAction, enduranceIssues, limitsSummary, type EnduranceLimit, computePlanDeployBlockers, computePlanMissing, isPlanComplete, missingAircraftInputs, newAircraft, normalizePlan, taskSpec,
   prefillPlanFromLegacy, type AircraftPlan, type FleetVerification, type MissionPlan, type ObjectiveValue, type ParamSpec, type PlanIssue, type TaskParameters, type TaskType,
 } from './missionPlan'
 import { stableStringify } from './scenarioPlanning'
@@ -80,6 +80,8 @@ export function ScenarioWorkspace({
   const [clock, setClock] = useState(() => Date.now())
   const [supersededBy, setSupersededBy] = useState<number | null>(null)
   const [endurance, setEndurance] = useState<EnduranceLimit | null>(null)
+  // Every planning limit comes from GET /api/mission-plans/limits; until it answers the inputs carry no maximum rather than a stale one.
+  const [planLimits, setPlanLimits] = useState<Record<string, number> | null>(null)
   const [startup, setStartup] = useState<{ status: string; detail?: string } | null>(null)
   // Fresh means: a backend check confirmed every aircraft of this plan within the last minute.
   const fleetState: FleetVerification = fleetCheck.state === 'checking' ? 'checking'
@@ -197,7 +199,7 @@ export function ScenarioWorkspace({
     let active = true
     Promise.resolve().then(() => api.planningLimits()).then(value => {
       const seconds = value.limits.max_flight_s, metres = value.limits.max_flight_distance_m
-      if (active && Number.isFinite(seconds) && Number.isFinite(metres)) setEndurance({ duration_s: seconds, length_m: metres })
+      if (active && Number.isFinite(seconds) && Number.isFinite(metres)) { setEndurance({ duration_s: seconds, length_m: metres }); setPlanLimits(value.limits) }
     }).catch(() => undefined)
     return () => { active = false }
   }, [])
@@ -787,16 +789,17 @@ export function ScenarioWorkspace({
       {trackingOnly && <p className="scenario-unsupported-note">{TRACKING_NOTE}</p>}
       <div className="scenario-workspace-field"><b>OPERATING AREA *</b><small>Choose a circle or draw a polygon on the map. Search points and the drop point must lie inside it.</small></div>
       {plan.operating_area?.kind === 'circle' && <label className="scenario-workspace-field">CIRCLE RADIUS (m)
-        <input type="number" min={10} max={50000} value={plan.operating_area.radius_m ?? ''} disabled={!editable || busy}
+        <input type="number" min={10} max={planLimits?.max_start_to_area_m} value={plan.operating_area.radius_m ?? ''} disabled={!editable || busy}
           onChange={event => changeArea({ ...plan.operating_area!, radius_m: event.target.value ? Number(event.target.value) : null })}/></label>}
       <PlanMapEditor scope="area" plan={plan} disabled={!editable || busy} onAreaChange={changeArea} onAircraftChange={() => undefined}/>
       <div className="scenario-workspace-field scenario-fault-values">
-        <label>MAX DISTANCE FROM START (m) *<input type="number" min={1} max={100000} value={plan.constraints.max_distance_from_start_m ?? ''} disabled={!editable || busy}
+        <label>MAX DISTANCE FROM START (m) *<input type="number" min={1} max={planLimits?.max_flight_distance_m} value={plan.constraints.max_distance_from_start_m ?? ''} disabled={!editable || busy}
           onChange={event => updateMissionInputs({ constraints: { ...plan.constraints, max_distance_from_start_m: event.target.value ? Number(event.target.value) : null } }, true)}/></label>
-        <label>MAX ALTITUDE (m) *<input type="number" min={1} max={500} value={plan.constraints.max_altitude_m ?? ''} disabled={!editable || busy}
+        <label>MAX ALTITUDE (m) *<input type="number" min={1} max={planLimits?.max_altitude_m} value={plan.constraints.max_altitude_m ?? ''} disabled={!editable || busy}
           onChange={event => updateMissionInputs({ constraints: { ...plan.constraints, max_altitude_m: event.target.value ? Number(event.target.value) : null } }, true)}/></label>
       </div>
-      <label className="scenario-workspace-field">MAX DURATION (minutes, optional)<input type="number" min={MISSION_DURATION_RANGE_MINUTES.min} max={MISSION_DURATION_RANGE_MINUTES.max} value={plan.max_duration_minutes ?? ''} disabled={!editable || busy}
+      {planLimits && <small className="scenario-limits-line" aria-label="Planning limits">{limitsSummary(planLimits)}</small>}
+      <label className="scenario-workspace-field">MAX DURATION (minutes, optional)<input type="number" min={MISSION_DURATION_RANGE_MINUTES.min} max={(planLimits ? planLimits.max_flight_s / 60 : MISSION_DURATION_RANGE_MINUTES.max)} value={plan.max_duration_minutes ?? ''} disabled={!editable || busy}
         placeholder="Optional" onChange={event => updateMissionInputs({ max_duration_minutes: event.target.value ? Number(event.target.value) : null }, true)}/></label>
       <label className="scenario-workspace-field">HOW MANY UAVS ARE REQUIRED FOR THIS MISSION? ({UAV_COUNT_RANGE.min}–{UAV_COUNT_RANGE.max})<input type="number" min={UAV_COUNT_RANGE.min} max={UAV_COUNT_RANGE.max} value={requiredCountInput} disabled={!editable || busy || activationBusy} onChange={event => setRequiredCountInput(event.target.value)}/></label>
       <button type="button" className="button-secondary" disabled={!editable || busy || activationBusy || !requiredCountInput} onClick={() => void activateRequestedFleet()}>{activationBusy ? 'ACTIVATING AND VERIFYING…' : 'ACTIVATE AND VERIFY PX4 / GAZEBO FLEET'}</button>
@@ -852,8 +855,8 @@ export function ScenarioWorkspace({
           </label>
           {taskSpec(activeAircraft.task_type)?.params.map(renderParam)}
           <div className="scenario-workspace-field scenario-fault-values">
-            <label>ALTITUDE (m) *<input type="number" min="0.1" max="500" step="0.1" value={activeAircraft.altitude_m ?? ''} disabled={!editable || busy} onChange={event => changeAircraft(activeIndex, { altitude_m: event.target.value ? Number(event.target.value) : null })}/></label>
-            <label>SPEED (m/s) *<input type="number" min="0.1" max="50" step="0.1" value={activeAircraft.speed_mps ?? ''} disabled={!editable || busy} onChange={event => changeAircraft(activeIndex, { speed_mps: event.target.value ? Number(event.target.value) : null })}/></label>
+            <label>ALTITUDE (m) *<input type="number" min="0.1" max={planLimits?.max_altitude_m} step="0.1" value={activeAircraft.altitude_m ?? ''} disabled={!editable || busy} onChange={event => changeAircraft(activeIndex, { altitude_m: event.target.value ? Number(event.target.value) : null })}/></label>
+            <label>SPEED (m/s) *<input type="number" min={planLimits?.min_speed_mps ?? 0.1} max={planLimits?.max_speed_mps} step="0.1" value={activeAircraft.speed_mps ?? ''} disabled={!editable || busy} onChange={event => changeAircraft(activeIndex, { speed_mps: event.target.value ? Number(event.target.value) : null })}/></label>
           </div>
           <label className="scenario-workspace-field">LOITER AT DESTINATION (s){activeAircraft.task_type === 'loiter_hold' ? ' *' : ''}<input type="number" min="0" max="3600" value={activeAircraft.loiter_duration_s} disabled={!editable || busy} onChange={event => changeAircraft(activeIndex, { loiter_duration_s: event.target.value ? Number(event.target.value) : 0 })}/></label>
           <label className="scenario-workspace-field">RETURN MODE<select value={activeAircraft.return_mode} disabled={!editable || busy} onChange={event => changeAircraft(activeIndex, { return_mode: event.target.value as AircraftPlan['return_mode'] })}>
@@ -933,8 +936,8 @@ export function ScenarioWorkspace({
               onClick={() => (nextAction.kind === 'deploy' ? void deployToMissionControl() : submitForReview())}>
               {nextAction.kind === 'deploy' ? <CheckCircle2 size={14}/> : <Send size={14}/>} {nextAction.label}</button>
             <small>{nextAction.kind === 'deploy'
-              ? 'Hands this saved version and its routes to Mission Control and opens it. Nothing is armed, flown or uploaded to PX4.'
-              : 'Sends this exact saved version to a General for review. You can deploy it once it is approved.'}</small>
+              ? 'Hands this saved version and its routes to Mission Control and opens it. Deploying arms or flies nothing: starting the simulation is done in Mission Control (Start in simulation).'
+              : 'Sends this exact saved version to a General for review. Deploy and Start in simulation stay disabled until a General approves this exact version.'}</small>
           </div>
           {nextAction.reasons.length > 0 && <div className="scenario-next-reasons" id="scenario-next-reasons">
             <b>UNAVAILABLE BECAUSE</b><ul aria-label="Why the next action is unavailable">{nextAction.reasons.map(reason => <li key={reason}>{reason}</li>)}</ul>

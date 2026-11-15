@@ -63,3 +63,37 @@
 .mc-lower{align-items:start}
 .threat-monitor{min-height:0}
 .threat-monitor .mc-empty{min-height:0;padding:18px 0}
+/* Start in simulation: stages, progress, controls with reasons, in-page confirmation. */
+.mc-exec-state{align-self:center;padding:3px 9px;border:1px solid var(--border);border-radius:10px;color:var(--ice);font:9px var(--mono);letter-spacing:.06em;white-space:nowrap}
+.mc-exec-state.executing,.mc-exec-state.completed{border-color:#2f8f6f;color:#56e3b1}.mc-exec-state.paused,.mc-exec-state.pausing,.mc-exec-state.resuming,.mc-exec-state.returning,.mc-exec-state.aborted{border-color:var(--amber);color:var(--amber)}.mc-exec-state.failed,.mc-exec-state.link_lost,.mc-exec-state.failsafe{border-color:var(--red);color:#ff9aa2}
+.mc-lifecycle li.now{color:var(--cyan)}.mc-lifecycle li.bad{color:#ff9aa2}.mc-lifecycle li small{display:block;margin-left:19px;color:var(--muted);font:10px/1.5 var(--mono)}
+.mc-exec-progress{display:grid;gap:5px;margin:0 14px 10px}.mc-exec-bar{height:8px;border:1px solid var(--border);border-radius:4px;background:var(--bg2);overflow:hidden}.mc-exec-bar i{display:block;height:100%;background:var(--cyan);transition:width .4s}.mc-exec-progress small{color:var(--muted);font:10px/1.5 var(--mono)}
+.mc-exec-controls{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px;margin:0 14px 8px}.mc-exec-controls button{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:32px;padding:0 8px;font:10px var(--mono);letter-spacing:.04em}.mc-exec-controls button:first-child,.mc-exec-controls .mc-exec-abort{grid-column:1/-1}
+.mc-exec-controls .mc-exec-abort:not(:disabled){border-color:var(--amber);color:var(--amber)}.mc-exec-controls button:disabled{opacity:.5;cursor:default}
+.mc-exec-reasons{display:grid;gap:4px;margin:0 14px 8px;padding:0;list-style:none;font-size:11px;line-height:1.45}.mc-exec-reasons b{display:inline-block;min-width:52px;margin-right:6px;color:var(--amber);font:9px var(--mono);letter-spacing:.06em;text-transform:uppercase}
+.mc-exec-checks-link{margin:0 14px 8px;justify-self:start}.mc-exec-error{display:flex;gap:7px;align-items:flex-start;margin:0 14px 8px;padding:8px 10px;border:1px solid #75454a;background:#2a1118;color:#ffadb4;font-size:11px;line-height:1.45}
+.mc-exec-confirm{display:grid;gap:8px;margin:0 14px 10px;padding:11px 12px;border:1px solid var(--cyan);border-radius:4px;background:var(--bg2)}.mc-exec-confirm p{margin:0;font-size:12px;line-height:1.55}.mc-exec-confirm small{color:var(--muted);font:10px/1.5 var(--mono)}
+.mc-exec-checklist{display:grid;gap:6px;margin:0;padding:0;list-style:none}.mc-exec-checklist li{display:grid;grid-template-columns:auto minmax(0,1fr);gap:7px;font-size:11px}.mc-exec-checklist li.pass svg{color:#56e3b1}.mc-exec-checklist li.fail svg{color:var(--red)}.mc-exec-checklist i{font:9px var(--mono);font-style:normal;letter-spacing:.06em}.mc-exec-checklist li.pass i{color:#56e3b1}.mc-exec-checklist li.fail i{color:#ff9aa2}.mc-exec-checklist small{display:block}
+.mc-exec-confirm-actions{display:flex;flex-wrap:wrap;gap:8px}.mc-log li.execution span{color:var(--ice)}
+.mc-lifecycle li{flex-wrap:wrap}.mc-lifecycle li small{flex-basis:100%}
+/* Layout fix (live threat update): panels in the side rails size to their content instead of shrinking into small scroll boxes.
+   The rail scrolls as a whole only when its content really is taller than the map row; the last panel fills any remainder. */
+.mc-rail{overflow-x:hidden;overflow-y:auto}
+.mc-rail>.panel{flex:0 0 auto;min-height:auto;overflow:visible}
+.mc-rail>.panel:last-child{flex:0 0 auto}
+.mc-lower>.panel{overflow:visible}
+.mc-lower{align-items:start}
+.mc-battery-list{max-height:none;overflow:visible}
+@media(max-width:1100px){.mc-rail{overflow:visible}}
+/* The middle row grows with its tallest column (map keeps its minimum height), so no rail panel is clipped and nothing scrolls inside a rail. */
+.mc-main{height:auto;min-height:calc(var(--mc-map-h) + var(--mc-chrome));grid-template-rows:auto}
+.mc-rail{overflow:visible}
+.mc-map-panel{min-height:calc(var(--mc-map-h) + var(--mc-chrome))}
+/* Lower row: the left column stacks the flight log and the reassignments list; panels keep their content height. */
+.mc-lower-stack{display:grid;gap:14px;align-content:start;min-width:0}.mc-lower-stack>.panel{min-width:0}
+/* A long alert list scrolls inside its panel only when it really is long. */
+.mc-alert-list{max-height:min(70vh,560px)}
+/* Armed on the ground after a run: a neutral notice with the Disarm action. */
+.mc-exec-ground{display:grid;gap:6px;padding:9px 11px;border:1px solid var(--border);border-radius:4px;background:var(--bg2);font-size:12px;color:var(--muted)}
+.mc-exec-ground b{color:var(--text)}.mc-exec-ground button{justify-self:start;min-height:28px;padding:0 10px;font:10px var(--mono)}
+.mc-exec-ground.ok{display:flex;align-items:center;gap:7px;border-color:#2f8f6f;color:var(--text)}

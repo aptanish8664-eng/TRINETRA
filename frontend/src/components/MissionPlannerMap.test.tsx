@@ -211,3 +211,18 @@ describe('MissionPlannerMap imagery and search', () => {
   })
 })
 
+
+
+describe('map clicks (walkthrough fix)', () => {
+  it('markers and vertices swallow a click; the operating area fill, outline and route line do not', async () => {
+    const { isMapMarkerEntity } = await import('./MissionPlannerMap')
+    expect(isMapMarkerEntity('mission-planner:zone:operating-area:polygon')).toBe(false)      // a start can be placed inside the area
+    expect(isMapMarkerEntity('mission-planner:zone:operating-area:outline')).toBe(false)
+    expect(isMapMarkerEntity('mission-planner:route:px4-1')).toBe(false)
+    expect(isMapMarkerEntity('mission-planner:zone:operating-area:vertex:3')).toBe(true)
+    expect(isMapMarkerEntity('mission-planner:start')).toBe(true)
+    expect(isMapMarkerEntity('mission-planner:aircraft:px4-1:start')).toBe(true)
+    expect(isMapMarkerEntity('mission-planner:draft:2')).toBe(true)
+    expect(isMapMarkerEntity('some-other-entity')).toBe(false)
+  })
+})

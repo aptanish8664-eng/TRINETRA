@@ -66,7 +66,9 @@ from .scenario_routes import router as scenario_router
 from .fleet_routes import router as fleet_router
 from .mission_plan_routes import router as mission_plan_router
 from .attack_lab_routes import router as attack_lab_router
+from . import research_routes
 from .research_routes import router as research_router
+from .execution_routes import router as execution_router
 from .simulation.detector import DETECTOR_VERSION
 from .simulation.engine import SIMULATION_VERSION, Simulation, SimulationConfig
 from .simulation.response import reassignment_block_reason, reassign_tasks
@@ -133,6 +135,7 @@ app.include_router(fleet_router)
 app.include_router(mission_plan_router)
 app.include_router(attack_lab_router)
 app.include_router(research_router)
+app.include_router(execution_router)
 
 
 class ManagedRun:
@@ -168,6 +171,7 @@ class StreamClient:
 
 runs: dict[str, ManagedRun] = {}
 px4_telemetry_store = Px4TelemetryStore()
+research_routes.telemetry_store = px4_telemetry_store   # live threat assessments read the server's own telemetry buffer
 px4_udp_transport: asyncio.DatagramTransport | None = None
 px4_udp_protocol: Px4MavlinkProtocol | None = None
 px4_udp_error_code: str | None = None
@@ -323,7 +327,9 @@ async def request_id_middleware(request: Request, call_next):
                 if parsed_content_length > MAX_HTTP_BODY_BYTES:
                     response = JSONResponse(
                         status_code=413,
-                        content={"detail": "Request body exceeds the configured size limit."},
+                        content={"detail": "Request body exceeds the configured size limit.", "code": "request_body_too_large",
+                                 "limit_bytes": MAX_HTTP_BODY_BYTES,
+                                 "hint": "Send a shorter window, or use GET /api/research/live: live assessments are computed on the server and need no body."},
                     )
                 else:
                     response = await call_next(request)

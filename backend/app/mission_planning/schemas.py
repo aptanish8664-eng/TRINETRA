@@ -58,7 +58,7 @@ class OperatingArea(StrictModel):
     """Structured operating area chosen on the map: a circle or a simple polygon."""
     kind: Literal["circle", "polygon"]
     centre: Optional[GeoPoint] = None
-    radius_m: Optional[float] = Field(default=None, gt=0, le=50000, allow_inf_nan=False)
+    radius_m: Optional[float] = Field(default=None, gt=0, le=5_000_000, allow_inf_nan=False)
     vertices: list[GeoPoint] = Field(default_factory=list, max_length=100)
 
     @model_validator(mode="after")
@@ -97,7 +97,7 @@ def validate_simple_polygon(vertices: list[GeoPoint]) -> None:
 
 class MissionConstraints(StrictModel):
     """Numeric limits the validator enforces on every generated waypoint."""
-    max_distance_from_start_m: Optional[float] = Field(default=None, gt=0, le=100000, allow_inf_nan=False)
+    max_distance_from_start_m: Optional[float] = Field(default=None, gt=0, le=20_000_000, allow_inf_nan=False)
     max_altitude_m: Optional[float] = Field(default=None, gt=0, le=500, allow_inf_nan=False)
 
 
@@ -167,7 +167,7 @@ class AircraftPlan(StrictModel):
     parameters: TaskParameters = Field(default_factory=TaskParameters)
     start_location: Optional[GeoPoint] = None
     altitude_m: Optional[float] = Field(default=None, gt=0, le=500, allow_inf_nan=False)
-    speed_mps: Optional[float] = Field(default=None, gt=0, le=50, allow_inf_nan=False)
+    speed_mps: Optional[float] = Field(default=None, gt=0, le=150, allow_inf_nan=False)
     loiter_duration_s: float = Field(default=0.0, ge=0, le=3600, allow_inf_nan=False)
     return_mode: ReturnMode = "return_to_start"
     route: Optional[GeneratedRoute] = None

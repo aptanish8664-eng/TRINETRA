@@ -1,12 +1,12 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { ActionRow, Assessment, Tier } from './attackLabTypes'
+import type { ActionRow, Assessment, LiveAircraft, LiveThreat, Tier } from './attackLabTypes'
 import { ThreatCard } from './ThreatCard'
 import { ThreatMonitor } from './ThreatMonitor'
 import { findGroundTruthKeys, sessionFreshness, threatSessionStore, type ThreatSession } from './threatSession'
 
 const apiMock = vi.hoisted(() => ({
-  researchModelInfo: vi.fn(), researchDecisions: vi.fn(), recordDecision: vi.fn(),
+  researchModelInfo: vi.fn(), researchDecisions: vi.fn(), recordDecision: vi.fn(), researchLive: vi.fn(),
 }))
 vi.mock('../services/api', () => ({ api: apiMock }))
 
@@ -32,7 +32,18 @@ function session(tier: Tier, score = 60, state: ThreatSession['state'] = 'playin
     aircraft: { 'px4-1': { aircraftId: 'px4-1', role: 'primary', assessment: assessment(tier, score), history: [10, 20, score], tiers: [tier], battery: 90, reassignable: false } } }
 }
 
+const RULE = { min_battery_pct: 40, enforced_by: 'server' as const, message: "A handover is refused when the receiving aircraft's battery is below 40%." }
+const RATES = { GPS_RAW_INT: 10.3, LOCAL_POSITION_NED: 25.7, HIGHRES_IMU: 25.8 }
+function liveAircraft(patch: Partial<LiveAircraft> = {}): LiveAircraft {
+  return { aircraft_id: 'px4-1', armed: true, role: 'primary', role_source: 'deployed_plan', state: 'live', link: { status: 'connected', telemetry_age_s: 0.1, heartbeat_age_s: 0.5 },
+    flight_mode: 'MISSION', rates_hz: RATES, missing_inputs: [], assessment: { ...assessment('Low', 3), source: 'live_telemetry', computed_at: '2026-11-14T10:00:00Z' }, assessment_age_s: 0,
+    warming_up: null, data_quality: { clock: 'px4_boot_clock', sample_hz: 2, gps_delay_s: 0.04, velocity: 'interval_averaged', window_samples: 120, window_seconds: 60, velocity_reference: 'px4_estimator_velocity', velocity_reference_note: 'n', flags: [], estimator: null, vibration: null },
+    ...patch }
+}
+const live = (...aircraft: LiveAircraft[]): LiveThreat => ({ source: 'live_telemetry', generated_at: '2026-11-14T10:00:00Z', model_available: true, flight_running: aircraft.some(item => item.armed), update_interval_s: 1, handover_rule: RULE, aircraft })
+
 beforeEach(() => {
+  apiMock.researchLive.mockResolvedValue(live())
   apiMock.researchModelInfo.mockResolvedValue({ available: true, formula: 'f', live_residual_inputs_available: false })
   apiMock.researchDecisions.mockResolvedValue([])
   apiMock.recordDecision.mockImplementation(async (payload: Record<string, unknown>) => ({
@@ -110,10 +121,134 @@ describe('ThreatCard', () => {
 describe('ThreatMonitor', () => {
   const props = () => ({ canRecord: true, onTierTransitions: vi.fn(), onTiers: vi.fn() })
 
-  it('shows the honest fallback and no invented data without a source', async () => {
-    render(<ThreatMonitor {...props()}/>)
-    expect(await screen.findByText(/Live residual inputs not available; showing offline replay only/)).toBeTruthy()
+  it('idle: one slim "Waiting for a flight" line, no empty box and no invented data', async () => {
+    const { container } = render(<ThreatMonitor {...props()}/>)
+    expect(await screen.findByText('Waiting for a flight.')).toBeTruthy()
     expect(screen.queryByRole('meter')).toBeNull()
+    expect(container.querySelector('.threat-monitor.idle')).toBeTruthy()
+    expect(container.querySelector('.mc-empty')).toBeNull()
+    expect(screen.queryByText(/Last offline replay/)).toBeNull()
+  })
+
+  it('idle with an earlier offline replay: offers a link to it instead of showing it', async () => {
+    act(() => threatSessionStore.publish(session('Medium', 45, 'finished')))
+    render(<ThreatMonitor {...props()}/>)
+    const link = await screen.findByRole('button', { name: /Last offline replay: Drift test/ })
+    expect(screen.queryByRole('meter')).toBeNull()
+    fireEvent.click(link)
+    expect((await screen.findAllByText(/Source: offline replay \(Drift test\)/)).length).toBeGreaterThan(0)
+  })
+
+  it('live: shows the backend assessment for a flying aircraft, Low and calm, with the measured input rates', async () => {
+    apiMock.researchLive.mockResolvedValue(live(liveAircraft()))
+    const handlers = props()
+    render(<ThreatMonitor {...handlers}/>)
+    expect(await screen.findByText('No threat detected')).toBeTruthy()
+    expect(screen.queryByText('Waiting for a flight.')).toBeNull()
+    expect(screen.getAllByText(/Source: live telemetry/).length).toBeGreaterThan(0)
+    expect(screen.getAllByText(/GPS 10 Hz · velocity 26 Hz · IMU 26 Hz/).length).toBeGreaterThan(0)
+    expect(screen.getByRole('meter').getAttribute('aria-valuenow')).toBe('3')
+    expect(handlers.onTierTransitions).not.toHaveBeenCalled()
+  })
+
+  it('live: records a decision as live telemetry and reads the handover rule from the backend', async () => {
+    apiMock.researchLive.mockResolvedValue(live(liveAircraft({ assessment: { ...assessment('High', 70), source: 'live_telemetry', computed_at: 'x' } })))
+    render(<ThreatMonitor {...props()}/>)
+    fireEvent.click(await screen.findByText(/Hand over to standby/))
+    expect(screen.getByText(RULE.message)).toBeTruthy()
+    fireEvent.click(screen.getByText('CONFIRM AND RECORD'))
+    await waitFor(() => expect(apiMock.recordDecision).toHaveBeenCalled())
+    expect(apiMock.recordDecision.mock.calls[0][0]).toMatchObject({ aircraft_id: 'px4-1', action: 'handover_to_standby', handover_candidate: 'px4-2', source: 'live_telemetry', tier: 'High', threat_score: 70 })
+  })
+
+  it('live: a refused handover shows the backend reason and does not claim it was recorded', async () => {
+    apiMock.researchLive.mockResolvedValue(live(liveAircraft({ assessment: { ...assessment('High', 70), source: 'live_telemetry', computed_at: 'x' } })))
+    apiMock.recordDecision.mockRejectedValueOnce(new Error('Handover refused: px4-2 battery 20% is below the 40% minimum.'))
+    render(<ThreatMonitor {...props()}/>)
+    fireEvent.click(await screen.findByText(/Hand over to standby/))
+    fireEvent.click(screen.getByText('CONFIRM AND RECORD'))
+    expect(await screen.findByText(/battery 20% is below the 40% minimum/)).toBeTruthy()
+    expect(screen.queryByText(/The aircraft was not commanded/)).toBeNull()
+  })
+
+  it('live: collecting data, then a missing required input is named in amber', async () => {
+    apiMock.researchLive.mockResolvedValue(live(liveAircraft({ state: 'warming_up', assessment: null, data_quality: null, warming_up: { seconds_collected: 4, seconds_needed: 10 } })))
+    const { unmount } = render(<ThreatMonitor {...props()}/>)
+    expect(await screen.findByText(/Collecting data: 4 of 10 s/)).toBeTruthy()
+    unmount()
+    apiMock.researchLive.mockResolvedValue(live(liveAircraft({ state: 'inputs_missing', assessment: null, data_quality: null, missing_inputs: [
+      { input: 'estimator_velocity', title: 'Estimator velocity (LOCAL_POSITION_NED)', meaning: "PX4's velocity estimate is not arriving.", detail: 'last LOCAL_POSITION_NED was 6.0 s ago', required: true }] })))
+    render(<ThreatMonitor {...props()}/>)
+    const alert = await screen.findByText(/INPUT MISSING/)
+    expect(alert.closest('.threat-live-note')?.classList.contains('amber')).toBe(true)
+    expect(screen.getByText(/Estimator velocity \(LOCAL_POSITION_NED\)/)).toBeTruthy()
+    expect(screen.getByText(/last LOCAL_POSITION_NED was 6.0 s ago/)).toBeTruthy()
+    expect(screen.queryByRole('meter')).toBeNull()
+  })
+
+  it('live: an optional missing input keeps the score and says what is missing', async () => {
+    apiMock.researchLive.mockResolvedValue(live(liveAircraft({ missing_inputs: [{ input: 'imu', title: 'IMU (HIGHRES_IMU)', meaning: 'Raw IMU samples are not arriving.', detail: 'x', required: false }] })))
+    render(<ThreatMonitor {...props()}/>)
+    expect(await screen.findByRole('meter')).toBeTruthy()
+    expect(screen.getByText(/Input missing \(score still computed\)/)).toBeTruthy()
+  })
+
+  it('live: a lost link marks the aircraft stale with the age and hides the old score', async () => {
+    apiMock.researchLive.mockResolvedValue(live(liveAircraft({ state: 'link_lost', link: { status: 'disconnected', telemetry_age_s: 42, heartbeat_age_s: 42 }, assessment_age_s: 44 })))
+    render(<ThreatMonitor {...props()}/>)
+    expect(await screen.findByText('STALE')).toBeTruthy()
+    expect(screen.getByText(/Link lost in flight: no telemetry for 42 s/)).toBeTruthy()
+    expect(screen.getByText(/is 44 s old and is not updating/)).toBeTruthy()
+    expect(screen.queryByRole('meter')).toBeNull()
+  })
+
+  it('live: an aircraft that landed shows LANDED with its last assessment and age, not STALE or link lost', async () => {
+    apiMock.researchLive.mockResolvedValue(live(liveAircraft({ state: 'landed', armed: false, landed_age_s: 35, assessment_age_s: 36,
+      link: { status: 'disconnected', telemetry_age_s: 20, heartbeat_age_s: 20 } })))
+    render(<ThreatMonitor {...props()}/>)
+    expect(await screen.findByText('LANDED')).toBeTruthy()
+    expect(screen.queryByText('STALE')).toBeNull()
+    expect(screen.getByText(/Landed 35 s ago \(the link has since dropped\)\. The last assessment \(Low, score 3\) is 36 s old and is not updating\./)).toBeTruthy()
+    expect(screen.queryByText(/Link lost/)).toBeNull()
+    expect(screen.queryByRole('meter')).toBeNull()
+    expect(screen.queryByRole('group', { name: /Response options/ })).toBeNull()
+    expect(screen.queryByText('Waiting for a flight.')).toBeNull()
+  })
+
+  it('live: aircraft with nothing to show (idle, offline) leave the slim waiting line', async () => {
+    apiMock.researchLive.mockResolvedValue(live(liveAircraft({ state: 'idle', armed: false, assessment: null, data_quality: null }),
+      liveAircraft({ aircraft_id: 'px4-2', state: 'offline', armed: true, assessment: null, data_quality: null, link: { status: 'disconnected', telemetry_age_s: 4000, heartbeat_age_s: 4000 } })))
+    render(<ThreatMonitor {...props()}/>)
+    expect(await screen.findByText('Waiting for a flight.')).toBeTruthy()
+    expect(screen.queryByText('STALE')).toBeNull()
+  })
+
+  it('handover candidates show "unavailable" for unknown values and are never offered on them', async () => {
+    const candidates = [
+      { aircraft_id: 'px4-2', role: 'standby', battery_pct: 85, distance_to_task_m: null, workload: null, eligible: true, ineligible_reason: null, score: 0.44, distance_known: false },
+      { aircraft_id: 'px4-3', role: 'standby', battery_pct: null, distance_to_task_m: null, workload: null, eligible: false, ineligible_reason: 'battery unavailable: no live battery reading', score: 0.1, battery_known: false },
+    ]
+    apiMock.researchLive.mockResolvedValue(live(liveAircraft({ assessment: { ...assessment('High', 70, { handover_candidates: candidates }), source: 'live_telemetry', computed_at: 'x' } })))
+    render(<ThreatMonitor {...props()}/>)
+    fireEvent.click(await screen.findByText(/Hand over to standby/))
+    const known = screen.getByLabelText(/px4-2/) as HTMLInputElement
+    const unknown = screen.getByLabelText(/px4-3/) as HTMLInputElement
+    expect(known.closest('label')?.textContent).toMatch(/battery 85% · distance to the task unavailable/)
+    expect(unknown.closest('label')?.textContent).toMatch(/battery unavailable · distance to the task unavailable .*not eligible: battery unavailable/)
+    expect(unknown.disabled).toBe(true)
+    expect(known.checked).toBe(true)
+    expect(document.body.textContent).not.toMatch(/\b0 m from the task/)
+  })
+
+  it('live: one alert per tier change, not per poll', async () => {
+    const handlers = props()
+    apiMock.researchLive.mockResolvedValue(live(liveAircraft()))
+    render(<ThreatMonitor {...handlers}/>)
+    await screen.findByText('No threat detected')
+    apiMock.researchLive.mockResolvedValue(live(liveAircraft({ assessment: { ...assessment('High', 70), source: 'live_telemetry', computed_at: 'later' } })))
+    await waitFor(() => expect(handlers.onTierTransitions).toHaveBeenCalledTimes(1), { timeout: 3000 })
+    await new Promise(resolve => setTimeout(resolve, 1300))
+    expect(handlers.onTierTransitions).toHaveBeenCalledTimes(1)
   })
 
   it('renders the replay session with its source line', async () => {
@@ -156,6 +291,8 @@ describe('ThreatMonitor', () => {
   it('marks an old session as STALE and hides its numbers', async () => {
     act(() => threatSessionStore.publish(session('High', 70, 'playing', Date.now() - 120_000)))
     render(<ThreatMonitor {...props()}/>)
+    expect(screen.queryByRole('meter')).toBeNull()                       // an old replay is not shown as current
+    fireEvent.click(await screen.findByRole('button', { name: /Last offline replay: Drift test \(stopped\)/ }))
     expect(await screen.findByText(/STALE: no recent update/)).toBeTruthy()
     expect(screen.queryByRole('meter')).toBeNull()
   })

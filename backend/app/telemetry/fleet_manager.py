@@ -23,11 +23,29 @@ def _home_arguments(home: dict[str, Any]) -> list[str]:
     return [f"--home-lat={latitude:.7f}", f"--home-lon={longitude:.7f}", f"--home-alt={altitude:.2f}"]
 
 
+def _profile_arguments(profile: dict[str, Any]) -> list[str]:
+    """The long-range profile as fixed-format numbers; the WSL manager range-checks them again."""
+    enabled = profile.get("enabled")
+    if not isinstance(enabled, bool):
+        raise ValueError("profile.enabled must be true or false")
+    arguments = ["--long-range-profile", "on" if enabled else "off"]
+    for key, option, low, high in (("speed_cap_mps", "--speed-cap", 1, 150), ("accel_mps2", "--accel-cap", 1, 30), ("tilt_deg", "--tilt-max", 20, 85),
+                                   ("ground_extent_m", "--ground-extent", 1000, 20_000_000)):
+        value = profile.get(key)
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not low <= value <= high:
+            raise ValueError(f"profile.{key} must be a number from {low} to {high}")
+        arguments.append(f"{option}={float(value):.1f}")
+    return arguments
+
+
 def build_fleet_manager_command(action: str, *, count: int | None = None,
                                 instances: list[int] | None = None,
                                 request_id: str | None = None,
                                 ports: dict[str, int] | None = None,
-                                home: dict[str, Any] | None = None) -> list[str]:
+                                home: dict[str, Any] | None = None,
+                                profile: dict[str, Any] | None = None) -> list[str]:
     if action not in _ACTIONS:
         raise ValueError("unsupported fleet operation")
     command = ["wsl.exe", "--distribution", WSL_DISTRIBUTION, "--exec", "python3",
@@ -38,6 +56,7 @@ def build_fleet_manager_command(action: str, *, count: int | None = None,
         if action == "relocate" and home is None:
             raise ValueError("relocate requires a simulation home")
         command.extend(("--count", str(count)))
+    if action in {"activate", "relocate", "status"}:   # status compares the running bridges with these same ports
         for key, option in (("telemetry_forward", "--telemetry-forward-port"),
                             ("telemetry_source", "--telemetry-source-port"),
                             ("pose_forward", "--pose-forward-port"), ("pose_source", "--pose-source-port")):
@@ -46,10 +65,13 @@ def build_fleet_manager_command(action: str, *, count: int | None = None,
                 if not isinstance(value, int) or not 1024 <= value <= 65535:
                     raise ValueError("bridge ports must be integers from 1024 to 65535")
                 command.extend((option, str(value)))
+    if action in {"activate", "relocate"}:
         if home is not None:
             command.extend(_home_arguments(home))
-    elif home is not None:
-        raise ValueError("a simulation home is only accepted by activate and relocate")
+        if profile is not None:
+            command.extend(_profile_arguments(profile))
+    elif home is not None or profile is not None:
+        raise ValueError("a simulation home or profile is only accepted by activate and relocate")
     elif action == "stop":
         values = instances or []
         if not values or len(values) != len(set(values)) or any(not 0 <= item < FLEET_CAPACITY for item in values):
@@ -73,13 +95,17 @@ def invoke_fleet_manager(action: str, *, count: int | None = None,
                          timeout_seconds: int = 35,
                          home: dict[str, Any] | None = None) -> dict[str, Any]:
     ports = None
-    if action in {"activate", "relocate"}:
-        from ..config import (GAZEBO_POSE_UDP_ALLOWED_SOURCE_PORT, GAZEBO_POSE_UDP_BIND_PORT,
-                              PX4_UDP_ALLOWED_SOURCE_PORT, PX4_UDP_BIND_PORT)
+    profile = None
+    if action in {"activate", "relocate", "status"}:
+        from ..config import (GAZEBO_POSE_UDP_ALLOWED_SOURCE_PORT, GAZEBO_POSE_UDP_BIND_PORT, PX4_UDP_ALLOWED_SOURCE_PORT, PX4_UDP_BIND_PORT)
         ports = {"telemetry_forward": PX4_UDP_BIND_PORT, "telemetry_source": PX4_UDP_ALLOWED_SOURCE_PORT,
                  "pose_forward": GAZEBO_POSE_UDP_BIND_PORT, "pose_source": GAZEBO_POSE_UDP_ALLOWED_SOURCE_PORT}
+    if action in {"activate", "relocate"}:
+        from ..config import LONG_RANGE_ACCEL_MPS2, LONG_RANGE_GROUND_EXTENT_M, LONG_RANGE_PROFILE_ENABLED, LONG_RANGE_TILT_DEG, MP_MAX_SPEED_MPS
+        profile = {"enabled": LONG_RANGE_PROFILE_ENABLED, "speed_cap_mps": MP_MAX_SPEED_MPS,
+                   "accel_mps2": LONG_RANGE_ACCEL_MPS2, "tilt_deg": LONG_RANGE_TILT_DEG, "ground_extent_m": LONG_RANGE_GROUND_EXTENT_M}
     command = build_fleet_manager_command(action, count=count, instances=instances,
-                                          request_id=request_id, ports=ports, home=home)
+                                          request_id=request_id, ports=ports, home=home, profile=profile)
     try:
         result = subprocess.run(command, capture_output=True, text=True, timeout=timeout_seconds, check=False)
     except (OSError, subprocess.TimeoutExpired) as exc:

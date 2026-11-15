@@ -2,7 +2,7 @@ import { useState } from 'react'
 import type { ActionId, ActionRow, Assessment, DecisionRecord, HandoverCandidate, Tier } from './attackLabTypes'
 import { TIER_COLORS } from './attackLabTypes'
 
-export type ThreatState = 'ok' | 'stale' | 'no_data'
+export type ThreatState = 'ok' | 'stale' | 'landed' | 'no_data'
 
 type Props = {
   aircraftId: string
@@ -16,6 +16,10 @@ type Props = {
   decisions: DecisionRecord[]
   onConfirm: (action: ActionId, candidate: string | null) => Promise<void>
   highlighted?: boolean
+  /** The backend's handover battery rule, shown as served (the backend enforces it). */
+  handoverRule?: string
+  /** Replaces the default stale text (for example a lost link, with the age of the last assessment). */
+  staleNote?: string
 }
 
 function Sparkline({ values }: { values: number[] }) {
@@ -25,7 +29,7 @@ function Sparkline({ values }: { values: number[] }) {
 }
 
 /** One aircraft's threat assessment with a recorded-only decision flow. It never commands an aircraft. */
-export function ThreatCard({ aircraftId, role, assessment, state, history, sourceLine, canRecord, decisions, onConfirm, highlighted }: Props) {
+export function ThreatCard({ aircraftId, role, assessment, state, history, sourceLine, canRecord, decisions, onConfirm, highlighted, handoverRule, staleNote }: Props) {
   const [pending, setPending] = useState<ActionRow | null>(null)
   const [candidate, setCandidate] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -57,9 +61,9 @@ export function ThreatCard({ aircraftId, role, assessment, state, history, sourc
     <header>
       <b>{aircraftId}</b>{role && <small>{role}</small>}
       {state === 'ok' && assessment ? <span className="threat-tier" style={{ color: TIER_COLORS[tier], borderColor: TIER_COLORS[tier] }}>{tier.toUpperCase()}</span>
-        : <span className="threat-tier muted">{state === 'stale' ? 'STALE' : 'NO DATA'}</span>}
+        : <span className="threat-tier muted">{state === 'stale' ? 'STALE' : state === 'landed' ? 'LANDED' : 'NO DATA'}</span>}
     </header>
-    {!live ? <p className="threat-empty">{state === 'stale' ? 'The assessment source stopped updating; the last number is hidden because it is stale.' : 'No assessment data for this aircraft.'}</p> : <div className="threat-body">
+    {!live ? <p className="threat-empty">{state === 'stale' || state === 'landed' ? (staleNote ?? 'The assessment source stopped updating; the last number is hidden because it is stale.') : 'No assessment data for this aircraft.'}</p> : <div className="threat-body">
       <div className="threat-part threat-part-left">
       <div className="threat-gauge-row">
         <div className="threat-gauge" role="meter" aria-label={`Threat score ${assessment.threat_score.toFixed(0)} of 100, ${tier}`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(assessment.threat_score)}>
@@ -89,10 +93,11 @@ export function ThreatCard({ aircraftId, role, assessment, state, history, sourc
       {pending && <div className="threat-confirm" role="group" aria-label="Confirm decision">
         <p><b>{pending.label}</b></p>
         <p>This records your decision. It does not command the aircraft yet.</p>
-        {pending.action === 'handover_to_standby' && <fieldset><legend>Handover candidate (battery minimum {candidates.length ? '' : ''}applies)</legend>
+        {pending.action === 'handover_to_standby' && <fieldset><legend>Handover candidate</legend>
+          <p className="threat-rule">{handoverRule ?? 'The backend refuses a handover to an aircraft below the minimum battery.'}</p>
           {candidates.length === 0 ? <p className="threat-empty">No other aircraft reported.</p> : candidates.map(item => <label key={item.aircraft_id} className={item.eligible ? '' : 'ineligible'}>
             <input type="radio" name={`candidate-${aircraftId}`} disabled={!item.eligible} checked={candidate === item.aircraft_id} onChange={() => setCandidate(item.aircraft_id)}/>
-            {item.aircraft_id} · {item.role} · battery {item.battery_pct.toFixed(0)}% · {item.distance_to_task_m.toFixed(0)} m from the task
+            {item.aircraft_id} · {item.role ?? 'role unavailable'} · battery {item.battery_pct == null ? 'unavailable' : `${item.battery_pct.toFixed(0)}%`} · {item.distance_to_task_m == null ? 'distance to the task unavailable' : `${item.distance_to_task_m.toFixed(0)} m from the task`}
             {item.eligible ? ` · score ${item.score.toFixed(2)}` : ` · not eligible: ${item.ineligible_reason}`}</label>)}
         </fieldset>}
         {error && <p role="alert" className="threat-error">{error}</p>}

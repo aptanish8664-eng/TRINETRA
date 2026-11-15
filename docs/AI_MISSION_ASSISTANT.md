@@ -108,3 +108,20 @@ The rule-based Scenario Lab assistant explains the Attack Lab, attack types, pre
 
 - Next to the Save button Scenario Lab shows "Saved v1" or "Unsaved changes". Beneath it only the deploy button is shown (General "Deploy to Mission Control", Operator "Submit for review") with the fleet verification row; the reasons list appears only while the button is disabled. The assistant's Section C and deploy topics describe exactly this.
 - The review shows, per aircraft, the estimated duration and length next to the aircraft limit (default 20 min, 15 km) and a blocking message when it is exceeded. The assistant reads the same checklist, so "is everything ready?" lists an over-long route as a blocker.
+
+## Start in simulation and the assistant (2026-11-14)
+
+- The Scenario Lab assistant has no action for starting, pausing, resuming or aborting a run, and none may be added to the allowlist: its actions remain form edits only. Starting is done in Mission Control, in the Deployed mission panel, after an in-page confirmation.
+- The text beneath the deploy button in Scenario Lab says that deploying arms or flies nothing and that starting is done in Mission Control; for an Operator it says Deploy and Start in simulation stay disabled until a General approves that exact version.
+- The rule-based help has no dedicated "start in simulation" topic yet (not implemented). The existing "deploy" and "approval" topics are unchanged.
+- No live AI call was made for this work.
+
+## Limits update
+Assistant speed bound is now 0.1-90 m/s; flight time up to 300 min and route length up to 1,000 km come from the backend limits endpoint. Area tasks are limited to 20 km; long legs need a waypoint route.
+
+
+## Scenario Lab assistant on the schema-2 mission plan
+
+- Help text, missing-field lists, explanations, option chips and model actions all derive from the shared specs in `frontend/src/components/missionPlan.ts` (task types and their parameters, aircraft and mission fields, roles, return modes, payload categories). `backend/tests/test_mission_planning.py` checks those lists stay in step with the backend.
+- Allowlisted actions (`POST /api/ai/scenario-assistant`): `set_objective`, `set_max_duration`, `set_mission_text` (description/notes), `set_constraint` (max distance/altitude), `set_required_uav_count`, and `set_assignment_field` for role, priority, task type, return mode, altitude, speed, loiter duration and the numeric/enum task parameters (a parameter applies only to the aircraft's current task type; task types are limited by the selected objectives). Locations, areas, routes, deployment and approval are never proposable. The relief-supply task is described only as a simulated, logged event.
+- Typed commands: "set altitude to 30", "set task type of UAV 1 to coverage survey", "set max altitude to 80", "set max duration to 20 minutes", "I need 2 UAVs".

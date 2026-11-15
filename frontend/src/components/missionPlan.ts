@@ -206,10 +206,14 @@ export function prefillPlanFromLegacy(legacy: { mission_description?: string; co
   }
 }
 
+export const DEFAULT_ALTITUDE_M = 30
+export const DEFAULT_SPEED_MPS = 8
+
 export function newAircraft(uavId: string, index: number): AircraftPlan {
   return {
     uav_id: uavId, role: index === 0 ? 'primary' : 'standby', priority: 2, reassignable: true, task_type: null, parameters: {},
-    start_location: null, altitude_m: null, speed_mps: null, loiter_duration_s: 0, return_mode: 'return_to_start',
+    // Defaults the user can change: a cruise height and speed that work for the simulated x500 (the planning limits still apply).
+    start_location: null, altitude_m: DEFAULT_ALTITUDE_M, speed_mps: DEFAULT_SPEED_MPS, loiter_duration_s: 0, return_mode: 'return_to_start',
     route: null, confirmed: false,
   }
 }
@@ -253,6 +257,17 @@ export function isPlanComplete(plan: MissionPlan): boolean {
 
 /** Simulated X500 endurance served by the backend (`GET /api/mission-plans/limits`, config TRINETRA_MP_MAX_FLIGHT_*). */
 export interface EnduranceLimit { duration_s: number; length_m: number }
+/** Planning limits served by the backend (`GET /api/mission-plans/limits`); nothing here is a copy of a number. */
+export interface PlanLimits {
+  max_waypoints: number; max_start_to_area_m: number; min_speed_mps: number; max_speed_mps: number; min_altitude_m: number; max_altitude_m: number
+  max_flight_s: number; max_flight_distance_m: number; max_planar_extent_m: number; geodesic_above_m: number
+}
+/** One line stating the limits a plan is checked against, for the form and the route preview. */
+export function limitsSummary(limits: Record<string, number> | null | undefined): string {
+  if (!limits || !Number.isFinite(limits.max_flight_s)) return ''
+  return `Limits: speed ${limits.min_speed_mps}–${limits.max_speed_mps} m/s · flight time ${+(limits.max_flight_s / 60).toFixed(1)} min · route length ${+(limits.max_flight_distance_m / 1000).toFixed(0)} km · `
+    + `${limits.max_waypoints} waypoints · altitude up to ${limits.max_altitude_m} m · area patterns within ${+(limits.max_planar_extent_m / 1000).toFixed(0)} km of the start (use a waypoint route for long legs).`
+}
 export const ENDURANCE_ADVICE = 'Reduce the area, widen track spacing, or raise speed.'
 
 /** Blocking messages for one generated route against the aircraft limit; the same wording the backend returns. */
@@ -280,7 +295,7 @@ export function computePlanMissing({ title, plan, fleetVerified, availableVehicl
     plan.constraints.max_altitude_m === null ? 'Set the maximum altitude.' : '',
     !plan.selected_uav_ids.length ? 'Select at least one connected PX4 aircraft.' : '',
     !plan.required_uav_count || plan.required_uav_count !== plan.selected_uav_ids.length || plan.aircraft.length !== plan.selected_uav_ids.length
-      ? 'Requested, activated and assigned UAV counts must match.' : '',
+      ? 'Requested, activated and assigned UAV counts must match. Tick the aircraft, then press ACTIVATE AND VERIFY PX4 / GAZEBO FLEET in Section A.' : '',
     plan.activated_uav_ids.length !== (plan.required_uav_count ?? 0) || plan.activated_uav_ids.some(id => !plan.selected_uav_ids.includes(id))
       ? 'The requested PX4/Gazebo fleet activation is not recorded for this exact selection.' : '',
     !fleetVerified ? FLEET_NOT_VERIFIED_ITEM : '',

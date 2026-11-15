@@ -375,7 +375,7 @@ function App() {
         onMissionDeployed={(deployment: MissionDeployment, note?: string) => {
           setSharedScenarioId(deployment.scenario_id)
           const version = typeof deployment.scenario_version_number === 'number' ? ` version ${deployment.scenario_version_number}` : ''
-          setDeployNotice(`Deployed ${deployment.scenario_title ?? 'the mission'}${version} to Mission Control. Nothing was armed, flown or uploaded to PX4.${note ? ` ${note}` : ''}`)
+          setDeployNotice(`Deployed ${deployment.scenario_title ?? 'the mission'}${version} to Mission Control. Nothing was armed, flown or uploaded to PX4. Use Start in simulation in the Deployed mission panel to fly it.${note ? ` ${note}` : ''}`)
           changeTab('Mission Control')  // also updates the address bar, so Back returns to Scenario Lab
         }}
       />

@@ -365,6 +365,10 @@ def test_legacy_versions_still_load_unmodified(general_client):
 
 # --- endurance of the simulated X500 -----------------------------------------------------------------------------
 
+# The aircraft limit used by the endurance tests below (the earlier defaults); the new code defaults are tested separately.
+SHORT = PlanningLimits(**{**LIMITS.__dict__, "max_flight_s": 1200.0, "max_flight_distance_m": 15000.0})
+
+
 def _coverage(area_radius_m: float, spacing_m: float, **extra) -> MissionPlan:
     plan = make_plan("coverage_survey", {"line_spacing_m": spacing_m, "heading_deg": 90}, objectives=["area_survey"],
                      aircraft_extra={"speed_mps": 5}, plan_extra={"constraints": {"max_distance_from_start_m": 100000, "max_altitude_m": 100}, **extra})
@@ -373,7 +377,7 @@ def _coverage(area_radius_m: float, spacing_m: float, **extra) -> MissionPlan:
 
 def test_a_long_coverage_plan_is_rejected_with_the_structured_endurance_error():
     long = _coverage(1000, 25)  # about 2 km across at 25 m spacing: under the waypoint cap but far beyond the endurance, flown at 5 m/s
-    issues, route = validate_aircraft(long.aircraft[0], long, LIMITS, require_route=False)
+    issues, route = validate_aircraft(long.aircraft[0], long, SHORT, require_route=False)
     by_code = {item.code: item for item in issues}
     assert route is None or route.duration_s > 1200
     assert "endurance_time_exceeded" in by_code and "endurance_distance_exceeded" in by_code
@@ -386,25 +390,26 @@ def test_a_long_coverage_plan_is_rejected_with_the_structured_endurance_error():
     # applies with an empty max duration, and also when a longer max duration is set (the aircraft limit still wins)
     assert long.max_duration_minutes is None
     generous = _coverage(1000, 25, max_duration_minutes=1440)
-    assert "endurance_time_exceeded" in codes(generous) and "duration_over_limit" not in codes(generous)
-    assert "endurance_time_exceeded" in [item.code for item in validate_plan(long.model_copy(update={"workflow_stage": "review"}), LIMITS, complete=True)]
+    assert "endurance_time_exceeded" in [i.code for i in validate_aircraft(generous.aircraft[0], generous, SHORT, require_route=False)[0]]
+    assert "duration_over_limit" not in [i.code for i in validate_aircraft(generous.aircraft[0], generous, SHORT, require_route=False)[0]]
+    assert "endurance_time_exceeded" in [item.code for item in validate_plan(long.model_copy(update={"workflow_stage": "review"}), SHORT, complete=True)]
 
 
 def test_a_short_coverage_plan_passes_and_a_stricter_max_duration_still_applies():
     short = _coverage(150, 30)
-    issues, route = validate_aircraft(short.aircraft[0], short, LIMITS, require_route=False)
+    issues, route = validate_aircraft(short.aircraft[0], short, SHORT, require_route=False)
     assert route is not None and route.duration_s < 1200 and route.length_m < 15000
     assert not [item for item in issues if item.code.startswith("endurance")]
     strict = _coverage(150, 30, max_duration_minutes=1)
-    assert "duration_over_limit" in codes(strict) and "endurance_time_exceeded" not in codes(strict)
+    assert "duration_over_limit" in codes(strict) and "endurance_time_exceeded" not in codes(strict)  # 150 m area: well inside any aircraft limit
 
 
 def test_the_endurance_limit_is_read_from_config_and_served_with_the_preview(monkeypatch):
     from app import config
     from app.mission_planning.validation import estimate_summary
 
-    assert config.MP_MAX_FLIGHT_MINUTES == 20 and config.MP_MAX_FLIGHT_DISTANCE_M == 15000  # documented defaults
-    assert PlanningLimits.from_config().max_flight_s == 1200.0
+    assert config.MP_MAX_FLIGHT_MINUTES == 300 and config.MP_MAX_FLIGHT_DISTANCE_M == 1_000_000  # documented defaults (2026-11-14)
+    assert PlanningLimits.from_config().max_flight_s == 18000.0
     monkeypatch.setattr(config, "MP_MAX_FLIGHT_MINUTES", 5)
     monkeypatch.setattr(config, "MP_MAX_FLIGHT_DISTANCE_M", 2000)
     limits = PlanningLimits.from_config()
@@ -416,7 +421,10 @@ def test_the_endurance_limit_is_read_from_config_and_served_with_the_preview(mon
     assert summary["limit_duration_s"] == 300.0 and summary["limit_length_m"] == 2000.0
 
 
-def test_preview_route_returns_the_limit_and_rejects_an_over_long_route(general_client):
+def test_preview_route_returns_the_limit_and_rejects_an_over_long_route(general_client, monkeypatch):
+    from app import config
+    monkeypatch.setattr(config, "MP_MAX_FLIGHT_MINUTES", 20)
+    monkeypatch.setattr(config, "MP_MAX_FLIGHT_DISTANCE_M", 15000)
     client, _ = general_client
     ok = client.post("/api/mission-plans/preview-route", json={"plan": _coverage(150, 30).model_dump(mode="json"), "uav_id": "px4-1"})
     assert ok.status_code == 200, ok.text
@@ -427,4 +435,24 @@ def test_preview_route_returns_the_limit_and_rejects_an_over_long_route(general_
     assert detail["code"] == "route_invalid" and "the aircraft limit is 20 min" in detail["message"]
     assert {item["code"] for item in detail["issues"]} >= {"endurance_time_exceeded"}
     limits = client.get("/api/mission-plans/limits").json()["limits"]
-    assert limits["max_flight_s"] == 1200.0 and limits["max_flight_distance_m"] == 15000.0
+    assert limits["max_flight_s"] == 1200.0 and limits["max_flight_distance_m"] == 15000.0  # the monkeypatched config is what is served
+
+
+def test_outside_area_message_names_the_point_in_plain_words_and_says_what_to_do():
+    """The walkthrough showed "A points point lies outside the operating area" (the parameter key leaked into the sentence)."""
+    for params, expected in (({"points": [offset(300_000, 0)]}, "A route waypoint lies outside the operating area."),):
+        plan = make_plan("waypoint_route", params)
+        issues, _ = validate_aircraft(plan.aircraft[0], plan, LIMITS, require_route=False)
+        messages = [item.message for item in issues if item.code == "point_outside_area"]
+        assert messages and messages[0].startswith(expected) and "Move it inside the area, or enlarge the area." in messages[0]
+        assert "points point" not in messages[0]
+    from app.mission_planning.validation import POINT_LABELS
+    assert set(POINT_LABELS) == {"datum", "hold_point", "drop_point", "points", "path"}
+
+
+def test_fleet_mismatch_message_says_which_button_to_press():
+    plan = make_plan("waypoint_route", {"points": [offset(100, 0)]}).model_copy(update={"activated_uav_ids": []})
+    messages = [item.message for item in validate_plan(plan, LIMITS, complete=True) if item.code == "fleet_mismatch"]
+    assert messages, "the plan has no activated aircraft, so the fleet check must fire"
+    assert messages[0] == ("Requested, activated, selected and assigned UAV counts must match. "
+                           "Tick the aircraft, then press ACTIVATE AND VERIFY PX4 / GAZEBO FLEET in Section A.")

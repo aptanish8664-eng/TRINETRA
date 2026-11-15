@@ -1,6 +1,6 @@
 # GPS inconsistency detector - model card
 
-Model id `049e3cff124a`, trained 2026-11-13T04:20:08.910813+00:00. **Synthetic data only; not validated on real attacks.**
+Model id `049e3cff124a`, trained 2026-11-14T17:36:04.705210+00:00. **Synthetic data only; not validated on real attacks.**
 Dataset profile `large` (train: 750 flights, 32.19 h attack-free, val: 250 flights, 10.34 h attack-free, test: 250 flights, 11.32 h attack-free). Selected detector: **hist_gradient_boosting** on feature set `v2_long_windows` - highest validation recall subject to <= 1 sustained false alarm(s) per hour; a more complex detector must beat a simpler one by >= 0.02 recall; not precision.
 
 | model (test split; 95% bootstrap interval over flights) | precision | recall | F1 | ROC-AUC | false alarms/h | flights detected | median / p90 latency s |

@@ -1,4 +1,4 @@
-import { ATTACK_FIELD_HELP, ATTACK_LAB_NAME, ATTACK_TYPE_SPECS, GROUND_TRUTH_NOTE, HANDOVER_BATTERY_NOTE, HIDDEN_SCHEDULE_NOTE, PRESET_SPECS, RESPONSE_NOTE, SOFTWARE_ONLY_NOTE } from './attackLabTypes'
+import { ATTACK_FIELD_HELP, ATTACK_LAB_NAME, ATTACK_TYPE_SPECS, GROUND_TRUTH_NOTE, HANDOVER_BATTERY_NOTE, HIDDEN_SCHEDULE_NOTE, PRESET_SPECS, RESPONSE_NOTE, SOFTWARE_ONLY_NOTE, THREAT_MONITOR_INPUTS, THREAT_MONITOR_START_STEPS, THREAT_MONITOR_STATES } from './attackLabTypes'
 import {
   AIRCRAFT_FIELD_SPECS, MISSION_FIELD_SPECS, MISSION_OBJECTIVES, TASK_SPECS, missingAircraftInputs, taskSpec,
   type AircraftPlan, type MissionPlan,
@@ -70,6 +70,11 @@ const TOPICS: Topic[] = [
   { id: 'attack presets', keywords: ['preset', 'presets', 'what does preset'], text: `${ATTACK_LAB_NAME} presets define the attack only: ${PRESET_SPECS.map(item => `${item.label} — ${item.does}${item.minAircraft > 1 ? ` (${item.needs})` : ''}`).join(' ')} ${RESPONSE_NOTE}` },
   { id: 'attack fields', keywords: ['seed', 'start time', 'attack start', 'attack duration', 'magnitude', 'direction'], text: `${ATTACK_LAB_NAME} fields: start — ${ATTACK_FIELD_HELP.start} Duration — ${ATTACK_FIELD_HELP.duration} Magnitude — ${ATTACK_FIELD_HELP.magnitude} Direction — ${ATTACK_FIELD_HELP.direction} Seed — ${ATTACK_FIELD_HELP.seed}` },
   { id: 'attack response', keywords: ['handover battery', 'minimum battery', 'response policy', 'scripted', 'who decides'], text: `${RESPONSE_NOTE} ${HANDOVER_BATTERY_NOTE}` },
+  { id: 'threat monitor', keywords: ['threat monitor', 'live threat', 'threat score', 'threat tier', 'live assessment', 'waiting for a flight', 'threat panel'],
+    text: `The Threat Monitor in Mission Control (simulated flights only). ${THREAT_MONITOR_STATES.map(item => `${item.state}: ${item.text}`).join(' ')} The score is not a probability and nothing is done automatically: handover, isolate and ignore are your decisions, and each is logged with the score and tier at that moment.` },
+  { id: 'threat monitor inputs', keywords: ['input missing', 'missing input', 'which input', 'what does missing', 'estimator velocity', 'gps velocity missing', 'highres_imu', 'local_position_ned', 'estimator_status', 'vibration input'],
+    text: `Threat Monitor inputs. ${THREAT_MONITOR_INPUTS.map(item => `${item.title}${item.required ? ' (required)' : ' (optional)'}: ${item.meaning}`).join(' ')}` },
+  { id: 'start a run', keywords: ['start a run', 'start a flight', 'start the flight', 'start a simulation', 'begin a flight', 'run a flight', 'how do i start', 'start in simulation'], text: THREAT_MONITOR_START_STEPS },
   { id: 'ground truth', keywords: ['ground truth', 'schedule', 'labels', 'is the attack hidden'], text: `${HIDDEN_SCHEDULE_NOTE} ${GROUND_TRUTH_NOTE}` },
   { id: 'task types', keywords: ['task types', 'task type options', 'which tasks'], text: `Task types: ${TASK_SPECS.map(task => task.label).join('; ')}. Each objective only suggests a default; you always pick the task type, and only that type's parameters appear.` },
   ...TASK_TOPICS,

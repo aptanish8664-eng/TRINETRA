@@ -64,7 +64,7 @@ export function ThreatReplayPanel({ canRecord }: Props) {
 
   const publish = useCallback((state: ThreatSession['state'], current: Record<string, SessionAircraft>) => {
     if (!replay) return
-    threatSessionStore.publish({ sourceName: replay.experiment_name, experimentId: replay.experiment_id, state, updatedAt: Date.now(), minBatteryPct: replay.min_battery_pct, aircraft: current })
+    threatSessionStore.publish({ sourceName: replay.experiment_name, experimentId: replay.experiment_id, state, updatedAt: Date.now(), minBatteryPct: replay.min_battery_pct, aircraft: current, replayId: replay.replay_id, clockS: clockRef.current })
   }, [replay])
 
   const reset = useCallback(() => {
@@ -138,6 +138,7 @@ export function ThreatReplayPanel({ canRecord }: Props) {
     const saved = await api.recordDecision({
       aircraft_id: aircraftId, action, handover_candidate: candidate, source: 'offline_replay', source_name: replay?.experiment_name ?? null,
       tier: assessment?.tier ?? null, threat_score: assessment?.threat_score ?? null,
+      ...(replay ? { replay_id: replay.replay_id, replay_t_s: Math.min(clockRef.current, replay.duration_s) } : {}),
     })
     setDecisions(current => [saved, ...current].slice(0, 50))
   }

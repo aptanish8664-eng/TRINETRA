@@ -22,7 +22,7 @@ ENUM_FIELDS: dict[str, set[str]] = {
 }
 INT_FIELDS: dict[str, tuple[int, int]] = {"priority": (1, 3)}
 NUMBER_FIELDS: dict[str, tuple[float, float]] = {
-    "altitude_m": (0.1, 500.0), "speed_mps": (0.1, 50.0), "loiter_duration_s": (0.0, 3600.0),
+    "altitude_m": (0.1, 500.0), "speed_mps": (0.1, 90.0), "loiter_duration_s": (0.0, 3600.0),
     "track_spacing_m": (2.0, 1000.0), "search_radius_m": (1.0, 20000.0), "line_spacing_m": (2.0, 1000.0),
     "sector_radius_m": (1.0, 20000.0), "hover_s": (0.0, 3600.0), "orbit_radius_m": (0.0, 500.0),
     "drop_altitude_m": (1.0, 500.0), "hover_duration_s": (0.0, 3600.0),

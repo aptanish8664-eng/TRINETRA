@@ -63,6 +63,28 @@ export interface SimulationLocation {
   message: string
   thresholds: { relocation_notice_m: number; far_from_area_m: number; home_tolerance_m: number }
 }
+export interface ExecutionControl { allowed: boolean; reason: string | null }
+/** One run of a deployed mission on the managed PX4 SITL instance, as recorded by the backend. */
+export interface ExecutionView {
+  id: string; deployment_id: string; scenario_id: string; scenario_version_id: string; aircraft_id: string
+  state: string
+  stage: 'starting' | 'uploaded' | 'executing' | 'completed' | 'aborted' | 'failed' | 'link_lost'
+  reason: string; active: boolean; started_by_name: string; started_by_role: string
+  created_at: string; updated_at: string; finished_at: string | null
+  uploaded: boolean; armed: boolean; px4_mode: string | null
+  route_total: number | null; route_reached: number | null; route_current: number | null; percent: number | null
+  elapsed_s: number | null; estimated_s: number | null; px4_heartbeat_age_s: number | null; px4_messages: string[]
+  controls: { pause: ExecutionControl; resume: ExecutionControl; abort: ExecutionControl }
+  simulation_only: true
+}
+export interface PreflightCheck { key: string; label: string; ok: boolean; detail: string; offer_relocation?: boolean; code?: string }
+export interface ExecutionPreflight {
+  deployment_id: string; aircraft_id?: string; can_start: boolean
+  role_rule: { allowed: boolean; code: string; message: string }
+  checks: PreflightCheck[]; blocking: string[]; confirmation: string
+  estimated_duration_s?: number | null; route_waypoints?: number
+}
+export interface ExecutionEvent { id: number; execution_id: string; source: 'user' | 'backend' | 'executor'; type: string; message: string; data: Record<string, unknown>; actor_name: string | null; occurred_at: string }
 export interface RelocationResult {
   relocated: boolean
   verified: boolean
@@ -269,6 +291,15 @@ export const api = {
   /** Restarts the managed PX4/Gazebo simulation at the version's mission start. Sends no flight command. */
   relocateSimulation: (scenarioId: string, versionId: string) =>
     request<RelocationResult>('/api/fleet/relocate', { method: 'POST', body: JSON.stringify({ scenario_id: scenarioId, scenario_version_id: versionId, confirm: true }) }),
+  // --- Start in simulation (PX4 SITL only): fixed endpoints, no command or MAVLink content from the browser ---
+  executionPreflight: (deploymentId: string) => request<ExecutionPreflight>(`/api/mission-control/executions/preflight?deployment_id=${encodeURIComponent(deploymentId)}`),
+  latestExecution: async () => (await request<{ execution: ExecutionView | null }>('/api/mission-control/executions/latest')).execution,
+  startExecution: (deploymentId: string) => request<ExecutionView>('/api/mission-control/executions', { method: 'POST', body: JSON.stringify({ deployment_id: deploymentId, confirm: true }) }),
+  pauseExecution: (id: string) => request<ExecutionView>(`/api/mission-control/executions/${encodeURIComponent(id)}/pause`, { method: 'POST' }),
+  resumeExecution: (id: string) => request<ExecutionView>(`/api/mission-control/executions/${encodeURIComponent(id)}/resume`, { method: 'POST' }),
+  disarmAircraft: (aircraftId: string) => request<{ aircraft_id: string; disarmed: boolean; armed: boolean; forced: false; px4_messages: string[] }>(`/api/mission-control/aircraft/${encodeURIComponent(aircraftId)}/disarm`, { method: 'POST' }),
+  abortExecution: (id: string) => request<ExecutionView>(`/api/mission-control/executions/${encodeURIComponent(id)}/abort`, { method: 'POST' }),
+  executionEvents: (id: string, after = 0) => request<{ execution_id: string; state: string; events: ExecutionEvent[] }>(`/api/mission-control/executions/${encodeURIComponent(id)}/events?after=${after}`),
   attackLabMissions: async () => (await request<{ missions: import('../components/attackLabTypes').PickerMission[]; legacy_only_count: number }>('/api/attack-lab/missions')),
   scenarioDetail: (scenarioId: string) => request<ScenarioDetail>(`/api/scenarios/${encodeURIComponent(scenarioId)}`),
   attackLabLimits: () => request<import('../components/attackLabTypes').AttackLimits>('/api/attack-lab/limits'),
@@ -279,8 +310,11 @@ export const api = {
       `/api/attack-lab/presets/${encodeURIComponent(presetId)}/apply`, { method: 'POST', body: JSON.stringify({ scenario_id: scenarioId, scenario_version_id: versionId, seed }) }),
   createExperiment: (input: unknown) => request<import('../components/attackLabTypes').Experiment>('/api/attack-lab/experiments', { method: 'POST', body: JSON.stringify(input) }),
   updateExperiment: (id: string, input: unknown) => request<import('../components/attackLabTypes').Experiment>(`/api/attack-lab/experiments/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(input) }),
+  copyExperiment: (id: string, input?: unknown) => request<import('../components/attackLabTypes').Experiment>(`/api/attack-lab/experiments/${encodeURIComponent(id)}/copy`, { method: 'POST', ...(input ? { body: JSON.stringify(input) } : {}) }),
+  repinExperiment: (id: string) => request<import('../components/attackLabTypes').Experiment>(`/api/attack-lab/experiments/${encodeURIComponent(id)}/repin`, { method: 'POST' }),
   deleteExperiment: (id: string) => request<void>(`/api/attack-lab/experiments/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   researchModelInfo: () => request<import('../components/attackLabTypes').ModelInfo>('/api/research/model-info'),
+  researchLive: () => request<import('../components/attackLabTypes').LiveThreat>('/api/research/live'),
   assessThreat: (payload: unknown) => request<import('../components/attackLabTypes').Assessment>('/api/research/assess', { method: 'POST', body: JSON.stringify(payload) }),
   recordDecision: (payload: unknown) => request<import('../components/attackLabTypes').DecisionRecord>('/api/research/decisions', { method: 'POST', body: JSON.stringify(payload) }),
   researchDecisions: async () => (await request<{ decisions: import('../components/attackLabTypes').DecisionRecord[] }>('/api/research/decisions')).decisions,

@@ -94,3 +94,34 @@ Tier thresholds (same method, re-derived on validation): Medium 12.24 (99th perc
 * The cross-aircraft residual also moves on the unattacked aircraft when its neighbour is attacked.
 * The 1/hour budget was met on a threshold tuned on validation; the test estimate is 0.26/h [0.00, 0.70] over 11.3 h, so rates near 1/hour are not excluded by a flight-level bootstrap alone.
 * Presets that need two or more aircraft depend on two-UAV activation, which has not been verified live.
+
+## Live pipeline on PX4 SITL (added 2026-11-15; implemented, tested; live baseline measured, live attack detection NOT measured)
+
+**What runs.** `GET /api/research/live` scores every PX4 aircraft once a second on the server. There is no request body, so the 64 KiB body limit cannot be hit by the live path (`POST /api/research/assess` with a long client-supplied window answers 413 `request_body_too_large` with a hint to use the live route). The features are computed by the same `threat_data.compute_features` and the same `assess_arrays` as the offline pipeline; `research/live_inputs.py` only aligns the raw streams onto the 2 Hz grid the model was trained on.
+
+**Inputs and measured rates.** The telemetry bridge (`tools/px4_wsl_udp_bridge.py`) asks PX4 for the detector's messages over the existing GCS link with fixed `MAV_CMD_SET_MESSAGE_INTERVAL` requests (HIGHRES_IMU 25 Hz, GPS_RAW_INT 10 Hz, LOCAL_POSITION_NED 25 Hz, ESTIMATOR_STATUS 2 Hz, VIBRATION 1 Hz; repeated every 20 s). It sends from the socket PX4 already talks to, never to the executor's onboard port or the GCS port, and changes no PX4 parameter. Measured at the backend over a 10-minute flight (mean / minimum of the 5-second rate windows): HIGHRES_IMU 25.7 / 21.9 Hz, LOCAL_POSITION_NED 25.7 / 21.9, GPS_RAW_INT 10.3 / 9.0, ESTIMATOR_STATUS 2.05 / 1.76, VIBRATION 1.03 / 0.9, GLOBAL_POSITION_INT and ATTITUDE 51.3 / 43.5, HEARTBEAT 1.03 / 0.9. Before the request: GPS_RAW_INT 4.87 Hz, ESTIMATOR_STATUS 0.48 Hz, VIBRATION 0.08 Hz, no HIGHRES_IMU.
+
+**Alignment (what the offline recorded-flight trial showed is required).** PX4-clock timestamps (never receive times), velocity averaged over each 0.5 s sample interval, and a GPS delay correction. The delay is now **0.04 s**, not 0.11 s. On the first live baseline flights (GPS at 10 Hz with real GPS speed and course) the lag fit against the estimator velocity was 0.03-0.06 s for both position and velocity. With 0.11 s the baseline reached Medium during the take-off acceleration (one flight: 92 live assessments, 33 Low and 59 Medium, max score 17.8; a second flight: 70 Low and 29 Medium, max 18.9), while 0.00-0.08 s gave 0 of 228 samples above the Low/Medium threshold (12.24) on the same recording. 0.04 s was chosen from the lag fit and the baseline only, not from attacks. A missing, late or non-monotonic input is named (`gps_position`, `gps_velocity` and `estimator_velocity` are required; `imu`, `estimator_status`, `vibration` and `battery` are optional and reported); nothing is zero-filled.
+
+**Reference velocity caveat.** The inertial reference is PX4's estimator velocity (LOCAL_POSITION_NED). It is GPS-aided, not an independent inertial solution, so a slow GPS deviation is absorbed more than in the offline simulation. The response says so in `data_quality.velocity_reference_note`.
+
+**Live baseline (no attack, PX4 SITL, 8 m/s square routes).**
+
+| Flight | Live assessments | Tiers | Max score | Alert onsets |
+|---|---|---|---|---|
+| 10 min (4.8 km route, 623 PX4 s) | 591 | 591 Low | 9.4 (mean 1.74) | 0 |
+| 3 min | 156 | 156 Low | 6.8 | 0 |
+| 3 min | 170 | 170 Low | 8.8 | 0 |
+| 3.8 min | 216 | 216 Low | 8.9 | 0 |
+
+That is 1,133 assessments over about 1,208 PX4 seconds (about 20 minutes) of flight on one aircraft, all Low, zero alerts. **Honest uncertainty:** zero events in 0.34 h of flight bounds the false-alarm rate only loosely (rule of three: about 3 / 0.34 h, roughly 9 per hour at 95%); the assessments are strongly correlated (one aircraft, one route shape, one speed); and the largest score (9.4) is 77% of the Medium threshold, so the margin is not large. The 0.1-0.3 per hour figures in the offline tables above are synthetic-data estimates and are not live evidence. The spoofing confidence of a quiet flight sits around 40% during take-off acceleration without reaching a tier.
+
+**Cost.** Backend CPU (whole uvicorn process, one core = 100%): 17.3% with telemetry only, 46.1% over the 10-minute flight with one live poll per second (measured before the per-window scoring was reduced). Profile of one live computation on a 600-sample window: alignment 13 ms, features 26 ms, model confidence 574 ms over all rows versus 18 ms over the 60-row hold window that is actually used (identical result, tested). CPU after that reduction was not re-measured. Median request latency 60-120 ms; the worst single request took several seconds while the browser, Gazebo and PX4 competed for the same machine.
+
+**States and decision rules.** idle, warming_up (first 10 s), live, inputs_missing, landed (disarmed after an assessed flight; last assessment with its age, kept 10 minutes), link_lost (the link dropped in flight), offline. A handover below the minimum battery (default 40%, setting `TRINETRA_MIN_HANDOVER_BATTERY_PCT`; the experiment's value for replays) is refused by `POST /api/research/decisions` with 409. A live decision is logged with the server's own score and tier at that moment. Handover candidates never carry invented numbers: an unknown battery or role makes the aircraft ineligible, and distance to the task and workload (no live source) are null and earn no ranking credit.
+
+**Assistant topics.** The assistant answers what the Threat Monitor shows, what each missing-input message means and how to start a run from one shared spec (`THREAT_MONITOR_*` in `frontend/src/components/attackLabTypes.ts`; a backend test checks the served text matches it).
+
+**Model artifact.** `backend/research_artifacts/model.joblib` is not in the repository (git-ignored). It was absent from this checkout, so the live route would answer "model unavailable" until `python -m app.research.threat_models` is run (about 3.5 minutes). It was run on 2026-11-14: selected model hist_gradient_boosting, tiers Medium 12.24 / High 34.2 / Critical 59.29, test precision 0.995, recall 0.657, F1 0.791, ROC AUC 0.942, 0.26 false alarms/hour on synthetic data. `metrics.json` and `model_card.md` in that folder were regenerated by that run (the previous copies are modified in git status).
+
+**Not verified live:** attack detection on the live aircraft (no attack can be applied to a live flight yet; the Attack Lab runner does not exist), two aircraft at once, link loss with a real executor mid-mission, flights longer than 10 minutes or faster than 8 m/s, and any browser interaction beyond static screenshots.

@@ -28,7 +28,7 @@ function EyeStages({ active = 0, failed = false }: { active?: number; failed?: b
     {stages.map((label, index) => <li className={`eye-stage ${failed && index === active ? 'failure' : index === active ? 'active' : 'inactive'}`} key={label}>
       <span className="eye-stage-mark"><i>{['I', 'II', 'III'][index]}</i></span>
       <span><b>EYE {['I', 'II', 'III'][index]}</b><small>{label}</small></span>
-      <span className="eye-stage-status">{failed && index === active ? 'INPUT ERROR' : index === active ? 'IN PROGRESS' : 'AWAITING API'}</span>
+      <span className="eye-stage-status">{failed && index === active ? 'CHECK DETAILS' : index === active ? 'IN PROGRESS' : 'AWAITING API'}</span>
     </li>)}
   </ol>
 }
@@ -60,6 +60,9 @@ function LoginForm({ onPageChange, onAuthenticated }: Pick<AccessPortalProps, 'o
   const [submitted, setSubmitted] = useState(false)
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('')
+  // The server refused these exact credentials: the stage list says so until the user changes them (it used to keep saying "in progress").
+  const [refusedFor, setRefusedFor] = useState<string | null>(null)
+  const refused = refusedFor !== null && refusedFor === JSON.stringify(identity)
   const invalid = submitted && (!identity.username.trim() || !identity.password)
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
@@ -77,6 +80,7 @@ function LoginForm({ onPageChange, onAuthenticated }: Pick<AccessPortalProps, 'o
       onAuthenticated(session)
     } catch (cause) {
       setMessage(cause instanceof Error ? cause.message : 'Sign-in failed. Try again.')
+      setRefusedFor(JSON.stringify(identity))
     } finally {
       setBusy(false)
     }
@@ -84,7 +88,7 @@ function LoginForm({ onPageChange, onAuthenticated }: Pick<AccessPortalProps, 'o
 
   return <div className="access-form-wrap">
     <div className="access-form-heading"><span className="eyebrow">USER ACCESS / 01</span><h1>Identify<br/><em>yourself.</em></h1><p>One secure sign-in for all permitted TRINETRA modules.</p></div>
-    <EyeStages active={identity.username || identity.password ? 1 : 0} failed={Boolean(invalid)}/>
+    <EyeStages active={identity.username || identity.password ? 1 : 0} failed={Boolean(invalid) || refused}/>
     <form className="access-form" onSubmit={submit} noValidate>
       <label className="access-field"><span>USERNAME</span><span className={`access-input ${invalid && !identity.username.trim() ? 'invalid' : ''}`}><UserRound size={15}/><input autoComplete="username" value={identity.username} onChange={event => setIdentity({ ...identity, username: event.target.value })} aria-label="Username" placeholder="Enter your username"/></span></label>
       <label className="access-field"><span>PASSWORD</span><span className={`access-input ${invalid && !identity.password ? 'invalid' : ''}`}><LockKeyhole size={15}/><input type={passwordVisible ? 'text' : 'password'} autoComplete="current-password" value={identity.password} onChange={event => setIdentity({ ...identity, password: event.target.value })} aria-label="Password" placeholder="Enter password"/><button className="visibility-toggle" type="button" onClick={() => setPasswordVisible(value => !value)} aria-label={passwordVisible ? 'Hide password' : 'Show password'}>{passwordVisible ? <EyeOff size={15}/> : <Eye size={15}/>}</button></span></label>
@@ -303,16 +307,17 @@ function GeneralConsole({ session, onPageChange }: { session: UserSession; onPag
     }
   }
 
-  const reviewScenario = async (item: ScenarioApprovalRequest, decision: 'approve' | 'reject' | 'request_changes') => {
-    const reason = window.prompt(
-      decision === 'approve' ? 'Review note for approving this version:' : 'Reason for this decision:',
-      decision === 'approve' ? 'Approved after review.' : '',
-    )
-    if (reason === null || !reason.trim()) return
+  // The review note is asked in the page (no native dialog): the decision buttons open a small form on the card.
+  const [reviewDraft, setReviewDraft] = useState<{ id: string; decision: 'approve' | 'reject' | 'request_changes'; note: string } | null>(null)
+  const startReview = (item: ScenarioApprovalRequest, decision: 'approve' | 'reject' | 'request_changes') =>
+    setReviewDraft({ id: item.id, decision, note: decision === 'approve' ? 'Approved after review.' : '' })
+  const reviewScenario = async () => {
+    if (!reviewDraft || !reviewDraft.note.trim()) return
     setBusy(true)
     setError('')
     try {
-      await api.reviewScenario(item.id, decision, reason.trim())
+      await api.reviewScenario(reviewDraft.id, reviewDraft.decision, reviewDraft.note.trim())
+      setReviewDraft(null)
       await refresh()
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Scenario review failed.')
@@ -374,9 +379,26 @@ function GeneralConsole({ session, onPageChange }: { session: UserSession; onPag
       {!approvalRequests.length ? <div className="admin-empty"><ShieldCheck size={22}/><b>No scenario versions await review</b><span>Operator submissions will appear here with their exact configuration hash.</span></div> : approvalRequests.map(item => <article className="admin-request-card" key={item.id}>
         <div className="admin-request-heading"><div><b>{item.scenario_title} · v{item.version_number}</b><span>{item.owner_name} · {item.config_hash.slice(0, 16)}</span></div><time>{new Date(item.submitted_at).toLocaleString()}</time></div>
         <p>Version status: {item.latest_version ? 'CURRENT' : 'SUPERSEDED'}{item.sandbox_run_id ? ` · SANDBOX RUN ${item.sandbox_run_id}` : ' · NO SAVED SANDBOX RUN'}</p>
-        <pre className="scenario-review-config">{JSON.stringify(item.config, null, 2)}</pre>
+        {(() => {
+          const plan = (item.intent as unknown as { mission_plan?: { objectives?: string[]; aircraft?: { uav_id: string; role: string | null; task_type: string | null; speed_mps: number | null; altitude_m: number | null; route?: { waypoints: unknown[]; length_m: number; duration_s: number } | null }[] } }).mission_plan
+          if (!plan?.aircraft) return null
+          return <div className="scenario-review-summary" aria-label="Mission summary">
+            <b>Mission plan</b>
+            <span>{(plan.objectives ?? []).join(', ').replace(/_/g, ' ') || 'no objectives'}</span>
+            <ul>{plan.aircraft.map(aircraft => <li key={aircraft.uav_id}>{aircraft.uav_id} · {aircraft.role ?? 'no role'} · {aircraft.task_type?.replace(/_/g, ' ') ?? 'no task'} · {aircraft.altitude_m ?? '?'} m at {aircraft.speed_mps ?? '?'} m/s
+              {aircraft.route ? ` · ${aircraft.route.waypoints.length} waypoints · ${(aircraft.route.length_m / 1000).toFixed(2)} km · about ${(aircraft.route.duration_s / 60).toFixed(1)} min` : ' · no generated route'}</li>)}</ul>
+          </div>
+        })()}
+        <details className="scenario-review-intent"><summary>SIMULATOR CONFIGURATION (legacy fields)</summary><pre className="scenario-review-config">{JSON.stringify(item.config, null, 2)}</pre></details>
         <details className="scenario-review-intent"><summary>ADVISORY MISSION INTENT</summary><pre className="scenario-review-config">{JSON.stringify(item.intent, null, 2)}</pre><small>These notes are not simulator inputs. The approved version hash covers both configuration and intent.</small></details>
-        <div className="admin-action-buttons"><button className="button-secondary" disabled={busy || !item.latest_version} onClick={() => void reviewScenario(item, 'approve')}>APPROVE VERSION</button><button className="button-secondary" disabled={busy || !item.latest_version} onClick={() => void reviewScenario(item, 'request_changes')}>REQUEST CHANGES</button><button className="button-secondary" disabled={busy || !item.latest_version} onClick={() => void reviewScenario(item, 'reject')}>REJECT</button></div>
+        {reviewDraft?.id === item.id ? <div className="scenario-review-form" role="group" aria-label="Review note">
+          <label>{reviewDraft.decision === 'approve' ? 'REVIEW NOTE FOR APPROVING THIS VERSION' : 'REASON FOR THIS DECISION'}
+            <textarea value={reviewDraft.note} maxLength={500} rows={2} onChange={event => setReviewDraft({ ...reviewDraft, note: event.target.value })}/></label>
+          <div className="admin-action-buttons">
+            <button className="button-primary" disabled={busy || !reviewDraft.note.trim()} onClick={() => void reviewScenario()}>{reviewDraft.decision === 'approve' ? 'CONFIRM APPROVAL' : reviewDraft.decision === 'reject' ? 'CONFIRM REJECTION' : 'SEND CHANGE REQUEST'}</button>
+            <button className="button-quiet" disabled={busy} onClick={() => setReviewDraft(null)}>CANCEL</button></div>
+          {!reviewDraft.note.trim() && <small>A note is required.</small>}
+        </div> : <div className="admin-action-buttons"><button className="button-secondary" disabled={busy || !item.latest_version} onClick={() => startReview(item, 'approve')}>APPROVE VERSION</button><button className="button-secondary" disabled={busy || !item.latest_version} onClick={() => startReview(item, 'request_changes')}>REQUEST CHANGES</button><button className="button-secondary" disabled={busy || !item.latest_version} onClick={() => startReview(item, 'reject')}>REJECT</button></div>}
       </article>)}
     </section>
 

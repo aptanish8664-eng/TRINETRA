@@ -61,9 +61,43 @@ def from_enu(origin: tuple[float, float], east: float, north: float, up: float =
     return math.degrees(latitude), math.degrees(longitude)
 
 
+def geodesic_m(a: tuple[float, float], b: tuple[float, float]) -> float:
+    """Shortest distance on the WGS84 ellipsoid (Vincenty's inverse formula, millimetre-accurate; haversine if it does not converge)."""
+    lat1, lon1, lat2, lon2 = math.radians(a[0]), math.radians(a[1]), math.radians(b[0]), math.radians(b[1])
+    if lat1 == lat2 and lon1 == lon2:
+        return 0.0
+    flat = 1 / 298.257223563
+    semi_minor = _A * (1 - flat)
+    u1, u2 = math.atan((1 - flat) * math.tan(lat1)), math.atan((1 - flat) * math.tan(lat2))
+    diff = lon2 - lon1
+    lam = diff
+    for _ in range(200):
+        sin_s = math.hypot(math.cos(u2) * math.sin(lam), math.cos(u1) * math.sin(u2) - math.sin(u1) * math.cos(u2) * math.cos(lam))
+        if sin_s == 0:
+            return 0.0
+        cos_s = math.sin(u1) * math.sin(u2) + math.cos(u1) * math.cos(u2) * math.cos(lam)
+        sigma = math.atan2(sin_s, cos_s)
+        sin_alpha = math.cos(u1) * math.cos(u2) * math.sin(lam) / sin_s
+        cos2_alpha = 1 - sin_alpha ** 2
+        cos_2sm = cos_s - 2 * math.sin(u1) * math.sin(u2) / cos2_alpha if cos2_alpha else 0.0
+        c = flat / 16 * cos2_alpha * (4 + flat * (4 - 3 * cos2_alpha))
+        previous = lam
+        lam = diff + (1 - c) * flat * sin_alpha * (sigma + c * sin_s * (cos_2sm + c * cos_s * (-1 + 2 * cos_2sm ** 2)))
+        if abs(lam - previous) < 1e-12:
+            break
+    else:
+        h = math.sin((lat2 - lat1) / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(diff / 2) ** 2
+        return 2 * 6371008.8 * math.asin(min(1.0, math.sqrt(h)))
+    u_sq = cos2_alpha * (_A ** 2 - semi_minor ** 2) / semi_minor ** 2
+    big_a = 1 + u_sq / 16384 * (4096 + u_sq * (-768 + u_sq * (320 - 175 * u_sq)))
+    big_b = u_sq / 1024 * (256 + u_sq * (-128 + u_sq * (74 - 47 * u_sq)))
+    delta = big_b * sin_s * (cos_2sm + big_b / 4 * (cos_s * (-1 + 2 * cos_2sm ** 2) - big_b / 6 * cos_2sm * (-3 + 4 * sin_s ** 2) * (-3 + 4 * cos_2sm ** 2)))
+    return semi_minor * big_a * (sigma - delta)
+
+
 def distance_m(a: tuple[float, float], b: tuple[float, float]) -> float:
-    east, north, _ = to_enu(a, b[0], b[1])
-    return math.hypot(east, north)
+    """Horizontal distance between two WGS84 points: geodesic, so it is right at 1 m and at 1,000 km alike."""
+    return geodesic_m(a, b)
 
 
 def point_in_polygon(point: tuple[float, float], polygon: list[tuple[float, float]]) -> bool:

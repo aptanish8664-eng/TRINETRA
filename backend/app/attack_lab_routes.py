@@ -18,9 +18,11 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from .auth_routes import require_csrf, require_permission
 from .authorization import Permission, has_permission
 from .persistence.database import (
-    add_audit_event, delete_attack_experiment, deployment_times_for_versions, get_attack_experiment, get_scenario,
-    latest_mission_deployment, list_attack_experiments, list_scenarios, save_attack_experiment,
+    RESULTS_STORAGE_MISSING, add_audit_event, delete_attack_experiment, deployment_times_for_versions, experiment_result_counts,
+    experiment_results_available, get_attack_experiment, get_scenario,
+    latest_mission_deployment, list_attack_experiments, list_experiment_results, list_scenarios, save_attack_experiment,
 )
+import re
 from .research.attacks import ATTACK_SPECS, ATTACK_LAB_NAME, AttackConfig, attack_limits
 from .schemas import ScenarioIntent
 from .security import AuthContext
@@ -250,11 +252,15 @@ def validate_experiment(request: ExperimentRequest, plan) -> list[dict[str, Any]
     return issues
 
 
-def _view(record: dict[str, Any], latest_version_by_scenario: dict[str, str]) -> dict[str, Any]:
+def _view(record: dict[str, Any], latest_version_by_scenario: dict[str, str], result_count: Optional[int] = None) -> dict[str, Any]:
     latest = latest_version_by_scenario.get(record["scenario_id"])
+    count = experiment_result_counts([record["id"]]).get(record["id"], 0) if result_count is None else result_count
     return {**record, "preset_id": canonical_preset_id(record.get("preset_id")),
             "config": {**record["config"], "response_policy": RESPONSE_POLICY},
             "superseded": latest is not None and latest != record["scenario_version_id"], "executed": False,
+            "latest_version_id": latest, "result_count": count, "has_results": count > 0,
+            # never run: edit in place or delete outright. Has results: edits are saved as a copy; delete keeps the results.
+            "edit_mode": "copy" if count else "in_place", "delete_keeps_results": count > 0,
             "note": "Defines a simulated, software-only attack. It is not executed until the experiment runner exists."}
 
 
@@ -352,7 +358,21 @@ def list_missions(context: AuthContext = Depends(require_permission(Permission.M
 def list_experiments(context: AuthContext = Depends(require_permission(Permission.MISSION_READ_OWN))) -> dict:
     records = list_attack_experiments(context.user.id, include_all=has_permission(context.user.role, Permission.MISSION_READ_ALL))
     latest = _latest_versions(context, {item["scenario_id"] for item in records})
-    return {"experiments": [_view(item, latest) for item in records]}
+    counts = experiment_result_counts([item["id"] for item in records])
+    return {"experiments": [_view(item, latest, counts.get(item["id"], 0)) for item in records], **_results_storage()}
+
+
+@router.get("/api/attack-lab/results")
+def list_results(context: AuthContext = Depends(require_permission(Permission.MISSION_READ_OWN))) -> dict:
+    """Stored results, including those whose experiment was deleted (marked `from a deleted experiment`)."""
+    return {"results": list_experiment_results(context.user.id, include_all=has_permission(context.user.role, Permission.MISSION_READ_ALL)),
+            "runner_available": False, **_results_storage()}
+
+
+def _results_storage() -> dict[str, Any]:
+    """Says plainly when the results table is missing (experiments then behave as never run) instead of failing later."""
+    available = experiment_results_available()
+    return {"results_storage": "available" if available else "missing", **({} if available else {"results_storage_message": RESULTS_STORAGE_MISSING})}
 
 
 @router.get("/api/attack-lab/experiments/{experiment_id}")
@@ -413,8 +433,9 @@ def update_experiment(experiment_id: str, request: Request, body: dict = Body(..
     existing = get_attack_experiment(experiment_id)
     if existing is None:
         raise HTTPException(status_code=404, detail="Experiment not found.")
-    if existing["status"] != "draft":
-        raise HTTPException(status_code=409, detail={"code": "not_draft", "message": "Only draft experiments can be edited."})
+    if experiment_result_counts([experiment_id]).get(experiment_id):
+        raise HTTPException(status_code=409, detail={"code": "has_results", "message": "This experiment has results, so it cannot be edited in place. Save your changes as a copy instead.",
+                                                     "copy_url": f"/api/attack-lab/experiments/{experiment_id}/copy"})
     parsed = _parse(body)
     _checked(context, parsed)
     saved = save_attack_experiment(existing["owner_user_id"], parsed.name, parsed.scenario_id, parsed.scenario_version_id, parsed.preset_id,
@@ -423,13 +444,81 @@ def update_experiment(experiment_id: str, request: Request, body: dict = Body(..
 
 
 @router.delete("/api/attack-lab/experiments/{experiment_id}", status_code=204, response_class=Response)
-def remove_experiment(experiment_id: str, context: AuthContext = Depends(require_permission(Permission.SCENARIO_CREATE)),
+def remove_experiment(experiment_id: str, request: Request, context: AuthContext = Depends(require_permission(Permission.SCENARIO_CREATE)),
                       _csrf: AuthContext = Depends(require_csrf)) -> Response:
     _require_general(context)
     existing = get_attack_experiment(experiment_id)
     if existing is None:
         raise HTTPException(status_code=404, detail="Experiment not found.")
-    if existing["status"] != "draft":
-        raise HTTPException(status_code=409, detail={"code": "not_draft", "message": "Only draft experiments can be deleted."})
-    delete_attack_experiment(experiment_id)
+    delete_attack_experiment(experiment_id)      # results, if any, are kept and marked as from a deleted experiment
+    add_audit_event(action="attack_experiment_deleted", outcome="success", reason="Experiment definition deleted; any stored results were kept.",
+                    request_id=getattr(request.state, "request_id", "request-unavailable"), actor_id=context.user.id, actor_name=context.user.full_name,
+                    target_type="attack_experiment", target_id=experiment_id, metadata={"kept_results": experiment_result_counts([experiment_id]).get(experiment_id, 0)})
     return Response(status_code=204)
+
+
+EXPERIMENT_FIELDS = ("name", "scenario_id", "scenario_version_id", "preset_id", "seed", "config", "status")
+
+
+def next_copy_name(name: str, taken: set[str]) -> str:
+    """\"name\" -> \"name v2\"; \"name v2\" -> \"name v3\"; skips names already used (the limit is 120 characters)."""
+    match = re.match(r"^(.*?) v(\d{1,4})$", name)
+    stem, number = (match.group(1), int(match.group(2)) + 1) if match else (name, 2)
+    while True:
+        suffix = f" v{number}"
+        candidate = f"{stem[:120 - len(suffix)]}{suffix}"
+        if candidate not in taken:
+            return candidate
+        number += 1
+
+
+def _visible_experiment(experiment_id: str, context: AuthContext) -> dict[str, Any]:
+    record = get_attack_experiment(experiment_id)
+    visible = {item["id"] for item in list_attack_experiments(context.user.id, include_all=has_permission(context.user.role, Permission.MISSION_READ_ALL))}
+    if record is None or experiment_id not in visible:
+        raise HTTPException(status_code=404, detail="Experiment not found.")
+    return record
+
+
+def _save_copy(context: AuthContext, request: Request, source: dict[str, Any], body: Optional[ExperimentRequest], action: str) -> dict[str, Any]:
+    names = {item["name"] for item in list_attack_experiments(context.user.id, include_all=True)}
+    parsed = body or ExperimentRequest.model_validate({k: source[k] for k in ("name", "scenario_id", "scenario_version_id", "preset_id", "seed", "config", "status")})
+    parsed = parsed.model_copy(update={"name": next_copy_name(source["name"], names), "status": "draft"})
+    _checked(context, parsed)
+    saved = save_attack_experiment(context.user.id, parsed.name, parsed.scenario_id, parsed.scenario_version_id, parsed.preset_id,
+                                   parsed.seed, parsed.status, parsed.config.model_dump(mode="json"))
+    add_audit_event(action=action, outcome="success", reason="Experiment copy saved; the original and its results are unchanged.",
+                    request_id=getattr(request.state, "request_id", "request-unavailable"), actor_id=context.user.id, actor_name=context.user.full_name,
+                    target_type="attack_experiment", target_id=saved["id"], metadata={"copied_from": source["id"]})
+    return _view(saved, _latest_versions(context, {saved["scenario_id"]}), 0)
+
+
+@router.post("/api/attack-lab/experiments/{experiment_id}/copy", status_code=201)
+def copy_experiment(experiment_id: str, request: Request, body: Optional[dict] = Body(default=None), context: AuthContext = Depends(require_permission(Permission.SCENARIO_CREATE)),
+                    _csrf: AuthContext = Depends(require_csrf)) -> dict:
+    """Saves the experiment (optionally with edits in the body) as a new draft named `name v2`. The original and its results stay as they were."""
+    _require_general(context)
+    source = _visible_experiment(experiment_id, context)
+    return _save_copy(context, request, source, _parse({**{k: source[k] for k in EXPERIMENT_FIELDS}, **(body or {})}) if body else None, "attack_experiment_copied")
+
+
+@router.post("/api/attack-lab/experiments/{experiment_id}/repin")
+def repin_experiment(experiment_id: str, request: Request, context: AuthContext = Depends(require_permission(Permission.SCENARIO_CREATE)),
+                     _csrf: AuthContext = Depends(require_csrf)) -> dict:
+    """Moves the experiment to the latest version of its mission without rebuilding the attacks. The attacks are re-checked against the new
+    version first. A never-run experiment is updated in place; one with results is saved as a copy so the results keep their original version."""
+    _require_general(context)
+    source = _visible_experiment(experiment_id, context)
+    latest = _latest_versions(context, {source["scenario_id"]}).get(source["scenario_id"])
+    if latest is None or latest == source["scenario_version_id"]:
+        raise HTTPException(status_code=409, detail={"code": "already_latest", "message": "This experiment is already pinned to the latest version."})
+    request_body = ExperimentRequest.model_validate({**{k: source[k] for k in ("name", "scenario_id", "preset_id", "seed", "config", "status")}, "scenario_version_id": latest})
+    if experiment_result_counts([experiment_id]).get(experiment_id):
+        return _save_copy(context, request, source, request_body, "attack_experiment_repinned_copy")
+    _checked(context, request_body)
+    saved = save_attack_experiment(source["owner_user_id"], request_body.name, request_body.scenario_id, latest, request_body.preset_id, request_body.seed,
+                                   request_body.status, request_body.config.model_dump(mode="json"), experiment_id=experiment_id)
+    add_audit_event(action="attack_experiment_repinned", outcome="success", reason="Experiment re-pinned to the latest mission version; attacks unchanged.",
+                    request_id=getattr(request.state, "request_id", "request-unavailable"), actor_id=context.user.id, actor_name=context.user.full_name,
+                    target_type="attack_experiment", target_id=experiment_id, metadata={"from_version": source["scenario_version_id"], "to_version": latest})
+    return _view(saved, _latest_versions(context, {saved["scenario_id"]}), 0)

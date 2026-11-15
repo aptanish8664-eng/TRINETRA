@@ -60,3 +60,14 @@ describe('mission control model', () => {
     expect(diffObservations(next, { ...next, vehicles: { 'px4-1': 'stale' } }, 't3').map(entry => entry.message)).toEqual(['px4-1 link connected → stale.'])
   })
 })
+
+describe('bridge alerts', () => {
+  it('shows the fleet manager’s exact words when a bridge sends to the wrong port', async () => {
+    const { deriveAlerts } = await import('./missionControlModel')
+    const base = { rows: [], health: null, healthError: false, fleetError: false, streamStatus: 'connected', hasDeployment: false }
+    const wrong = 'Gazebo pose bridge sends to 14612, expected 14610. Activate and verify restarts it.'
+    const alerts = deriveAlerts({ ...base, fleet: { manager_error: null, verified_count: 0, bridges: { telemetry: { status: 'running' }, pose: { status: 'mismatch', detail: wrong } } } })
+    expect(alerts.map(alert => [alert.source, alert.message])).toEqual([['Gazebo pose bridge', wrong]])
+    expect(deriveAlerts({ ...base, fleet: { manager_error: null, verified_count: 1, bridges: { telemetry: { status: 'running' }, pose: { status: 'running' } } } })).toEqual([])
+  })
+})

@@ -213,10 +213,15 @@ def build_activation_checks(requested: int, process_result: dict[str, Any], rows
         item = bridges.get(key)
         if item is None:
             checks[name] = _check("unknown", "The manager did not report this bridge.")
+        elif item.get("restarted"):   # a running bridge that sent to the wrong place was replaced: say what was wrong
+            checks[name] = _check(item["status"], f"Bridge restarted by the manager because it was misconfigured: {item.get('replaced')}.")
         else:
-            checks[name] = _check(item["status"], item.get("detail") or {
+            detail = item.get("detail") or {
                 "running": "Bridge process already running (adopted).", "started": "Bridge process started by the manager.",
-                "not_running": "Bridge process is not running."}.get(item["status"], item["status"]))
+                "not_running": "Bridge process is not running."}.get(item["status"], item["status"])
+            if item.get("mirror_ports"):
+                detail += " It also mirrors to " + ", ".join(str(port) for port in item["mirror_ports"]) + " (another receiver)."
+            checks[name] = _check(item["status"], detail)
     checks["receivers"] = _check(
         "ok" if all(receivers.values()) else "unavailable",
         "Both backend UDP receivers are bound." if all(receivers.values()) else "A backend UDP receiver is not bound.",
@@ -229,8 +234,12 @@ def build_activation_checks(requested: int, process_result: dict[str, Any], rows
         else "WSL address matches the configured allowed source IP." if wsl_address else "WSL address was not reported.",
         wsl_address=wsl_address, configured=configured_ips)
     verified = sum(bool(row["verified"]) for row in rows)
+    # A bridge that sends to the wrong port (or could not be restarted) is WHY nothing is verified: say so instead of "pending".
+    bridge_causes = [checks[name]["detail"] for name in ("telemetry_bridge", "pose_bridge") if checks[name]["status"] in {"mismatch", "failed"}]
+    blocked = verified < requested and bool(bridge_causes)
     checks["verification"] = _check(
-        "ok" if verified >= requested else "pending", f"{verified} of {requested} UAV(s) have PX4 telemetry and a Gazebo pose.",
+        "ok" if verified >= requested else "blocked" if blocked else "pending",
+        f"{verified} of {requested} UAV(s) have PX4 telemetry and a Gazebo pose." + (" Cause: " + " ".join(bridge_causes) if blocked else ""),
         verified=verified, required=requested,
         unverified=[{"aircraft_id": r["aircraft_id"], "px4": r["px4_status"], "gazebo": r["gazebo_status"]}
                     for r in rows if not r["verified"]])
@@ -258,6 +267,9 @@ def classify_activation_failure(requested: int, process_result: dict[str, Any],
             + " Update the allowed source IP in the backend configuration; source validation was not relaxed.")
     if process_result.get("failure"):
         return 502, "manager_failed", f"The WSL fleet manager reported: {process_result.get('failure')}"
+    wrong = [checks[name]["detail"] for name in ("telemetry_bridge", "pose_bridge") if checks[name]["status"] == "mismatch"]
+    if wrong:
+        return 502, "bridge_port_mismatch", " ".join(wrong)
     if final and checks["verification"]["status"] != "ok":
         return 504, "verification_timeout", (
             f"PX4 and Gazebo are running, but only {checks['verification']['verified']} of {requested} UAV(s) "
@@ -292,11 +304,14 @@ def fleet_status(
         row["verified"] = row["verified"] and row["system_id"] in present_ids
         row["home"] = by_system.get(row["system_id"], {}).get("home")
         row["managed"] = by_system.get(row["system_id"], {}).get("managed")
+        row["profile"] = by_system.get(row["system_id"], {}).get("profile")
     first = by_system.get(1)
     return {"capacity": FLEET_CAPACITY, "verified_count": sum(bool(row["verified"]) for row in rows),
             # Where the running simulation was started: an explicit home, or the stock PX4 world origin.
             "simulation_home": first.get("home") if first else None,
             "simulation_home_source": "unknown" if first is None else "px4_home_env" if first.get("home") else "px4_default_world",
+            # The long-range SITL parameters the running instance was started with (None: the manager set none).
+            "long_range_profile": first.get("profile") if first else None,
             "instances": rows, "px4_vehicle_records": len(vehicles), "gazebo_model_records": len(models),
             "manager_error": processes.get("failure"), "bridges": processes.get("bridges"),
             "gazebo_server": processes.get("gazebo_server"), "wsl_address": processes.get("wsl_address")}
@@ -339,6 +354,10 @@ def activate_fleet(
     if failure is None:
         checks = build_activation_checks(requested, process_result, rows, receivers=receivers, configured_ips=configured_ips)
         failure = classify_activation_failure(requested, process_result, checks, final=True)
+    if process_result.get("profile_mismatch"):
+        checks["long_range_profile"] = _check(
+            "differs", "A running instance was started with different long-range parameters and was not restarted. "
+            "Use Move simulation to mission start to restart it with the current profile.", aircraft=process_result["profile_mismatch"])
     if home is not None:
         mismatch = process_result.get("home_mismatch") or []
         checks["simulation_home"] = _check(
@@ -447,13 +466,17 @@ def relocate_simulation(
             {"receivers": _check("unavailable", "A backend UDP receiver is not bound.",
                                  px4=receivers["px4"], gazebo=receivers["gazebo"])},
             required_uav_count=requested, relocated=False, simulation_stopped=False)
-    armed = sorted(str(vehicle.get("id")) for vehicle in _fleet_snapshot()[0]
-                   if vehicle.get("status") == "connected" and vehicle.get("armed") is True)
-    if armed:
+    # The restart kills PX4, so an aircraft that is armed but standing on the ground is no reason to refuse (the armed flag is lost
+    # with the process). Only an aircraft that may be flying blocks it: abort it first.
+    from .mission_execution.ground import ground_state
+
+    flying = sorted(str(vehicle.get("id")) for vehicle in _fleet_snapshot()[0]
+                    if vehicle.get("status") == "connected" and vehicle.get("armed") is True and ground_state(vehicle)["on_ground"] is not True)
+    if flying:
         raise _structured_failure(
             409, "aircraft_armed",
-            f"{', '.join(armed)} is armed. The simulation is only restarted while every aircraft is disarmed; nothing was changed.",
-            {"armed": _check("failed", "An armed aircraft was reported by PX4 telemetry.", aircraft=armed)},
+            f"{', '.join(flying)} is armed and not confirmed on the ground. Abort (return to launch) first and let it land; nothing was changed.",
+            {"armed": _check("failed", "An armed aircraft that is not on the ground was reported by PX4 telemetry.", aircraft=flying)},
             required_uav_count=requested, relocated=False, simulation_stopped=False)
     correlation_id = getattr(request.state, "request_id", None) or uuid.uuid4().hex
     process_result = invoke_fleet_manager("relocate", count=requested, request_id=correlation_id, timeout_seconds=75, home=home)

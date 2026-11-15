@@ -7,14 +7,19 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import Optional
 
 from .. import config
-from .geometry import FLAT_EARTH_ASSUMPTION, from_enu, to_enu
+from .geometry import FLAT_EARTH_ASSUMPTION, from_enu, geodesic_m, to_enu
 from .schemas import (
     AircraftPlan, GeneratedRoute, GeoPoint, MissionPlan, OperatingArea, RouteEvent, RouteWaypoint,
 )
 
 GENERATOR_VERSION = 1
+GEODESIC_ASSUMPTION = (
+    "Waypoints are the points you picked, in WGS84; leg lengths are geodesic distances on the WGS84 ellipsoid, so they are right at "
+    "hundreds of kilometres. Duration assumes the planned cruise speed on every leg with no wind or acceleration time."
+)
 Point = tuple[float, float]
 
 
@@ -29,8 +34,12 @@ class PlanningLimits:
     min_hover_s: float
     max_hover_s: float
     # Simulated X500 endurance (config TRINETRA_MP_MAX_FLIGHT_MINUTES / _DISTANCE_M); defaults match the config defaults.
-    max_flight_s: float = 1200.0
-    max_flight_distance_m: float = 15000.0
+    max_flight_s: float = 18000.0
+    max_flight_distance_m: float = 1_000_000.0
+    # Area generators use a flat local plane; beyond this range they refuse rather than draw a wrong route.
+    max_planar_extent_m: float = 20_000.0
+    # Point-to-point routes reaching further than this from the start use geodesic lengths and the points' own coordinates.
+    geodesic_above_m: float = 20_000.0
 
     @classmethod
     def from_config(cls) -> "PlanningLimits":
@@ -40,6 +49,7 @@ class PlanningLimits:
             min_altitude_m=float(config.MP_MIN_ALTITUDE_M), max_altitude_m=float(config.MP_MAX_ALTITUDE_M),
             min_hover_s=float(config.MP_MIN_HOVER_S), max_hover_s=float(config.MP_MAX_HOVER_S),
             max_flight_s=float(config.MP_MAX_FLIGHT_MINUTES) * 60.0, max_flight_distance_m=float(config.MP_MAX_FLIGHT_DISTANCE_M),
+            max_planar_extent_m=float(config.MP_MAX_PLANAR_EXTENT_M), geodesic_above_m=float(config.MP_GEODESIC_ABOVE_M),
         )
 
 
@@ -164,6 +174,9 @@ class _Step:
     altitude: float
     hover: float = 0.0
     action: str = "waypoint"
+    # Set in geodesic mode: the step's own WGS84 position (east/north are then unused).
+    lat: Optional[float] = None
+    lon: Optional[float] = None
 
 
 def _enu(origin: tuple[float, float], point: GeoPoint) -> Point:
@@ -176,11 +189,87 @@ def _require(value, name: str):
     return value
 
 
+PLANAR_TASKS = {"expanding_square_search", "sector_search", "coverage_survey", "perimeter_patrol"}
+POINT_TASKS = {"waypoint_route", "payload_dropoff", "point_inspection", "loiter_hold"}
+LONG_LEG_ADVICE = "Use a waypoint route for long legs."
+
+
+def _planar_guard(extent_m: float, limits: PlanningLimits, what: str) -> None:
+    if extent_m > limits.max_planar_extent_m:
+        raise RouteError("planar_range_exceeded", (
+            f"{what} reaches {extent_m / 1000:.1f} km from the start, beyond the {limits.max_planar_extent_m / 1000:g} km a flat local plane is "
+            f"valid for, so this route would be wrong. {LONG_LEG_ADVICE}"), "operating_area")
+
+
+def _user_points(aircraft: AircraftPlan) -> list[GeoPoint]:
+    p = aircraft.parameters
+    if aircraft.task_type == "waypoint_route":
+        return list(p.points)
+    if aircraft.task_type == "point_inspection":
+        return list(p.points)
+    if aircraft.task_type == "payload_dropoff":
+        return [p.drop_point] if p.drop_point else []
+    if aircraft.task_type == "loiter_hold":
+        return [p.hold_point] if p.hold_point else []
+    return []
+
+
+def geodesic_reach_m(aircraft: AircraftPlan, origin: tuple[float, float]) -> float:
+    """Farthest user-picked point from the start, as a geodesic distance (0 for tasks without point inputs)."""
+    return max((geodesic_m(origin, (point.latitude, point.longitude)) for point in _user_points(aircraft)), default=0.0)
+
+
+def build_geodesic_pattern(aircraft: AircraftPlan, origin: tuple[float, float], cruise_alt: float, cap: int) -> list[_Step]:
+    """Point-to-point tasks flown with the points' own WGS84 coordinates (no flat-plane conversion)."""
+    p = aircraft.parameters
+    kind = aircraft.task_type
+
+    def at(point: GeoPoint, altitude: float = cruise_alt, hover: float = 0.0, action: str = "waypoint") -> _Step:
+        return _Step(0.0, 0.0, altitude, hover, action, round(point.latitude, 7), round(point.longitude, 7))
+
+    if kind == "waypoint_route":
+        steps = [at(point) for point in _require(p.points, "points")]
+    elif kind == "point_inspection":
+        steps = []
+        for point in _require(p.points, "points"):
+            if p.orbit_radius_m > 0:
+                for index, (east, north) in enumerate(orbit((0.0, 0.0), p.orbit_radius_m, p.orbit_points)):
+                    lat, lon = from_enu((point.latitude, point.longitude), east, north)   # a small ring: local plane about its own centre
+                    steps.append(_Step(0.0, 0.0, cruise_alt, p.hover_s if index == 0 else 0.0, "hover" if index == 0 and p.hover_s else "waypoint", round(lat, 7), round(lon, 7)))
+            else:
+                steps.append(at(point, hover=p.hover_s, action="hover" if p.hover_s else "waypoint"))
+    elif kind == "loiter_hold":
+        if aircraft.loiter_duration_s <= 0:
+            raise RouteError("missing_parameter", "loiter_duration_s must be greater than zero for a loiter hold.", "loiter_duration_s")
+        steps = [at(p.hold_point, hover=aircraft.loiter_duration_s, action="hover")]
+    else:  # payload_dropoff
+        drop = _require(p.drop_point, "drop_point")
+        hover = _require(p.hover_duration_s, "hover_duration_s")
+        _require(p.drop_altitude_m, "drop_altitude_m")
+        _require(p.payload_category, "payload_category")
+        steps = [at(drop), at(drop, altitude=p.drop_altitude_m, hover=hover, action="payload_release_point")]
+    _guard(steps, cap)
+    return steps
+
+
 def build_pattern(aircraft: AircraftPlan, plan: MissionPlan, origin: tuple[float, float], limits: PlanningLimits,
                   cruise_alt: float) -> list[_Step]:
     p = aircraft.parameters
     kind = aircraft.task_type
     cap = limits.max_waypoints
+    if kind in PLANAR_TASKS:  # refuse an area the flat plane cannot represent before generating anything
+        if kind in ("expanding_square_search", "sector_search") and p.datum is not None:
+            reach = geodesic_m(origin, (p.datum.latitude, p.datum.longitude)) + (p.search_radius_m or p.sector_radius_m or 0.0)
+            _planar_guard(reach, limits, "The search pattern")
+        area = plan.operating_area
+        if kind in ("coverage_survey", "perimeter_patrol") and area is not None and not (kind == "perimeter_patrol" and p.path):
+            if area.kind == "circle" and area.centre is not None and area.radius_m is not None:
+                reach = geodesic_m(origin, (area.centre.latitude, area.centre.longitude)) + area.radius_m
+            else:
+                reach = max((geodesic_m(origin, (v.latitude, v.longitude)) for v in area.vertices), default=0.0)
+            _planar_guard(reach, limits, "The operating area")
+        if kind == "perimeter_patrol" and p.path:
+            _planar_guard(max(geodesic_m(origin, (v.latitude, v.longitude)) for v in p.path), limits, "The patrol path")
 
     def steps(points: list[Point], altitude: float = cruise_alt) -> list[_Step]:
         _guard(points, cap)
@@ -242,33 +331,46 @@ def generate_route(aircraft: AircraftPlan, plan: MissionPlan, limits: PlanningLi
         raise RouteError("missing_parameter", "altitude_m and speed_mps are required.", "altitude_m")
     origin = (aircraft.start_location.latitude, aircraft.start_location.longitude)
     cruise, speed = float(aircraft.altitude_m), float(aircraft.speed_mps)
-    pattern = build_pattern(aircraft, plan, origin, limits, cruise)
+    # Long point-to-point routes: use each point's own WGS84 coordinates and geodesic lengths. Short routes keep the
+    # local-plane method (identical to earlier versions, so stored routes still verify).
+    geodesic = aircraft.task_type in POINT_TASKS and geodesic_reach_m(aircraft, origin) > limits.geodesic_above_m
+    pattern = build_geodesic_pattern(aircraft, origin, cruise, limits.max_waypoints) if geodesic else build_pattern(aircraft, plan, origin, limits, cruise)
     if not pattern:
         raise RouteError("empty_route", "The task produced no waypoints.")
+    if not geodesic and aircraft.task_type in PLANAR_TASKS:
+        _planar_guard(max(math.hypot(step.east, step.north) for step in pattern), limits, "The pattern")
     last = pattern[-1]
     if aircraft.loiter_duration_s > 0 and aircraft.task_type not in {"loiter_hold"}:
         last.hover += aircraft.loiter_duration_s
         last.action = last.action if last.action == "payload_release_point" else "hover"
-    steps = [_Step(0.0, 0.0, cruise, 0.0, "takeoff")] + pattern
+    home = _Step(0.0, 0.0, cruise, 0.0, "takeoff", origin[0], origin[1]) if geodesic else _Step(0.0, 0.0, cruise, 0.0, "takeoff")
+    steps = [home] + pattern
     if aircraft.return_mode == "return_to_start":
-        if math.hypot(last.east, last.north) > 0.5 or last.altitude != cruise:
-            steps.append(_Step(0.0, 0.0, cruise))
-        steps.append(_Step(0.0, 0.0, 0.0, 0.0, "land"))
+        away = (geodesic_m(origin, (last.lat, last.lon)) > 0.5) if geodesic else math.hypot(last.east, last.north) > 0.5
+        if away or last.altitude != cruise:
+            steps.append(_Step(0.0, 0.0, cruise, lat=origin[0] if geodesic else None, lon=origin[1] if geodesic else None))
+        steps.append(_Step(0.0, 0.0, 0.0, 0.0, "land", origin[0] if geodesic else None, origin[1] if geodesic else None))
     else:
-        steps.append(_Step(last.east, last.north, 0.0, 0.0, "land"))
+        steps.append(_Step(last.east, last.north, 0.0, 0.0, "land", last.lat, last.lon))
     _guard(steps, limits.max_waypoints)
 
     waypoints: list[RouteWaypoint] = []
     events: list[RouteEvent] = []
     length = elapsed = 0.0
     prev = (0.0, 0.0, 0.0)
+    prev_ll = origin
     for index, step in enumerate(steps):
-        distance = math.dist(prev, (step.east, step.north, step.altitude))
+        if geodesic:
+            lat, lon = step.lat, step.lon
+            distance = math.hypot(geodesic_m(prev_ll, (lat, lon)), step.altitude - prev[2])
+            prev_ll = (lat, lon)
+        else:
+            distance = math.dist(prev, (step.east, step.north, step.altitude))
+            lat, lon = from_enu(origin, step.east, step.north)
         length += distance
         elapsed += distance / speed
         arrival = elapsed
         elapsed += step.hover
-        lat, lon = from_enu(origin, step.east, step.north)
         waypoints.append(RouteWaypoint(
             seq=index, latitude=round(lat, 7), longitude=round(lon, 7), altitude_m=round(step.altitude, 3),
             speed_mps=speed, hover_s=round(step.hover, 3), action=step.action,  # type: ignore[arg-type]
@@ -282,5 +384,5 @@ def generate_route(aircraft: AircraftPlan, plan: MissionPlan, limits: PlanningLi
         prev = (step.east, step.north, step.altitude)
     return GeneratedRoute(
         generator=aircraft.task_type or "none", generator_version=GENERATOR_VERSION, waypoints=waypoints, events=events,
-        length_m=round(length, 1), duration_s=round(elapsed, 1), assumptions=FLAT_EARTH_ASSUMPTION,
+        length_m=round(length, 1), duration_s=round(elapsed, 1), assumptions=GEODESIC_ASSUMPTION if geodesic else FLAT_EARTH_ASSUMPTION,
     )

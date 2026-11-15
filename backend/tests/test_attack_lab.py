@@ -61,9 +61,9 @@ def test_general_creates_lists_reads_and_edits_drafts_pinned_to_the_version(gene
     assert edited.status_code == 200 and edited.json()["seed"] == 9 and edited.json()["config_hash"] != record["config_hash"]
     ready = client.put(f"/api/attack-lab/experiments/{record['id']}", json=experiment(scenario_id, version_id, status="ready"))
     assert ready.json()["status"] == "ready"
-    locked = client.put(f"/api/attack-lab/experiments/{record['id']}", json=experiment(scenario_id, version_id))
-    assert locked.status_code == 409 and locked.json()["detail"]["code"] == "not_draft"
-    assert client.delete(f"/api/attack-lab/experiments/{record['id']}").status_code == 409
+    again = client.put(f"/api/attack-lab/experiments/{record['id']}", json=experiment(scenario_id, version_id, name="Edited while ready"))
+    assert again.status_code == 200 and again.json()["name"] == "Edited while ready"      # never run: editable in place, whatever its status
+    assert again.json()["has_results"] is False and again.json()["edit_mode"] == "in_place"
 
 
 def test_experiment_stays_pinned_when_the_plan_gets_a_newer_version(general_client, flight):
@@ -262,3 +262,90 @@ def test_replay_hides_the_schedule_until_finished_and_baseline_stays_quiet(gener
     quiet_eval = client.get(f"/api/research/replays/{quiet['replay_id']}/evaluation").json()["aircraft"][0]
     assert quiet_eval["attacked"] is False and quiet_eval["max_tier"] in ("Low", "Medium") and quiet_eval["false_alarms"] <= 1
     assert client.post("/api/research/replays", json={"experiment_id": "missing"}).status_code == 404
+
+
+def test_never_run_experiment_is_edited_in_place_and_deleted_outright(general_client, flight):
+    client, _ = general_client
+    scenario_id, version_id = saved_plan(client)
+    record = client.post("/api/attack-lab/experiments", json=experiment(scenario_id, version_id, status="ready")).json()
+    assert record["result_count"] == 0 and record["edit_mode"] == "in_place" and record["delete_keeps_results"] is False
+    assert client.put(f"/api/attack-lab/experiments/{record['id']}", json=experiment(scenario_id, version_id, seed=5)).status_code == 200
+    assert client.delete(f"/api/attack-lab/experiments/{record['id']}").status_code == 204
+    assert client.get("/api/attack-lab/results").json() == {"results": [], "runner_available": False, "results_storage": "available"}
+
+
+def test_experiment_with_results_is_saved_as_a_copy_and_delete_keeps_the_results(general_client, flight):
+    from app.persistence.database import save_experiment_result
+    client, _ = general_client
+    scenario_id, version_id = saved_plan(client)
+    record = client.post("/api/attack-lab/experiments", json=experiment(scenario_id, version_id, name="Drift test")).json()
+    save_experiment_result(record["id"], {"detected": True, "latency_s": 12.5})
+    listed = client.get("/api/attack-lab/experiments").json()["experiments"][0]
+    assert listed["has_results"] is True and listed["result_count"] == 1 and listed["edit_mode"] == "copy" and listed["delete_keeps_results"] is True
+    refused = client.put(f"/api/attack-lab/experiments/{record['id']}", json=experiment(scenario_id, version_id, name="Drift test", seed=7))
+    assert refused.status_code == 409 and refused.json()["detail"]["code"] == "has_results" and "copy" in refused.json()["detail"]["message"]
+    copy = client.post(f"/api/attack-lab/experiments/{record['id']}/copy", json=experiment(scenario_id, version_id, name="ignored", seed=99))
+    assert copy.status_code == 201 and copy.json()["name"] == "Drift test v2" and copy.json()["seed"] == 99 and copy.json()["has_results"] is False
+    assert copy.json()["id"] != record["id"] and client.get(f"/api/attack-lab/experiments/{record['id']}").json()["seed"] == record["seed"]       # the original is untouched
+    assert client.post(f"/api/attack-lab/experiments/{record['id']}/copy").json()["name"] == "Drift test v3"                           # names stay unique
+    assert client.post(f"/api/attack-lab/experiments/{copy.json()['id']}/copy").json()["name"] == "Drift test v4"
+    assert client.delete(f"/api/attack-lab/experiments/{record['id']}").status_code == 204
+    kept = client.get("/api/attack-lab/results").json()["results"]
+    assert len(kept) == 1 and kept[0]["from_deleted_experiment"] is True and kept[0]["label"] == "from a deleted experiment"
+    assert kept[0]["experiment_name"] == "Drift test" and kept[0]["result"] == {"detected": True, "latency_s": 12.5} and kept[0]["config"]["attacks"][0]["type"] == "drift"
+    assert client.get(f"/api/attack-lab/experiments/{record['id']}").status_code == 404
+
+
+def test_repin_moves_an_older_experiment_to_the_latest_version_without_rebuilding_the_attacks(general_client, flight):
+    from app.persistence.database import save_experiment_result
+    client, _ = general_client
+    scenario_id, version_id = saved_plan(client)
+    never_run = client.post("/api/attack-lab/experiments", json=experiment(scenario_id, version_id, name="Never run")).json()
+    has_results = client.post("/api/attack-lab/experiments", json=experiment(scenario_id, version_id, name="Has results")).json()
+    save_experiment_result(has_results["id"], {"detected": False})
+    assert client.post(f"/api/attack-lab/experiments/{never_run['id']}/repin").json()["detail"]["code"] == "already_latest"
+    newer = client.put(f"/api/scenarios/{scenario_id}", json=plan_body(complete_plan().model_copy(update={"notes": "newer"}))).json()
+    latest_id = newer["versions"][0]["id"]
+    assert client.get(f"/api/attack-lab/experiments/{never_run['id']}").json()["latest_version_id"] == latest_id
+    moved = client.post(f"/api/attack-lab/experiments/{never_run['id']}/repin")
+    assert moved.status_code == 200 and moved.json()["id"] == never_run["id"] and moved.json()["scenario_version_id"] == latest_id and moved.json()["superseded"] is False
+    assert moved.json()["config"]["attacks"] == never_run["config"]["attacks"]                         # the attacks were not rebuilt
+    copied = client.post(f"/api/attack-lab/experiments/{has_results['id']}/repin")
+    assert copied.status_code == 200 and copied.json()["id"] != has_results["id"] and copied.json()["name"] == "Has results v2" and copied.json()["scenario_version_id"] == latest_id
+    old = client.get(f"/api/attack-lab/experiments/{has_results['id']}").json()
+    assert old["scenario_version_id"] == version_id and old["result_count"] == 1                          # results stay with their original version
+
+
+def test_operator_cannot_copy_or_repin(general_client, operator_client, flight):
+    client, _ = general_client
+    operator, _ = operator_client
+    scenario_id, version_id = saved_plan(client)
+    record = client.post("/api/attack-lab/experiments", json=experiment(scenario_id, version_id)).json()
+    assert operator.post(f"/api/attack-lab/experiments/{record['id']}/copy").status_code == 403
+    assert operator.post(f"/api/attack-lab/experiments/{record['id']}/repin").status_code == 403
+
+
+def test_missing_results_table_degrades_clearly_instead_of_failing_edit_or_delete(general_client, flight, monkeypatch):
+    """Without the experiment_results table nothing can have results: experiments behave as never run and the API says why."""
+    from app.persistence import database
+    from app import attack_lab_routes
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("the results table must not be queried when it does not exist")
+
+    client, _ = general_client
+    scenario_id, version_id = saved_plan(client)
+    record = client.post("/api/attack-lab/experiments", json=experiment(scenario_id, version_id, name="No storage")).json()
+    monkeypatch.setattr(database, "experiment_results_available", lambda: False)
+    monkeypatch.setattr(attack_lab_routes, "experiment_results_available", lambda: False)
+    monkeypatch.setattr(database, "ExperimentResultRecord", type("Missing", (), {"__getattr__": forbidden}))
+    listed = client.get("/api/attack-lab/experiments")
+    assert listed.status_code == 200 and listed.json()["results_storage"] == "missing" and "alembic upgrade head" in listed.json()["results_storage_message"]
+    assert listed.json()["experiments"][0]["result_count"] == 0 and listed.json()["experiments"][0]["edit_mode"] == "in_place"
+    results = client.get("/api/attack-lab/results").json()
+    assert results["results"] == [] and results["results_storage"] == "missing"
+    assert client.put(f"/api/attack-lab/experiments/{record['id']}", json=experiment(scenario_id, version_id, name="Edited")).status_code == 200
+    assert client.post(f"/api/attack-lab/experiments/{record['id']}/copy").status_code == 201
+    assert client.delete(f"/api/attack-lab/experiments/{record['id']}").status_code == 204
+    with pytest.raises(RuntimeError, match="experiment_results"):
+        database.save_experiment_result(record["id"], {"x": 1})

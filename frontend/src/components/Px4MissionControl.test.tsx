@@ -11,6 +11,7 @@ vi.mock('../services/api', () => ({
   api: {
     px4Telemetry: vi.fn(), px4TelemetrySocket: vi.fn(), latestMissionDeployment: vi.fn(), simulationLocation: vi.fn(), relocateSimulation: vi.fn(),
     health: vi.fn(), fleetStatus: vi.fn(), gazeboPoses: vi.fn(),
+    latestExecution: vi.fn(), executionPreflight: vi.fn(), executionEvents: vi.fn(), startExecution: vi.fn(), pauseExecution: vi.fn(), resumeExecution: vi.fn(), abortExecution: vi.fn(),
     researchModelInfo: vi.fn(async () => ({ available: false, formula: '', live_residual_inputs_available: false })), researchDecisions: vi.fn(async () => []), recordDecision: vi.fn(),
   },
 }))
@@ -109,6 +110,10 @@ describe('Mission Control live dashboard', () => {
     apiMock.health.mockResolvedValue(health())
     apiMock.fleetStatus.mockResolvedValue({ capacity: 5, verified_count: 1, instances: [], manager_error: null, bridges: { telemetry: { status: 'running' }, pose: { status: 'running' } } } as never)
     apiMock.gazeboPoses.mockResolvedValue(poses(['x500_0']))
+    apiMock.latestExecution.mockResolvedValue(null)
+    apiMock.executionEvents.mockResolvedValue({ execution_id: 'x', state: 'executing', events: [] })
+    apiMock.executionPreflight.mockResolvedValue({ deployment_id: 'deployment-0001-abcdef', can_start: true, confirmation: 'This runs your route in the PX4/Gazebo simulation. The aircraft will arm, take off and fly the plan.',
+      role_rule: { allowed: true, code: 'general', message: 'General accounts deploy and start directly.' }, checks: [], blocking: [] } as never)
     apiMock.simulationLocation.mockResolvedValue({ mission_start: null, aircraft: [], max_distance_to_start_m: null, max_distance_to_area_m: null, position_known: false,
       relocation_recommended: false, far_from_mission_area: false, message: 'No aircraft of this plan reports a valid position, so its distance from the mission start is unknown.', thresholds: { relocation_notice_m: 1000, far_from_area_m: 50000, home_tolerance_m: 50 } } as never)
   })
@@ -173,9 +178,12 @@ describe('Mission Control live dashboard', () => {
     expect(lastMap().overlay!.areaOutline.length).toBeGreaterThan(8)
     const status = screen.getByRole('region', { name: 'Mission status' })
     expect(within(status).getByText(/Deployed to Mission Control/)).toBeTruthy()
-    expect(within(status).getByText(/Uploaded to PX4/).textContent).toMatch(/not available yet/)
-    expect(within(status).getByText(/^Executing/).textContent).toMatch(/not available yet/)
-    expect(within(status).getAllByText('Progress: not started')).toHaveLength(2)
+    expect(within(status).getByText(/Uploaded to PX4/).textContent).toMatch(/not started/)
+    expect(within(status).getByText(/^Executing/).textContent).toMatch(/not started/)
+    // the stages are real now: the simulation controls sit in the same panel
+    await waitFor(() => expect((within(status).getByRole('button', { name: /START IN SIMULATION/ }) as HTMLButtonElement).disabled).toBe(false))
+    expect((within(status).getByRole('button', { name: /ABORT \(RETURN TO LAUNCH\)/ }) as HTMLButtonElement).disabled).toBe(true)
+    expect(within(status).getAllByText(/waypoints · 1\.50 km · about 8\.0 min/)).toHaveLength(2)   // each planned aircraft with its route summary
     expect(screen.getByText(/not executing on PX4/)).toBeTruthy()
     expect(screen.getByText('Coastal relief')).toBeTruthy()
   })
@@ -266,13 +274,15 @@ describe('Mission Control live dashboard', () => {
       const right = main.querySelector('.mc-rail-right') as HTMLElement
       const labels = (node: Element) => Array.from(node.children).map(child => child.getAttribute('aria-label'))
       expect(labels(left)).toEqual(['Active aircraft', 'System status', 'Battery status'])
-      expect(labels(right)).toEqual(['Alerts', 'Mission status', 'Mission handoffs'])
+      expect(labels(right)).toEqual(['Alerts', 'Mission status'])
       expect(main.contains(screen.getByRole('region', { name: 'Mission map' }))).toBe(true)
       // The selected-aircraft strip stays directly under the map, inside the map panel.
       const mapPanel = screen.getByRole('region', { name: 'Mission map' })
       expect(mapPanel.contains(screen.getByTestId('cesium-live-map'))).toBe(true)
       const lower = dashboard.querySelector('.mc-lower') as HTMLElement
-      expect(labels(lower)).toEqual(['Flight log', 'Gazebo panel'])
+      // The left column stacks the flight log and the reassignments list; the tall Gazebo panel sits beside it.
+      expect(labels(lower)).toEqual([null, 'Gazebo panel'])
+      expect(labels(lower.querySelector('.mc-lower-stack') as HTMLElement)).toEqual(['Flight log', 'Mission handoffs'])
       const order = Array.from(dashboard.children).map(child => child.className || child.getAttribute('aria-label'))
       expect(order.indexOf('mc-main')).toBeLessThan(order.findIndex(item => String(item).includes('threat-monitor')))
       expect(order.findIndex(item => String(item).includes('threat-monitor'))).toBeLessThan(order.indexOf('mc-lower'))
@@ -390,5 +400,51 @@ describe('Mission Control live dashboard', () => {
     const readOnly = await screen.findByRole('region', { name: 'Mission location' })
     await within(readOnly).findByRole('alert')
     expect(within(readOnly).queryByRole('button', { name: /MOVE SIMULATION TO MISSION START/ })).toBeNull()
+  })
+
+  it('feeds the flight log with backend execution events and shows live progress in the deployed mission panel', async () => {
+    apiMock.latestMissionDeployment.mockResolvedValue(deployment([aircraftPlan('px4-1', 'primary')]))
+    apiMock.latestExecution.mockResolvedValue({
+      id: 'e'.repeat(32), deployment_id: 'deployment-0001-abcdef', scenario_id: 's1', scenario_version_id: 'version-1234-5678', aircraft_id: 'px4-1',
+      state: 'executing', stage: 'executing', reason: '', active: true, started_by_name: 'Test General', started_by_role: 'GENERAL', created_at: 't', updated_at: 't', finished_at: null,
+      uploaded: true, armed: true, px4_mode: 'Mission', route_total: 5, route_reached: 2, route_current: 3, percent: 40, elapsed_s: 75, estimated_s: 480, px4_heartbeat_age_s: 0.3, px4_messages: [], simulation_only: true,
+      controls: { pause: { allowed: true, reason: null }, resume: { allowed: false, reason: 'Resume is possible while paused; the run is executing.' }, abort: { allowed: true, reason: null } },
+    } as never)
+    const at = (minute: number) => `2026-11-14T03:0${minute}:00Z`
+    apiMock.executionEvents.mockImplementation(async (_id: string, after = 0) => ({ execution_id: 'e'.repeat(32), state: 'executing', events: [
+      { id: 1, execution_id: 'e'.repeat(32), source: 'user', type: 'start_requested', message: 'Test General (GENERAL) started the mission in simulation.', data: {}, actor_name: 'Test General', occurred_at: at(1) },
+      { id: 2, execution_id: 'e'.repeat(32), source: 'executor', type: 'uploaded', message: 'Mission uploaded to PX4: 7 items acknowledged.', data: {}, actor_name: null, occurred_at: at(2) },
+      { id: 3, execution_id: 'e'.repeat(32), source: 'executor', type: 'armed', message: 'PX4 reports armed.', data: {}, actor_name: null, occurred_at: at(3) },
+      { id: 4, execution_id: 'e'.repeat(32), source: 'executor', type: 'takeoff_complete', message: 'Take-off complete (waypoint 1 of 5).', data: {}, actor_name: null, occurred_at: at(4) },
+      { id: 5, execution_id: 'e'.repeat(32), source: 'executor', type: 'payload_released_simulated', message: 'payload_released (simulated) at waypoint 3 of 5. No release command was sent.', data: {}, actor_name: null, occurred_at: at(5) },
+    ].filter(item => item.id > after) }) as never)
+    render(<Px4MissionControl />)
+    const status = await screen.findByRole('region', { name: 'Mission status' })
+    expect((await within(status).findByRole('status', { name: 'Execution state' })).textContent).toBe('Executing')
+    expect(within(status).getByText(/waypoint 3 of 5 · 40% · 1:15 of about 8:00/)).toBeTruthy()
+    expect((within(status).getByRole('button', { name: /ABORT \(RETURN TO LAUNCH\)/ }) as HTMLButtonElement).disabled).toBe(false)
+    const log = screen.getByRole('region', { name: 'Flight log' })
+    await waitFor(() => expect(within(log).getByText('Mission uploaded to PX4: 7 items acknowledged.')).toBeTruthy())
+    for (const text of ['Test General (GENERAL) started the mission in simulation.', 'PX4 reports armed.', 'Take-off complete (waypoint 1 of 5).', 'payload_released (simulated) at waypoint 3 of 5. No release command was sent.']) {
+      expect(within(log).getAllByText(text)).toHaveLength(1)   // each backend event appears once however often it is polled
+    }
+    expect(within(log).getByText(/Mission execution events \(start, upload, arm, take-off, waypoints, final state\) come from the backend record/)).toBeTruthy()
+    expect(lastMap().overlay?.routes).toHaveLength(1)   // the route stays on the map with the live aircraft
+    expect(document.body.textContent?.toLowerCase()).not.toMatch(/attack lab|spoof|drift rate/)
+  })
+})
+
+
+describe('Mission Control header while the deployment loads (walkthrough fix)', () => {
+  it('says "Loading the deployed mission…" instead of "No mission deployed" until the first answer arrives', async () => {
+    const { HeaderStrip } = await import('./MissionControlPanels')
+    const { rerender } = render(<HeaderStrip deployment={null} loading chips={[]}/>)
+    expect(screen.getByRole('heading', { name: 'Loading the deployed mission…' })).toBeTruthy()
+    expect(screen.getByText('LOADING')).toBeTruthy()
+    expect(screen.queryByText(/No mission deployed/)).toBeNull()
+    expect(screen.queryByText(/Use Deploy to Mission Control/)).toBeNull()
+    rerender(<HeaderStrip deployment={null} loading={false} chips={[]}/>)
+    expect(screen.getByRole('heading', { name: 'No mission deployed' })).toBeTruthy()
+    expect(screen.getByText('NOT DEPLOYED')).toBeTruthy()
   })
 })

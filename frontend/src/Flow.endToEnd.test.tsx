@@ -26,6 +26,8 @@ const backend = vi.hoisted(() => {
     mapOverlay: null as unknown,
     relocations: 0,
     clock: 0,
+    execution: null as null | Record<string, unknown>,
+    executionEvents: [] as Record<string, unknown>[],
   }
   return state
 })
@@ -137,6 +139,38 @@ vi.mock('./services/api', () => ({
         note: 'The PX4 and Gazebo simulation was restarted at the mission start. No arm, take-off or mission command was sent.',
         checks: { px4: { status: 'ok', detail: '1 of 1 PX4 SITL process(es) present.' }, verification: { status: 'ok', detail: '1 of 1 UAV(s) have PX4 telemetry and a Gazebo pose.' }, simulation_home: { status: 'ok', detail: 'Every aircraft reports a position within 50 m of the mission start.' } } }
     }),
+    // --- Start in simulation: a fake executor with the backend's rules (role, approval, one run at a time) ---
+    executionPreflight: vi.fn(async (deploymentId: string) => {
+      const record = backend.deployments.find(item => item.id === deploymentId)!
+      const owner = scenario(record.scenario_id)!
+      const version = owner.versions.find(item => item.id === record.scenario_version_id)!
+      const superseded = owner.versions[0].id !== version.id
+      const approved = backend.role === 'GENERAL' || version.approval?.status === 'APPROVED'
+      const primary = planOf(version).aircraft.find(item => item.role === 'primary')!
+      const distance = metres(backend.aircraftAt, primary.start_location!)
+      const failing: [string, string][] = []
+      if (superseded) failing.push(['plan_valid', `Version ${version.version_number} was superseded by version ${owner.versions[0].version_number}. Deploy the latest version before starting.`])
+      if (!approved) failing.push(['role', `Operators need a General's approval of this exact version. Submit version ${version.version_number} for review in Scenario Lab.`])
+      if (distance > 50) failing.push(['at_mission_start', `The aircraft is ${(distance / 1000).toFixed(1)} km from the mission start (limit 50 m). Use Move simulation to mission start.`])
+      if (backend.execution?.active) failing.push(['no_execution_running', `An execution is already ${backend.execution.state} on px4-1.`])
+      const keys = ['plan_valid', 'role', 'single_aircraft', 'fleet_verified', 'managed_instance', 'telemetry_fresh', 'gps_fix', 'disarmed_landed', 'at_mission_start', 'battery', 'no_execution_running', 'endurance']
+      return { deployment_id: deploymentId, aircraft_id: 'px4-1', can_start: failing.length === 0, blocking: failing.map(item => item[1]),
+        confirmation: 'This runs your route in the PX4/Gazebo simulation. The aircraft will arm, take off and fly the plan.',
+        role_rule: approved ? { allowed: true, code: backend.role === 'GENERAL' ? 'general' : 'approved', message: backend.role === 'GENERAL' ? 'General accounts deploy and start directly.' : `A General approved version ${version.version_number}.` }
+          : { allowed: false, code: 'approval_required', message: failing.find(item => item[0] === 'role')![1] },
+        checks: keys.map(key => ({ key, label: key.replace(/_/g, ' '), ok: !failing.some(item => item[0] === key), detail: failing.find(item => item[0] === key)?.[1] ?? 'ok', ...(key === 'at_mission_start' && distance > 50 ? { offer_relocation: true } : {}) })) }
+    }),
+    latestExecution: vi.fn(async () => backend.execution),
+    executionEvents: vi.fn(async (_id: string, after = 0) => ({ execution_id: _id, state: backend.execution?.state, events: backend.executionEvents.filter(item => (item.id as number) > after) })),
+    startExecution: vi.fn(async (deploymentId: string) => {
+      const record = backend.deployments.find(item => item.id === deploymentId)!
+      setExecution({ id: 'e'.repeat(32), deployment_id: deploymentId, scenario_id: record.scenario_id, scenario_version_id: record.scenario_version_id, state: 'connecting', stage: 'starting', uploaded: false, armed: false, percent: 0, route_reached: 0, route_current: 1, elapsed_s: null })
+      logExecution('user', 'start_requested', `Test ${backend.role} (${backend.role}) started the mission in simulation.`)
+      return backend.execution
+    }),
+    pauseExecution: vi.fn(async () => { setExecution({ state: 'paused', px4_mode: 'Hold' }); logExecution('executor', 'paused', 'Paused: the aircraft holds its position.'); return backend.execution }),
+    resumeExecution: vi.fn(async () => { setExecution({ state: 'executing', px4_mode: 'Mission' }); logExecution('executor', 'resumed', 'Resumed: the aircraft continues the mission.'); return backend.execution }),
+    abortExecution: vi.fn(async () => { setExecution({ state: 'returning', px4_mode: 'Return', reason: 'aborted by the operator' }); logExecution('executor', 'return_to_launch', 'Return to launch commanded.'); return backend.execution }),
     attackLabLimits: vi.fn(async () => ({
       name: 'Attack Lab', executes: false, max_attacks: 10, duration_s: { min: 1, max: 3600 }, start_s: { min: 0, max: 86400 }, seed: { min: 0, max: 2147483647 },
       handover: { min_battery_pct: 40, roles: ['standby', 'decoy'] }, presets: PRESET_SPECS,
@@ -197,6 +231,41 @@ vi.setConfig({ testTimeout: 60000 })
 
 import { api } from './services/api'
 const apiMock = vi.mocked(api)
+/** The fake executor's state, with the controls the backend derives from it. */
+function setExecution(patch: Record<string, unknown>) {
+  const next = { aircraft_id: 'px4-1', reason: '', started_by_name: `Test ${backend.role}`, started_by_role: backend.role, created_at: 't', updated_at: 't', finished_at: null,
+    px4_mode: 'Mission', route_total: 3, estimated_s: 240, px4_heartbeat_age_s: 0.3, px4_messages: [], simulation_only: true, ...(backend.execution ?? {}), ...patch } as Record<string, unknown>
+  const state = next.state as string
+  const active = !['completed', 'aborted', 'failed'].includes(state)
+  const done = `The run is already ${state}.`
+  next.active = active
+  next.stage = !active ? state : ['executing', 'paused', 'returning'].includes(state) ? 'executing' : next.uploaded ? 'uploaded' : 'starting'
+  next.controls = {
+    pause: state === 'executing' ? { allowed: true, reason: null } : { allowed: false, reason: active ? `Pause is possible while executing; the run is ${state}.` : done },
+    resume: state === 'paused' ? { allowed: true, reason: null } : { allowed: false, reason: active ? `Resume is possible while paused; the run is ${state}.` : done },
+    abort: active ? { allowed: true, reason: null } : { allowed: false, reason: done },
+  }
+  backend.execution = next
+}
+function logExecution(source: string, type: string, message: string) {
+  backend.executionEvents.push({ id: backend.executionEvents.length + 1, execution_id: 'e'.repeat(32), source, type, message, data: {}, actor_name: null, occurred_at: new Date(Date.UTC(2026, 10, 14, 3, 0, backend.executionEvents.length)).toISOString() })
+}
+/** What PX4 and the executor would report next (the real sequence is covered by the backend tests and the live trial). */
+function simulate(step: 'fly' | 'progress' | 'land') {
+  if (step === 'fly') {
+    setExecution({ state: 'executing', uploaded: true, armed: true, elapsed_s: 5 })
+    logExecution('executor', 'uploaded', 'Mission uploaded to PX4: 4 items acknowledged.')
+    logExecution('executor', 'armed', 'PX4 reports armed.')
+  } else if (step === 'progress') {
+    setExecution({ route_reached: 2, route_current: 3, percent: 66.7, elapsed_s: 150 })
+    logExecution('executor', 'takeoff_complete', 'Take-off complete (waypoint 1 of 3).')
+    logExecution('executor', 'waypoint_reached', 'Reached waypoint 2 of 3.')
+  } else {
+    setExecution({ state: 'completed', armed: false, route_reached: 3, route_current: 3, percent: 100, elapsed_s: 262 })
+    logExecution('executor', 'completed', 'Mission completed: the aircraft landed and disarmed.')
+  }
+}
+
 const session = (role: 'GENERAL' | 'OPERATOR'): UserSession => ({
   expires_at: '2027-01-01T00:00:00Z', csrf_token: 'csrf',
   permissions: role === 'GENERAL' ? ['mission.read_all', 'mission.read_own', 'scenario.create', 'scenario.review'] : ['mission.read_own', 'scenario.create'],
@@ -236,7 +305,7 @@ describe('end-to-end flow through the real App', () => {
     vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: true, addListener: vi.fn(), removeListener: vi.fn(), addEventListener: vi.fn(), removeEventListener: vi.fn() })))
     window.scrollTo = vi.fn() as never
     sessionStorage.clear(); window.localStorage.clear()
-    Object.assign(backend, { role: 'GENERAL', scenarios: [], deployments: [], experiments: [], aircraftAt: { ...ZURICH }, mapOverlay: null, relocations: 0, clock: 0 })
+    Object.assign(backend, { role: 'GENERAL', scenarios: [], deployments: [], experiments: [], aircraftAt: { ...ZURICH }, mapOverlay: null, relocations: 0, clock: 0, execution: null, executionEvents: [] })
     window.history.replaceState({}, '', '/scenario-lab')
   })
   afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.clearAllMocks() })
@@ -280,6 +349,14 @@ describe('end-to-end flow through the real App', () => {
     expect(overlay()!.routes[0]).toMatchObject({ uavId: 'px4-1' })
     expect(overlay()!.routes[0].waypoints).toHaveLength(3)
 
+    // Start in simulation is visible but disabled while the aircraft is not at the mission start, with that exact reason.
+    const mission = await screen.findByRole('region', { name: 'Mission status' })
+    const control = (name: RegExp) => within(mission).getByRole('button', { name }) as HTMLButtonElement
+    const controlReasons = () => Object.fromEntries(Array.from(mission.querySelectorAll('[aria-label="Why controls are unavailable"] li')).map(item => [item.querySelector('b')!.textContent, item.textContent!.slice(item.querySelector('b')!.textContent!.length)]))
+    await waitFor(() => expect(controlReasons().Start).toMatch(/km from the mission start \(limit 50 m\)\. Use Move simulation to mission start\./))
+    expect(control(/START IN SIMULATION/).disabled).toBe(true)
+    expect(within(mission).getByLabelText('Role rule').textContent).toBe('Role rule: General accounts deploy and start directly.')
+
     // Mission Control: the simulation is far away. Moving it needs a press and an in-page confirmation, and commands no flight.
     const missionLocation = await screen.findByRole('region', { name: 'Mission location' })
     expect((await within(missionLocation).findByRole('alert')).textContent).toMatch(/about \d+ km from the mission area/)
@@ -293,6 +370,37 @@ describe('end-to-end flow through the real App', () => {
     expect(await within(missionLocation).findByText(/Simulation moved to the mission start \(aircraft 0\.4 m from it\)/)).toBeTruthy()
     expect(within(within(missionLocation).getByRole('list', { name: 'Relocation checks' })).getAllByRole('listitem')).toHaveLength(3)
     await waitFor(() => expect(within(missionLocation).queryByRole('alert')).toBeNull())
+
+    // Start in simulation: enabled once the aircraft is at the mission start; it needs the in-page confirmation with the checklist.
+    fireEvent.click(within(mission).getByRole('button', { name: 'VIEW PRE-START CHECKS' }))   // forces a fresh read after the move
+    const checks = await within(mission).findByRole('dialog', { name: 'Confirm start in simulation' })
+    await waitFor(() => expect((within(checks).getByRole('button', { name: 'START NOW' }) as HTMLButtonElement).disabled).toBe(false))
+    expect(within(checks).getByText('This runs your route in the PX4/Gazebo simulation. The aircraft will arm, take off and fly the plan.')).toBeTruthy()
+    expect(within(within(checks).getByRole('list', { name: 'Pre-start checklist' })).getAllByRole('listitem')).toHaveLength(12)
+    expect(apiMock.startExecution).not.toHaveBeenCalled()
+    fireEvent.click(within(checks).getByRole('button', { name: 'START NOW' }))
+    await waitFor(() => expect(apiMock.startExecution).toHaveBeenCalledWith('deployment-1'))
+    expect((await within(mission).findByRole('status', { name: 'Execution state' })).textContent).toBe('Connecting to PX4')
+    expect(control(/ABORT \(RETURN TO LAUNCH\)/).disabled).toBe(false)
+    simulate('fly')
+    await waitFor(() => expect(within(mission).getByRole('status', { name: 'Execution state' }).textContent).toBe('Executing'), { timeout: 6000 })
+    expect(within(mission).getByText(/Uploaded to PX4/).textContent).toMatch(/mission accepted by PX4/)
+    simulate('progress')
+    await waitFor(() => expect(within(mission).getByText(/waypoint 3 of 3 · 67% · 2:30 of about 4:00/)).toBeTruthy(), { timeout: 6000 })
+    expect(within(mission).getByRole('progressbar', { name: 'Mission progress' }).getAttribute('aria-valuenow')).toBe('67')
+    fireEvent.click(control(/^PAUSE$/))
+    await waitFor(() => expect(within(mission).getByRole('status', { name: 'Execution state' }).textContent).toBe('Paused (Hold)'), { timeout: 6000 })
+    expect(control(/ABORT \(RETURN TO LAUNCH\)/).disabled).toBe(false)   // abort stays available while paused
+    fireEvent.click(control(/^RESUME$/))
+    await waitFor(() => expect(within(mission).getByRole('status', { name: 'Execution state' }).textContent).toBe('Executing'), { timeout: 6000 })
+    simulate('land')
+    await waitFor(() => expect(within(mission).getByRole('status', { name: 'Execution state' }).textContent).toBe('Completed'), { timeout: 6000 })
+    expect(control(/ABORT \(RETURN TO LAUNCH\)/).disabled).toBe(true)
+    const flightLog = screen.getByRole('region', { name: 'Flight log' })
+    for (const text of ['Test GENERAL (GENERAL) started the mission in simulation.', 'Mission uploaded to PX4: 4 items acknowledged.', 'PX4 reports armed.', 'Take-off complete (waypoint 1 of 3).',
+      'Reached waypoint 2 of 3.', 'Paused: the aircraft holds its position.', 'Resumed: the aircraft continues the mission.', 'Mission completed: the aircraft landed and disarmed.']) {
+      await waitFor(() => expect(within(flightLog).getAllByText(text)).toHaveLength(1), { timeout: 6000 })
+    }
     expect(confirmSpy).not.toHaveBeenCalled()  // no native dialog anywhere
 
     // Attack Lab: the saved version is listed, preselected, and marked latest and deployed.
@@ -317,10 +425,11 @@ describe('end-to-end flow through the real App', () => {
     click('VALIDATE')
     expect(await screen.findByText('Valid: this experiment passes every backend check.')).toBeTruthy()
     click(/SAVE DRAFT/)
-    const saved = await screen.findByRole('button', { name: 'Open experiment Slow drift run' })
-    expect(saved.textContent).toMatch(/DRAFT · Slow drift · 1 attack\(s\)/)
-    expect(saved.textContent).toMatch(/Flow mission · v1/)
-    expect(saved.textContent).not.toMatch(/superseded/)
+    const saved = await screen.findByRole('listitem', { name: 'Experiment Slow drift run' })
+    expect(saved.textContent).toMatch(/Slow drift/)
+    expect(saved.textContent).toMatch(/Flow mission/)
+    expect(saved.textContent).toMatch(/Pinned versionv1/)
+    expect(saved.textContent).not.toMatch(/Greyed/)
     expect(apiMock.createExperiment.mock.calls[0][0]).toMatchObject({ scenario_version_id: 'scenario-1-v1', preset_id: 'slow_drift', config: { response_policy: 'operator_decides' } })
 
     // Back to Scenario Lab through the link: the same scenario is open. Edit, and the next action explains why it is unavailable.
@@ -338,8 +447,10 @@ describe('end-to-end flow through the real App', () => {
 
     // The experiment stays pinned to v1 and now carries the superseded notice; v2 is latest and not deployed yet.
     openTab('Attack Lab')
-    const pinned = await screen.findByRole('button', { name: 'Open experiment Slow drift run' })
-    expect(pinned.textContent).toMatch(/Mission version superseded; the experiment stays pinned to it/)
+    const card = await screen.findByRole('listitem', { name: 'Experiment Slow drift run' })
+    expect(card.textContent).toMatch(/Greyed: a newer version of this mission exists, so this experiment is pinned to an older one\./)
+    expect(card.textContent).toMatch(/RE-PIN TO LATEST/)
+    const pinned = within(card).getByRole('button', { name: 'Open experiment Slow drift run' })
     const versions = await screen.findByRole('combobox', { name: 'Version' }) as HTMLSelectElement
     await waitFor(() => expect(Array.from(versions.options).map(option => option.textContent)).toEqual([
       'Choose an exact version', 'v2 · latest · not deployed', 'v1 · superseded · deployed · in Mission Control']))
@@ -394,6 +505,15 @@ describe('end-to-end flow through the real App', () => {
     expect(within(header).getByText(/Version 1 · schema 2/)).toBeTruthy()
     expect(await within(screen.getByRole('region', { name: 'Mission location' })).findByText(/The aircraft is 0 m from the mission start\./)).toBeTruthy()
     expect(screen.queryByRole('button', { name: /MOVE SIMULATION TO MISSION START/ })).toBeNull()
+    // The approved version can be started by the operator; the role rule says why.
+    const mission = await screen.findByRole('region', { name: 'Mission status' })
+    await waitFor(() => expect((within(mission).getByRole('button', { name: /START IN SIMULATION/ }) as HTMLButtonElement).disabled).toBe(false))
+    expect(within(mission).getByLabelText('Role rule').textContent).toBe('Role rule: A General approved version 1.')
+    fireEvent.click(within(mission).getByRole('button', { name: /START IN SIMULATION/ }))
+    fireEvent.click(within(await within(mission).findByRole('dialog')).getByRole('button', { name: 'START NOW' }))
+    await waitFor(() => expect(apiMock.startExecution).toHaveBeenCalledWith('deployment-1'))
+    fireEvent.click(await within(mission).findByRole('button', { name: /ABORT \(RETURN TO LAUNCH\)/ }))
+    await waitFor(() => expect(within(mission).getByRole('status', { name: 'Execution state' }).textContent).toBe('Returning to launch'), { timeout: 6000 })
 
     openTab('Attack Lab')
     expect(await screen.findByText('Operator accounts can view experiments but not create or edit them.')).toBeTruthy()

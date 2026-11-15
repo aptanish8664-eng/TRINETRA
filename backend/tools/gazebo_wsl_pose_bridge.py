@@ -29,6 +29,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--world", default="default", help="Gazebo world name")
     parser.add_argument("--forward-port", type=udp_port, default=14610, help="TRINETRA Gazebo UDP receiver port")
     parser.add_argument("--source-port", type=udp_port, default=14611, help="Fixed WSL UDP source port checked by the backend")
+    parser.add_argument("--additional-forward-port", type=udp_port, action="append", dest="additional_forward_ports",
+                        help="Optional second backend UDP receiver port; repeat to mirror the read-only pose stream "
+                             "(a trial backend can listen without taking the stream away from the main one)")
     parser.add_argument("--rate", type=rate_limit, default=10.0, help="Maximum forwarded snapshots per second")
     return parser
 
@@ -148,13 +151,19 @@ def parse_pose_message(message: str, *, world: str) -> dict | None:
     }
 
 
+def forward_targets(windows_host: str, primary_port: int, additional_ports: list[int] | None = None) -> tuple[tuple[str, int], ...]:
+    """Stable, deduplicated Windows UDP targets for one pose snapshot."""
+    ports = dict.fromkeys([primary_port, *(additional_ports or [])])
+    return tuple((windows_host, port) for port in ports)
+
+
 def run(args: argparse.Namespace) -> None:
     host = str(ipaddress.IPv4Address(args.windows_host))
     world = re.fullmatch(r"[A-Za-z0-9_-]{1,64}", args.world)
     if not world:
         raise ValueError("Gazebo world name contains invalid characters")
     topic = f"/world/{args.world}/pose/info"
-    target = (host, args.forward_port)
+    targets = forward_targets(host, args.forward_port, getattr(args, "additional_forward_ports", None))
     sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sender.bind(("0.0.0.0", args.source_port))
     minimum_interval = 1.0 / args.rate
@@ -181,7 +190,8 @@ def run(args: argparse.Namespace) -> None:
                 if snapshot is None:
                     continue
                 payload = json.dumps(snapshot, separators=(",", ":"), allow_nan=False).encode("utf-8")
-                sender.sendto(payload, target)
+                for target in targets:
+                    sender.sendto(payload, target)
                 forwarded += 1
                 last_sent = now
                 if now - last_report >= 10:

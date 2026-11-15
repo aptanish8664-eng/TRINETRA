@@ -200,3 +200,168 @@ def test_gazebo_server_is_detected_from_a_space_joined_process_title(tmp_path):
     only_gui.mkdir()
     _fake_proc(only_gui, 667, "gz", "sim", "-g")
     assert _manager.gazebo_server_running(only_gui) is False
+
+
+# --- adopted bridges must send where the backend listens -----------------------------------------------------------
+
+def _spawn_recorder(launched, pid=900):
+    class Alive:
+        returncode = None
+
+        def poll(self):
+            return None
+
+    def spawn(command, **kwargs):
+        launched.append(command)
+        process = Alive()
+        process.pid = pid
+        return process
+
+    return spawn
+
+
+def test_bridge_arguments_are_read_from_the_command_line_with_script_defaults(tmp_path):
+    _fake_proc(tmp_path, 11, "python3", str(_manager.TELEMETRY_BRIDGE_SCRIPT), "--windows-host", "172.23.80.1", "--forward-port", "14600",
+               "--additional-forward-port", "14620", "--additional-forward-port=14630", "--additional-forward-port", "14600", "--source-port", "14601")
+    _fake_proc(tmp_path, 12, "python3", str(_manager.POSE_BRIDGE_SCRIPT), "--windows-host", "172.23.80.1", "--world", "default", "--rate", "10")
+    assert _manager.bridge_arguments("telemetry", 11, tmp_path) == {"windows_host": "172.23.80.1", "forward_port": 14600, "source_port": 14601, "mirror_ports": [14620, 14630]}
+    assert _manager.bridge_arguments("pose", 12, tmp_path) == {"windows_host": "172.23.80.1", "forward_port": 14610, "source_port": 14611, "mirror_ports": []}
+    expected = {"forward_port": 14600, "source_port": 14601, "windows_host": "172.23.80.1"}
+    mirrored = _manager.bridge_arguments("telemetry", 11, tmp_path)
+    assert _manager.bridge_mismatches("telemetry", mirrored, expected) == []                           # mirrors are extra receivers, not a mismatch
+    assert _manager.bridge_mismatches("telemetry", mirrored, {**expected, "forward_port": 14620}) == []   # a mirror target counts as "sends to"
+    assert _manager.bridge_mismatches("telemetry", mirrored, {**expected, "forward_port": 14700}) == [
+        "PX4 telemetry bridge sends to 14600 and 14620 and 14630, expected 14700"]
+    adopted = _manager.ensure_bridge("telemetry", _manager.TELEMETRY_BRIDGE_SCRIPT, [], proc_root=tmp_path, expected=expected,
+                                     spawn=lambda *a, **k: (_ for _ in ()).throw(AssertionError("a mirrored bridge that sends to the right port is kept")))
+    assert adopted == {"status": "running", "pid": 11, "adopted": True, "mirror_ports": [14620, 14630]}
+    assert _manager.inspect_bridges(tmp_path)["telemetry"] == {"status": "running", "pid": 11, "mirror_ports": [14620, 14630]}
+    assert _manager.bridge_mismatches("pose", _manager.bridge_arguments("pose", 12, tmp_path), {"forward_port": 14610, "source_port": 14611, "windows_host": "172.23.80.1"}) == []
+
+
+def test_adopted_bridge_with_the_wrong_forward_port_is_restarted_with_the_expected_one(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    monkeypatch.setattr(_manager.os, "getuid", lambda: 1000, raising=False)
+    _fake_proc(tmp_path, 321, "python3", str(_manager.POSE_BRIDGE_SCRIPT), "--windows-host", "172.23.80.1", "--world", "default",
+               "--forward-port", "14612", "--source-port", "14611")
+    stopped, launched = [], []
+
+    def terminate(pid, still_running, grace_s=3.0):
+        stopped.append(pid)
+        import shutil
+        shutil.rmtree(tmp_path / str(pid))             # the process exits
+        return not still_running()
+
+    argv = ["--windows-host", "172.23.80.1", "--world", "default", "--forward-port", "14610", "--source-port", "14611"]
+    result = _manager.ensure_bridge("pose", _manager.POSE_BRIDGE_SCRIPT, argv, proc_root=tmp_path, settle_s=0.2, spawn=_spawn_recorder(launched),
+                                    expected={"forward_port": 14610, "source_port": 14611, "windows_host": "172.23.80.1"}, terminate=terminate)
+    assert stopped == [321] and len(launched) == 1 and launched[0][2:] == argv
+    assert result == {"status": "started", "pid": 900, "adopted": False, "restarted": True, "replaced": "Gazebo pose bridge sends to 14612, expected 14610"}
+
+
+def test_matching_bridge_is_still_adopted_and_a_stale_windows_host_counts_as_a_mismatch(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    monkeypatch.setattr(_manager.os, "getuid", lambda: 1000, raising=False)
+    _fake_proc(tmp_path, 400, "python3", str(_manager.TELEMETRY_BRIDGE_SCRIPT), "--windows-host", "172.23.80.1", "--forward-port", "14600", "--source-port", "14601")
+    forbidden = lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not touch a matching bridge"))
+    expected = {"forward_port": 14600, "source_port": 14601, "windows_host": "172.23.80.1"}
+    assert _manager.ensure_bridge("telemetry", _manager.TELEMETRY_BRIDGE_SCRIPT, [], proc_root=tmp_path, spawn=forbidden, expected=expected,
+                                  terminate=forbidden) == {"status": "running", "pid": 400, "adopted": True}
+    launched = []
+
+    def terminate(pid, still_running, grace_s=3.0):
+        import shutil
+        shutil.rmtree(tmp_path / str(pid))
+        return True
+
+    moved = _manager.ensure_bridge("telemetry", _manager.TELEMETRY_BRIDGE_SCRIPT, [], proc_root=tmp_path, settle_s=0.2, spawn=_spawn_recorder(launched),
+                                   expected={**expected, "windows_host": "172.29.0.1"}, terminate=terminate)
+    assert moved["restarted"] is True and moved["replaced"] == "PX4 telemetry bridge sends to Windows host 172.23.80.1, expected 172.29.0.1"
+
+
+def test_a_mismatched_bridge_that_cannot_be_restarted_says_exactly_what_is_wrong(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    monkeypatch.setattr(_manager.os, "getuid", lambda: 1000, raising=False)
+    _fake_proc(tmp_path, 321, "python3", str(_manager.POSE_BRIDGE_SCRIPT), "--windows-host", "172.23.80.1", "--forward-port", "14612")
+    expected = {"forward_port": 14610, "source_port": 14611, "windows_host": "172.23.80.1"}
+    forbidden = lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not start a second bridge beside one that is still running"))
+    stuck = _manager.ensure_bridge("pose", _manager.POSE_BRIDGE_SCRIPT, [], proc_root=tmp_path, spawn=forbidden, expected=expected,
+                                   terminate=lambda pid, still_running, grace_s=3.0: False)
+    assert stuck["status"] == "failed" and stuck["pid"] == 321 and stuck["mismatch"] == ["Gazebo pose bridge sends to 14612, expected 14610"]
+    assert stuck["detail"] == "Gazebo pose bridge sends to 14612, expected 14610. The running bridge (pid 321) could not be stopped, so it was not restarted."
+
+    class Dead:
+        pid = 778
+        returncode = 1
+
+        def poll(self):
+            return 1
+
+    def terminate(pid, still_running, grace_s=3.0):
+        import shutil
+        shutil.rmtree(tmp_path / str(pid))
+        return True
+
+    dead = _manager.ensure_bridge("pose", _manager.POSE_BRIDGE_SCRIPT, [], proc_root=tmp_path, settle_s=0.2, spawn=lambda *a, **k: Dead(),
+                                  expected=expected, terminate=terminate)
+    assert dead["status"] == "failed" and dead["detail"].startswith("Gazebo pose bridge sends to 14612, expected 14610. It was stopped but the replacement did not start: ")
+
+
+def test_status_reports_a_mismatched_bridge_without_restarting_it(tmp_path):
+    _fake_proc(tmp_path, 321, "python3", str(_manager.POSE_BRIDGE_SCRIPT), "--windows-host", "172.23.80.1", "--forward-port", "14612", "--source-port", "14611")
+    _fake_proc(tmp_path, 322, "python3", str(_manager.TELEMETRY_BRIDGE_SCRIPT), "--windows-host", "172.23.80.1", "--forward-port", "14600", "--source-port", "14601")
+    state = _manager.inspect_bridges(tmp_path)
+    assert state["telemetry"] == {"status": "running", "pid": 322}
+    assert state["pose"]["status"] == "mismatch" and state["pose"]["forward_port"] == 14612
+    assert state["pose"]["detail"] == "Gazebo pose bridge sends to 14612, expected 14610. Activate and verify restarts it."
+    assert (tmp_path / "321").exists()
+
+
+def test_verification_table_names_the_bridge_problem_instead_of_an_unexplained_pending():
+    from app.fleet_routes import build_activation_checks, classify_activation_failure
+    rows = [{"aircraft_id": "px4-1", "verified": False, "px4_status": "connected", "gazebo_status": "not_seen"}]
+    common = {"wsl_address": "172.23.85.230", "windows_host": "172.23.80.1", "gazebo_server": "running",
+              "instances": [{"status": "process_present"}]}
+    receivers, ips = {"px4": True, "gazebo": True}, {"px4": "172.23.85.230", "gazebo": "172.23.85.230"}
+    wrong = "Gazebo pose bridge sends to 14612, expected 14610"
+    stuck = {**common, "failure": f"pose bridge: {wrong}. The running bridge (pid 321) could not be stopped, so it was not restarted.", "failure_code": "bridge_start_failed",
+             "bridges": {"telemetry": {"status": "running", "pid": 1, "adopted": True},
+                         "pose": {"status": "failed", "pid": 321, "mismatch": [wrong], "detail": f"{wrong}. The running bridge (pid 321) could not be stopped, so it was not restarted."}}}
+    checks = build_activation_checks(1, stuck, rows, receivers=receivers, configured_ips=ips)
+    assert checks["pose_bridge"]["status"] == "failed" and wrong in checks["pose_bridge"]["detail"]
+    assert checks["verification"]["status"] == "blocked" and checks["verification"]["detail"].startswith("0 of 1 UAV(s) have PX4 telemetry and a Gazebo pose. Cause: " + wrong)
+    status, code, message = classify_activation_failure(1, stuck, checks, final=True)
+    assert (status, code) == (502, "bridge_start_failed") and wrong in message
+
+    seen = {**common, "bridges": {"telemetry": {"status": "running", "pid": 1}, "pose": {"status": "mismatch", "pid": 321, "mismatch": [wrong], "detail": f"{wrong}. Activate and verify restarts it."}}}
+    checks = build_activation_checks(1, seen, rows, receivers=receivers, configured_ips=ips)
+    assert checks["verification"]["status"] == "blocked" and wrong in checks["verification"]["detail"]
+    assert classify_activation_failure(1, seen, checks, final=False) == (502, "bridge_port_mismatch", f"{wrong}. Activate and verify restarts it.")
+
+    fixed = {**common, "bridges": {"telemetry": {"status": "running", "pid": 1, "adopted": True},
+                                   "pose": {"status": "started", "pid": 900, "adopted": False, "restarted": True, "replaced": wrong}}}
+    checks = build_activation_checks(1, fixed, rows, receivers=receivers, configured_ips=ips)
+    assert checks["pose_bridge"] == {"status": "started", "detail": f"Bridge restarted by the manager because it was misconfigured: {wrong}."}
+    assert checks["verification"]["status"] == "pending" and "Cause" not in checks["verification"]["detail"]      # genuinely waiting for the first pose
+    assert classify_activation_failure(1, fixed, checks, final=False) is None
+
+
+def test_pose_bridge_can_mirror_so_a_trial_backend_does_not_take_the_stream_away():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("pose_bridge_mirror", Path(__file__).parents[1] / "tools" / "gazebo_wsl_pose_bridge.py")
+    pose = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(pose)
+    args = pose.build_parser().parse_args(["--windows-host", "172.23.80.1", "--additional-forward-port", "14612", "--additional-forward-port", "14610"])
+    assert args.forward_port == 14610 and args.additional_forward_ports == [14612, 14610]
+    assert pose.forward_targets("172.23.80.1", args.forward_port, args.additional_forward_ports) == (("172.23.80.1", 14610), ("172.23.80.1", 14612))
+    assert pose.forward_targets("172.23.80.1", 14610) == (("172.23.80.1", 14610),)
+
+
+def test_mirror_ports_are_shown_in_the_bridge_check_without_blocking_verification():
+    from app.fleet_routes import build_activation_checks
+    rows = [{"aircraft_id": "px4-1", "verified": True, "px4_status": "connected", "gazebo_status": "connected"}]
+    result = {"wsl_address": "172.23.85.230", "windows_host": "172.23.80.1", "gazebo_server": "running", "instances": [{"status": "process_present"}],
+              "bridges": {"telemetry": {"status": "running", "pid": 1, "adopted": True, "mirror_ports": [14620]}, "pose": {"status": "running", "pid": 2, "adopted": True}}}
+    checks = build_activation_checks(1, result, rows, receivers={"px4": True, "gazebo": True}, configured_ips={"px4": "172.23.85.230", "gazebo": "172.23.85.230"})
+    assert checks["telemetry_bridge"] == {"status": "running", "detail": "Bridge process already running (adopted). It also mirrors to 14620 (another receiver)."}
+    assert checks["verification"]["status"] == "ok"

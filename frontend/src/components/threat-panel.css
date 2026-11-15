@@ -33,4 +33,17 @@
 .threat-part{display:grid;gap:8px;min-width:0;align-content:start}
 .threat-monitor .threat-cards{grid-template-columns:minmax(0,1fr)}
 @container (min-width: 640px){.threat-body{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}}
-.threat-monitor .threat-card{container-type:inline-size;min-height:200px}
+.threat-monitor .threat-card{container-type:inline-size}
+/* Idle: one slim line, never an empty box. */
+.threat-monitor.idle{padding-bottom:0}
+.threat-monitor.idle .panel-heading{flex-wrap:wrap;gap:6px 14px}
+.threat-waiting{display:flex;flex-wrap:wrap;align-items:center;gap:4px 12px;margin:0;min-width:0;font-size:12px}
+.threat-waiting span{color:var(--ice)}.threat-waiting small{color:var(--muted)}
+.threat-waiting button,.threat-hide{min-height:24px;padding:0 8px;font:10px var(--mono)}
+.threat-hide{margin-left:10px}
+.threat-live-item{display:grid;gap:6px;min-width:0}
+.threat-live-note{margin:0;padding:8px 12px;border:1px solid var(--border);border-radius:4px;background:var(--bg2);font-size:12px;color:var(--muted)}
+.threat-live-note b{color:var(--text);margin-right:6px}
+.threat-live-note.amber{border-color:var(--amber);color:var(--text);background:rgba(255,190,85,.08)}
+.threat-live-note ul{margin:6px 0 0;padding-left:16px;display:grid;gap:4px}
+.threat-rule{margin:0;color:var(--muted);font-size:11px}

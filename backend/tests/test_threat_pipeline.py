@@ -14,19 +14,7 @@ from app.research.threat_data import FEATURE_COLUMNS, HZ, compute_features, gene
 from app.research.threat_models import ThreatModel, train_pipeline
 
 
-@pytest.fixture(scope="session")
-def trained(tmp_path_factory):
-    root = tmp_path_factory.mktemp("threat")
-    manifest = generate_dataset(root / "dataset", seed=11, flights_per_cell=8)
-    metrics = train_pipeline(root / "dataset", root / "artifacts", seed=11)
-    return {"root": root, "manifest": manifest, "metrics": metrics, "artifacts": root / "artifacts", "dataset": root / "dataset"}
-
-
-@pytest.fixture
-def model_dir(trained, monkeypatch):
-    from app import research_routes
-    monkeypatch.setattr(research_routes, "model_dir", trained["artifacts"])
-    return trained["artifacts"]
+# `trained` and `model_dir` live in conftest.py (shared with test_live_threat.py so the model is trained once).
 
 
 # --- data design ---------------------------------------------------------------------------------------------
@@ -231,12 +219,12 @@ def test_decisions_are_recorded_not_executed(model_dir, general_client, operator
     assert saved.json()["executed"] is False and saved.json()["username"] and saved.json()["action"] == "increase_monitoring"
     assert client.post("/api/research/decisions", json={**base, "action": "handover_to_standby"}).status_code == 422
     handover = client.post("/api/research/decisions", json={**base, "action": "handover_to_standby", "handover_candidate": "px4-2"})
-    assert handover.status_code == 201 and handover.json()["handover_candidate"] == "px4-2"
+    assert handover.status_code == 409 and handover.json()["detail"]["code"] == "handover_battery_unknown"   # the server cannot check the battery
     assert client.post("/api/research/decisions", json={**base, "handover_candidate": "px4-2"}).status_code == 422
     assert client.post("/api/research/decisions", json={**base, "attack_schedule": []}).status_code == 422
     assert operator.post("/api/research/decisions", json={**base, "action": "continue_monitor"}).status_code == 201
     listed = client.get("/api/research/decisions").json()["decisions"]
-    assert [item["action"] for item in listed][:3] == ["continue_monitor", "handover_to_standby", "increase_monitoring"]
+    assert [item["action"] for item in listed][:2] == ["continue_monitor", "increase_monitoring"]
     from fastapi.testclient import TestClient
     from app.main import app
     assert TestClient(app).post("/api/research/decisions", json=base).status_code in (401, 403)

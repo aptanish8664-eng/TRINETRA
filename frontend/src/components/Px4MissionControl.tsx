@@ -9,14 +9,16 @@ import { GazeboPoseMirror } from './GazeboPoseMirror'
 import { MapErrorBoundary } from './MapErrorBoundary'
 import { ThreatMonitor } from './ThreatMonitor'
 import { SimulationLocationNotice } from './SimulationLocationNotice'
+import { MissionExecutionPanel } from './MissionExecutionPanel'
+import type { ExecutionEvent } from '../services/api'
 import type { Tier } from './attackLabTypes'
 import { mergePx4TelemetryStream } from '../services/telemetryStreams'
 import {
   AircraftCards, AlertsPanel, BatteryPanel, DetailDrawer, FlightLog, GazeboPanel, HandoffsPanel, HeaderStrip, MapToolbar,
-  MissionStatus, SystemStatus, type ChipState, type StatusChip,
+  SystemStatus, type ChipState, type StatusChip,
 } from './MissionControlPanels'
 import {
-  type Alert, THRESHOLDS, buildAircraftRows, buildMissionOverlay, deploymentPlan, deriveAlerts, diffObservations, isLegacyDeployment, systemIdForGazeboModel, type FleetPayload, type HealthPayload, type LogEntry, type Observed,
+  type Alert, THRESHOLDS, buildAircraftRows, buildMissionOverlay, deploymentPlan, deriveAlerts, diffObservations, executionLogEntries, isLegacyDeployment, mergeLog, systemIdForGazeboModel, type FleetPayload, type HealthPayload, type LogEntry, type Observed,
 } from './missionControlModel'
 import './px4-mission-control.css'
 import './mission-control-dashboard.css'
@@ -72,6 +74,7 @@ export function Px4MissionControl({ notice = '', onDismissNotice, onOpenScenario
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [error, setError] = useState('')
   const [deployment, setDeployment] = useState<MissionDeployment | null>(null)
+  const [deploymentLoaded, setDeploymentLoaded] = useState(false)
   const [layers, setLayers] = useState<MapLayers>(DEFAULT_LAYERS)
   const [basemap, setBasemap] = useState<Basemap>(readLiveBasemap)  // stored choice, otherwise the street default
   const chooseBasemap = (next: Basemap) => { setBasemap(next); storeLiveBasemap(next) }
@@ -79,6 +82,8 @@ export function Px4MissionControl({ notice = '', onDismissNotice, onOpenScenario
   const [fitSignal, setFitSignal] = useState(0)
   const [acknowledged, setAcknowledged] = useState<Set<string>>(new Set())
   const [log, setLog] = useState<LogEntry[]>([])
+  const [executionLog, setExecutionLog] = useState<LogEntry[]>([])
+  const addExecutionEvents = useCallback((events: ExecutionEvent[]) => setExecutionLog(current => mergeLog(current, executionLogEntries(events))), [])
   const previousObserved = useRef<Observed | null>(null)
   const [threatAlerts, setThreatAlerts] = useState<Alert[]>([])
   const [threatTiers, setThreatTiers] = useState<Record<string, Tier>>({})
@@ -158,7 +163,7 @@ export function Px4MissionControl({ notice = '', onDismissNotice, onOpenScenario
 
   useEffect(() => {
     let active = true
-    void api.latestMissionDeployment().then(value => { if (active) setDeployment(value) }).catch(() => { if (active) setDeployment(null) })
+    void api.latestMissionDeployment().then(value => { if (active) setDeployment(value) }).catch(() => { if (active) setDeployment(null) }).finally(() => { if (active) setDeploymentLoaded(true) })
     return () => { active = false }
   }, [])
 
@@ -215,7 +220,7 @@ export function Px4MissionControl({ notice = '', onDismissNotice, onOpenScenario
   return <section className="mc-dashboard" aria-label="Live PX4 mission control">
     {notice && <div className="mc-deploy-notice" role="status"><CheckCircle2 size={15}/><span>{notice}</span>
       {onDismissNotice && <button type="button" onClick={onDismissNotice}>DISMISS</button>}</div>}
-    <HeaderStrip deployment={deployment} chips={chips} onOpenScenarioLab={onOpenScenarioLab}/>
+    <HeaderStrip deployment={deployment} loading={!deploymentLoaded} chips={chips} onOpenScenarioLab={onOpenScenarioLab}/>
     {error && <div className="px4-inline-error" role="status"><AlertTriangle size={15}/>{error}</div>}
     {/* Where the simulated aircraft is relative to the deployed mission; the restart is always an explicit, confirmed action. */}
     {deployment && !isLegacyDeployment(deployment) && <section className="panel mc-location" aria-label="Mission location">
@@ -237,15 +242,18 @@ export function Px4MissionControl({ notice = '', onDismissNotice, onOpenScenario
       </section>
       <div className="mc-rail mc-rail-right">
         <AlertsPanel alerts={alerts} acknowledged={acknowledged} onAcknowledge={id => setAcknowledged(current => new Set(current).add(id))}/>
-        <MissionStatus deployment={deployment} rows={rows}/>
-        <HandoffsPanel/>
+        <MissionExecutionPanel deployment={deployment} rows={rows} onEvents={addExecutionEvents}/>
       </div>
     </div>
 
     <ThreatMonitor canRecord onTierTransitions={addThreatAlerts} onTiers={setThreatTiers}/>
 
     <div className="mc-lower">
-      <FlightLog entries={log}/>
+      {/* The log and the (rarely filled) reassignments list share one column beside the tall Gazebo panel. */}
+      <div className="mc-lower-stack">
+        <FlightLog entries={mergeLog(log, executionLog)}/>
+        <HandoffsPanel/>
+      </div>
       <GazeboPanel rows={rows} snapshot={gazebo.value} error={gazebo.failed ? 'Gazebo pose data could not be read from the backend.' : ''}>
       <GazeboPoseMirror
         selectedModel={selectedRow?.gazeboModel ?? null}

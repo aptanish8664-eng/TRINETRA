@@ -120,6 +120,12 @@ export interface Experiment extends ExperimentInput {
   note: string
   created_at: string
   updated_at: string
+  /** Result storage rules, computed by the backend. */
+  latest_version_id?: string | null
+  result_count?: number
+  has_results?: boolean
+  edit_mode?: 'in_place' | 'copy'
+  delete_keeps_results?: boolean
 }
 export interface ExperimentIssue { code: string; message: string; field?: string | null }
 
@@ -137,8 +143,11 @@ export const TIERS: Tier[] = ['Low', 'Medium', 'High', 'Critical']
 export type ActionId = 'continue_monitor' | 'increase_monitoring' | 'dead_reckoning_fallback' | 'isolate_aircraft' | 'handover_to_standby' | 'return_to_launch'
 export interface ActionRow { action: ActionId; label: string; reason: string; tradeoff: string; eligible: boolean; rank: number; rank_score: number }
 export interface HandoverCandidate {
-  aircraft_id: string; role: string; battery_pct: number; distance_to_task_m: number; workload: number
+  aircraft_id: string
+  /** null = unavailable. Live telemetry has no source for the distance to the task or the workload, and may lack a battery or role. */
+  role: string | null; battery_pct: number | null; distance_to_task_m: number | null; workload: number | null
   eligible: boolean; ineligible_reason: string | null; score: number
+  battery_known?: boolean; distance_known?: boolean; workload_known?: boolean; role_known?: boolean
 }
 export interface EvidenceItem { feature: string; value: number; reference: number; unit: string; times_normal: number; text: string }
 export interface Assessment {
@@ -156,6 +165,11 @@ export interface Assessment {
   model_id: string
   held?: boolean
   hold_s?: number
+  /** Live assessments only. */
+  source?: 'live_telemetry'
+  computed_at?: string
+  px4_time_s?: number
+  flight_time_s?: number
 }
 export interface DecisionRecord {
   id: string; username: string; aircraft_id: string; action: ActionId; handover_candidate: string | null
@@ -179,6 +193,30 @@ export interface ReplayEvaluation {
   }[]
   not_measured: Record<string, string>
 }
+/** The handover battery rule. The backend enforces it when a decision is recorded; the UI only shows it. */
+export interface HandoverRule { min_battery_pct: number; enforced_by: 'server'; message: string }
+export interface MissingInput { input: string; title: string; meaning: string; detail: string; required: boolean }
+/** landed: disarmed after an assessed flight (last assessment with its age). link_lost: the link dropped in flight. offline: nothing to show. */
+export type LiveState = 'idle' | 'warming_up' | 'live' | 'inputs_missing' | 'link_lost' | 'landed' | 'offline' | 'model_unavailable'
+export interface LiveDataQuality {
+  clock: string; sample_hz: number; gps_delay_s: number; velocity: string; window_samples: number; window_seconds: number
+  velocity_reference: string; velocity_reference_note: string; flags: string[]
+  estimator: { velocity_test_ratio: number | null; horizontal_position_test_ratio: number | null; horizontal_position_accuracy_m: number | null; flags: number } | null
+  vibration: { vibration_m_s2: (number | null)[]; accelerometer_clipping: number[] } | null
+}
+export interface LiveAircraft {
+  aircraft_id: string; armed: boolean; role: string; role_source: 'deployed_plan' | 'assumed_primary'; state: LiveState
+  link: { status: 'connected' | 'stale' | 'disconnected'; telemetry_age_s: number | null; heartbeat_age_s: number | null }
+  flight_mode: string | null; rates_hz: Record<string, number | null>; missing_inputs: MissingInput[]
+  assessment: Assessment | null; assessment_age_s: number | null; landed_age_s?: number | null; battery_pct?: number | null
+  warming_up: { seconds_collected: number; seconds_needed: number } | null; data_quality: LiveDataQuality | null
+}
+/** GET /api/research/live: computed on the backend from its own telemetry buffer (the request has no body). */
+export interface LiveThreat {
+  source: 'live_telemetry'; generated_at: string; model_available: boolean; flight_running: boolean; update_interval_s: number
+  handover_rule: HandoverRule; aircraft: LiveAircraft[]; input_help?: MissingInput[]; unavailable_reason?: string
+}
+
 export interface ModelInfo {
   available: boolean
   reason?: string
@@ -188,9 +226,32 @@ export interface ModelInfo {
   test_metrics?: Record<string, number | null>
   limits?: string[]
   live_residual_inputs_available?: boolean
+  handover_rule?: HandoverRule
   min_battery_pct_default?: number
   sample_hz?: number
 }
 
 /** Tier colours are paired with the tier name everywhere; colour is never the only signal. */
 export const TIER_COLORS: Record<Tier, string> = { Low: '#56e3b1', Medium: '#f5b94c', High: '#ff9d5c', Critical: '#ff4d5a' }
+
+/**
+ * Threat Monitor help, shared by the assistant and the docs. The input names and meanings mirror `INPUT_LABELS` / `INPUT_MEANINGS` in
+ * backend/app/research/live_inputs.py (the backend also serves them in GET /api/research/live as `input_help`; a backend test checks they match).
+ */
+export const THREAT_MONITOR_INPUTS: { input: string; title: string; required: boolean; meaning: string }[] = [
+  { input: 'gps_position', title: 'GPS position (GPS_RAW_INT)', required: true, meaning: 'No fresh GPS fix is arriving, so there is no position to check. No score is shown.' },
+  { input: 'gps_velocity', title: 'GPS speed and course (GPS_RAW_INT vel/cog)', required: true, meaning: 'The receiver is not reporting speed or course, so GPS velocity cannot be compared with the estimator. No score is shown.' },
+  { input: 'estimator_velocity', title: 'Estimator velocity (LOCAL_POSITION_NED)', required: true, meaning: "PX4's velocity estimate is not arriving, so GPS cannot be compared with an inertial reference. No score is shown." },
+  { input: 'imu', title: 'IMU (HIGHRES_IMU)', required: false, meaning: 'Raw IMU samples are not arriving. The score is still computed, but IMU data quality cannot be reported.' },
+  { input: 'estimator_status', title: 'Estimator status (ESTIMATOR_STATUS)', required: false, meaning: "PX4's estimator health report is not arriving. The score is still computed, without the estimator's own test ratios." },
+  { input: 'vibration', title: 'Vibration (VIBRATION)', required: false, meaning: "PX4's vibration report is not arriving. The score is still computed, without the vibration check." },
+  { input: 'battery', title: 'Battery (SYS_STATUS / BATTERY_STATUS)', required: false, meaning: 'No battery reading. The score is still computed; mission impact assumes a full battery.' },
+]
+export const THREAT_MONITOR_STATES: { state: string; text: string }[] = [
+  { state: 'Waiting for a flight', text: 'No aircraft is armed. The monitor is one slim line (with a link to the last offline replay, if there is one) and shows no score.' },
+  { state: 'Collecting data', text: 'An aircraft is flying but the first 10 seconds of aligned data are still being collected.' },
+  { state: 'Live', text: 'The backend scores each flying aircraft about once a second from PX4 telemetry: threat score (0-100, not a probability), tier (Low, Medium, High, Critical), spoofing confidence, severity, mission impact and the signals that contributed. With no attack the tier stays Low.' },
+  { state: 'Input missing (amber)', text: 'A required input has stopped arriving. The monitor names it and shows no score rather than guessing.' },
+  { state: 'Link lost', text: 'No telemetry from the aircraft. It is marked STALE with the age of the last assessment, and that number is not updated.' },
+]
+export const THREAT_MONITOR_START_STEPS = 'To get a live assessment: save a mission in Scenario Lab, deploy it to Mission Control, make sure the simulated fleet is verified, then press START IN SIMULATION in Mission Control. The Threat Monitor switches from "Waiting for a flight" to collecting data (about 10 s) and then to live scores. Attack Lab experiments are not run yet, so no attack is applied to a live flight.'

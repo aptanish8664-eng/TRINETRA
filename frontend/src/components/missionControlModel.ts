@@ -151,7 +151,7 @@ export type HealthPayload = {
 }
 export interface FleetPayload {
   manager_error: string | null
-  bridges?: { telemetry?: { status: string }; pose?: { status: string } } | null
+  bridges?: { telemetry?: { status: string; detail?: string }; pose?: { status: string; detail?: string } } | null
   gazebo_server?: string | null
   verified_count: number
 }
@@ -188,6 +188,8 @@ export function deriveAlerts({ rows, health, healthError, fleet, fleetError, str
   if (fleet?.manager_error) alerts.push({ id: 'fleet:manager', severity: 'warning', source: 'fleet manager', message: `WSL fleet manager: ${fleet.manager_error}` })
   for (const [key, label] of [['telemetry', 'PX4 telemetry bridge'], ['pose', 'Gazebo pose bridge']] as const) {
     if (fleet?.bridges?.[key]?.status === 'not_running') alerts.push({ id: `bridge:${key}`, severity: 'warning', source: label, message: `${label} is not running.` })
+    // A bridge left sending to another port (for example by a trial) explains missing telemetry or poses: show the manager's exact words.
+    if (fleet?.bridges?.[key]?.status === 'mismatch') alerts.push({ id: `bridge:${key}:mismatch`, severity: 'warning', source: label, message: fleet.bridges[key]?.detail ?? `${label} sends to an unexpected port.` })
   }
   if (streamStatus === 'offline') alerts.push({ id: 'stream:offline', severity: 'warning', source: 'telemetry stream', message: 'The telemetry stream is offline; the browser is retrying.' })
   for (const row of rows) {
@@ -223,7 +225,19 @@ export interface Observed {
   verifiedCount: number | null
   vehicles: Record<string, string>
 }
-export interface LogEntry { key: string; time: string; message: string; kind: 'deployment' | 'fleet' | 'link' | 'health' }
+export interface LogEntry { key: string; time: string; message: string; kind: 'deployment' | 'fleet' | 'link' | 'health' | 'execution' }
+
+/** Flight-log rows for backend execution events (start, upload, arm, take-off, waypoints, simulated payload release, final state). */
+export function executionLogEntries(events: { id: number; type: string; message: string; occurred_at: string; actor_name?: string | null }[]): LogEntry[] {
+  return events.map(event => ({ key: `execution:${event.id}`, time: event.occurred_at, message: event.message, kind: 'execution' as const }))
+}
+
+/** One chronological log: backend execution events and the transitions this browser observed. */
+export function mergeLog(session: LogEntry[], execution: LogEntry[], limit: number = THRESHOLDS.logLimit): LogEntry[] {
+  const seen = new Set<string>()
+  return [...session, ...execution].filter(entry => (seen.has(entry.key) ? false : (seen.add(entry.key), true)))
+    .sort((a, b) => Date.parse(a.time) - Date.parse(b.time)).slice(-limit)
+}
 
 /** Real observed transitions only; the first observation is a baseline (plus the deployment, if any), never a synthetic event. */
 export function diffObservations(previous: Observed | null, next: Observed, time: string): LogEntry[] {
@@ -273,4 +287,33 @@ export function explainSitlStartup(status: string, detail?: string): string {
     return `Fleet startup failed: when the backend started it tried to start one PX4/Gazebo aircraft by itself, and that did not work.${reason} This describes backend start-up only. Use Activate and verify in Scenario Lab to start and check the aircraft now.`
   }
   return `Fleet startup degraded: when the backend started, its automatic start of one PX4/Gazebo aircraft did not end with a fully verified aircraft (process, telemetry and Gazebo pose).${reason} This describes backend start-up only, not the current state: if "Verified aircraft" shows the aircraft, nothing is wrong now. Otherwise use Activate and verify in Scenario Lab.`
+}
+
+/** Same sentence the backend refuses with (backend/app/mission_execution/ground.py). */
+export const IN_THE_AIR = 'In the air: abort (return to launch) first; it disarms itself after landing.'
+const FLYING_EXECUTION_STATES = ['executing', 'pausing', 'paused', 'resuming', 'returning', 'failsafe']
+export interface DisarmView { allowed: boolean; reason: string; armed: boolean; onGround: boolean; armedOnGround: boolean }
+
+/**
+ * Whether a normal disarm may be offered, from live telemetry only: PX4's armed flag, and "on the ground" = relative altitude under
+ * 1.5 m and ground speed under 0.7 m/s (the same rule as the backend and the start pre-check; the landed state is not in the
+ * telemetry feed). The backend repeats every check, and PX4 refuses an unsafe normal disarm on its own.
+ */
+export function disarmState(row: AircraftRow | null, execution: { active: boolean; state: string; aircraft_id: string } | null): DisarmView {
+  const vehicle = row?.vehicle ?? null
+  const altitude = vehicle?.position?.relative_altitude_m
+  const speed = vehicle?.velocity?.ground_speed_m_s
+  const connected = vehicle?.status === 'connected'
+  const armed = connected && vehicle?.armed === true
+  const onGround = connected && typeof altitude === 'number' && Math.abs(altitude) < 1.5 && (typeof speed !== 'number' || speed < 0.7)
+  const view = (allowed: boolean, reason: string): DisarmView => ({ allowed, reason, armed, onGround, armedOnGround: armed && onGround })
+  if (!row || !vehicle || !connected) return view(false, 'No telemetry from the aircraft, so its armed state is unknown.')
+  if (vehicle.armed === false) return view(false, 'The aircraft is already disarmed.')
+  if (vehicle.armed !== true) return view(false, 'PX4 has not reported whether the aircraft is armed.')
+  if (execution?.active && execution.aircraft_id === row.id) {
+    return view(false, FLYING_EXECUTION_STATES.includes(execution.state) ? IN_THE_AIR : `A run is ${execution.state} on this aircraft. Wait for it, or abort it first.`)
+  }
+  if (typeof altitude !== 'number') return view(false, "The aircraft's altitude is unknown, so it cannot be confirmed on the ground.")
+  if (!onGround) return view(false, IN_THE_AIR)
+  return view(true, '')
 }

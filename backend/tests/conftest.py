@@ -139,3 +139,21 @@ def remove_test_database():
         engine.dispose()
     finally:
         shutil.rmtree(TEST_DB_DIR, ignore_errors=True)
+
+
+@pytest.fixture(scope="session")
+def trained(tmp_path_factory):
+    """A small trained threat model (synthetic data), shared by the threat pipeline and live threat tests."""
+    from app.research.threat_data import generate_dataset
+    from app.research.threat_models import train_pipeline
+    root = tmp_path_factory.mktemp("threat")
+    manifest = generate_dataset(root / "dataset", seed=11, flights_per_cell=8)
+    metrics = train_pipeline(root / "dataset", root / "artifacts", seed=11)
+    return {"root": root, "manifest": manifest, "metrics": metrics, "artifacts": root / "artifacts", "dataset": root / "dataset"}
+
+
+@pytest.fixture
+def model_dir(trained, monkeypatch):
+    from app import research_routes
+    monkeypatch.setattr(research_routes, "model_dir", trained["artifacts"])
+    return trained["artifacts"]

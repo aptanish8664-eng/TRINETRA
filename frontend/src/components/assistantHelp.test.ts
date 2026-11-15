@@ -40,6 +40,10 @@ describe('assistant help on the schema-2 model', () => {
   })
 
   it('explains every task type, the payload drop-off and the new fields from shared specs', () => {
+    expect(explainTopic('what does the live threat monitor show?')).toMatch(/Waiting for a flight: .*Collecting data: .*Live: .*Input missing \(amber\): .*Link lost: .*not a probability/)
+    expect(explainTopic('what does input missing mean?')).toMatch(/Estimator velocity \(LOCAL_POSITION_NED\) \(required\): PX4's velocity estimate is not arriving/)
+    expect(explainTopic('explain the vibration input')).toMatch(/Vibration \(VIBRATION\) \(optional\)/)
+    expect(explainTopic('how do I start a flight?')).toMatch(/START IN SIMULATION/)
     expect(explainTopic('what is a coverage survey?')).toMatch(/Parallel tracks/)
     expect(explainTopic('explain payload_dropoff')).toMatch(/payload_released event/)
     expect(explainTopic('what is expanding square search')).toMatch(/square spiral/)

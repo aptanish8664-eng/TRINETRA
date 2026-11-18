@@ -1,0 +1,54 @@
+/* A sober defence-programme look for the Overview and the shared header and footer: restrained navy and steel, the existing cyan only as an accent,
+   2 px corners, 1 px rules, uppercase tracked monospace labels, numbered sections, tabular figures and calm motion (no glow, no bounce).
+   It does not copy or imitate any real organisation: no crests, roundels, government logos or classification marks. */
+:root {
+  --rule: rgba(140, 170, 195, .28);
+  --rule-strong: rgba(150, 185, 210, .45);
+  --navy-950: #040b14; --navy-900: #06101a; --navy-800: #0a1623;
+  --steel-100: #e6eff6; --steel-300: #b3c4d2; --steel-500: #8ea6b8;
+}
+.topbar, .footer, .overview-page { font-variant-numeric: tabular-nums; --card-radius: 2px; }
+
+/* shared header */
+.topbar { background: var(--navy-900); backdrop-filter: none; border-bottom: 1px solid var(--rule); }
+.brand-button { background: none; border: 0; padding: 0; cursor: pointer; display: flex; align-items: center; }
+.brand-lockup { display: inline-flex; align-items: center; line-height: 0; }
+.brand-lockup .brand-img { display: block; max-width: none; }
+.main-nav button { font: 500 10px var(--mono); letter-spacing: .13em; text-transform: uppercase; color: #9fb3c3; border-bottom-width: 1px; }
+.main-nav button.active { color: var(--steel-100); border-bottom-color: var(--cyan); }
+.connection-pill { border-radius: 2px; }
+.access-nav-button, .icon-button { border-radius: 2px; }
+
+/* shared footer */
+.footer { background: var(--navy-950); border-top: 1px solid var(--rule); color: var(--steel-500); font-size: 9px; letter-spacing: .1em; text-transform: uppercase; }
+.footer .brand-img { height: 24px !important; }
+
+/* programme strip: fixed under the header on the Overview */
+.programme-strip { position: sticky; top: var(--topbar-h, 74px); z-index: 25; display: flex; justify-content: center; align-items: center; gap: 14px; height: 24px; background: rgba(3, 9, 17, .94); border-bottom: 1px solid var(--rule); color: var(--steel-300); font: 500 9px var(--mono); letter-spacing: .24em; text-transform: uppercase; }
+.programme-strip i { font-style: normal; color: var(--steel-500); }
+
+/* hero and sections */
+.overview-page .hero-content { background: rgba(4, 11, 20, .9); border: 1px solid var(--rule-strong); border-radius: 2px; }
+.overview-page .hero h1 { font-weight: 600; letter-spacing: -.02em; line-height: 1.04; }
+.overview-page .hero h1 em { color: var(--steel-100); font-style: normal; border-bottom: 2px solid var(--cyan); }
+.overview-page .hero-kicker, .overview-page .eyebrow { font: 500 10px var(--mono); letter-spacing: .2em; text-transform: uppercase; color: var(--steel-300); }
+.overview-page .hero-descriptor { font: 500 11px var(--mono); letter-spacing: .22em; color: var(--steel-300); }
+.overview-page .live-dot { box-shadow: none; }
+.overview-page .cta-glow { display: none; }
+.overview-page .hero-copy, .overview-page p { color: var(--steel-300); }
+.overview-page h2 { font-weight: 600; letter-spacing: -.015em; }
+.overview-page .button-primary { background: var(--cyan); border-color: var(--cyan); box-shadow: none; color: #04121c; border-radius: 2px; }
+.overview-page .button-primary:hover { transform: none; background: #8be5fb; }
+.overview-page .button-quiet, .overview-page .button-secondary { border-radius: 2px; }
+.overview-page .story-beat, .overview-page .fleet-tile, .overview-page .story-graphic { border-radius: 2px; }
+.overview-page .story-index { color: var(--steel-300); font: 500 11px var(--mono); letter-spacing: .14em; }
+
+/* numbered sections (01, 02, 03) */
+.overview-page .sec { counter-increment: section; }
+.overview-page .sec::after { content: 'SECTION ' counter(section, decimal-leading-zero); position: absolute; top: 14px; right: 18px; font: 500 10px var(--mono); letter-spacing: .22em; color: var(--steel-500); pointer-events: none; }
+.overview-page .overview-cta.sec::after { top: 18px; right: max(var(--page-gutter), calc((100% - var(--page-width)) / 2)); }
+.overview-page .overview-fleet, .overview-page .story-intro { border-top: 1px solid var(--rule-strong); }
+
+/* calm motion */
+.overview-page * { scroll-behavior: auto; }
+@media (prefers-reduced-motion: reduce) { .overview-page *, .overview-page *::before, .overview-page *::after { animation: none !important; transition: none !important; } }

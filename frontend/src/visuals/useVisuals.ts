@@ -1,23 +1,7 @@
-import { useEffect, useState, useSyncExternalStore } from 'react'
+import { useEffect, useState } from 'react'
 
-/** Visual preferences shared by every decorative scene: "Lite visuals" (static, no animation) and day/night. Both are remembered in the browser. */
-const LITE_KEY = 'trinetra.lite'
-const NIGHT_KEY = 'trinetra.night'
-
-const read = (key: string): string | null => { try { return localStorage.getItem(key) } catch { return null } }
-const write = (key: string, value: string) => { try { localStorage.setItem(key, value) } catch { /* private window */ } }
-
-type Prefs = { lite: boolean; night: boolean | null }      // night null = follow the system theme
-let prefs: Prefs = { lite: read(LITE_KEY) === 'on', night: read(NIGHT_KEY) === 'night' ? true : read(NIGHT_KEY) === 'day' ? false : null }
-const listeners = new Set<() => void>()
-const emit = () => listeners.forEach(listener => listener())
-const subscribe = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener) } }
-
-export function setLite(value: boolean) { prefs = { ...prefs, lite: value }; write(LITE_KEY, value ? 'on' : 'off'); emit() }
-export function setNight(value: boolean) { prefs = { ...prefs, night: value }; write(NIGHT_KEY, value ? 'night' : 'day'); emit() }
-/** Test helper: forget the in-memory choice and read storage again. */
-export function reloadVisualPrefs() { prefs = { lite: read(LITE_KEY) === 'on', night: read(NIGHT_KEY) === 'night' ? true : read(NIGHT_KEY) === 'day' ? false : null }; emit() }
-
+/** Automatic visual fallbacks. There is no on/off button: decorative motion is allowed unless the visitor's system asks for less
+ * (prefers-reduced-motion, or the browser's data-saver mode). A narrow screen is handled where the footage is drawn (see useMotionAllowed). */
 const media = (query: string) => (typeof window !== 'undefined' && typeof window.matchMedia === 'function' ? window.matchMedia(query) : null)
 
 function useMedia(query: string): boolean {
@@ -33,6 +17,12 @@ function useMedia(query: string): boolean {
   return matches
 }
 
+type NetworkInformationLike = { saveData?: boolean }
+export function dataSaverOn(): boolean {
+  if (typeof navigator === 'undefined') return false
+  return Boolean((navigator as Navigator & { connection?: NetworkInformationLike }).connection?.saveData)
+}
+
 export function useDocumentVisible(): boolean {
   const [visible, setVisible] = useState(() => typeof document === 'undefined' || !document.hidden)
   useEffect(() => {
@@ -44,14 +34,11 @@ export function useDocumentVisible(): boolean {
 }
 
 export function useVisuals() {
-  const current = useSyncExternalStore(subscribe, () => prefs)
   const reduced = useMedia('(prefers-reduced-motion: reduce)')
-  const systemDark = useMedia('(prefers-color-scheme: dark)')
-  const night = current.night ?? systemDark
+  const saver = dataSaverOn()
   return {
-    lite: current.lite, reduced, night,
-    /** True only when decorative motion may run: not Lite, and the user has not asked the system for reduced motion. */
-    animate: !current.lite && !reduced,
-    setLite, setNight,
+    reduced, saver,
+    /** True only when decorative motion may run: the visitor has not asked the system for reduced motion or data saving. */
+    animate: !reduced && !saver,
   }
 }

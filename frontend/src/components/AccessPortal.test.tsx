@@ -111,7 +111,7 @@ describe('sign-in and scenario review (walkthrough fixes)', () => {
     apiMock.generalAudit.mockResolvedValue({ events: [], total: 0 } as never)
     apiMock.reviewScenario.mockResolvedValue({} as never)
     const view = render(<AccessPortal page="general" userSession={general as never} {...props}/>)
-    fireEvent.click(screen.getByRole('button', { name: 'Scenario reviews' }))      // the General control center is tabbed
+    fireEvent.click(screen.getByRole('button', { name: 'Scenario reviews' }))      // the General control centre is tabbed
     return view
   }
 
@@ -132,10 +132,10 @@ describe('sign-in and scenario review (walkthrough fixes)', () => {
     await waitFor(() => expect(apiMock.reviewScenario).toHaveBeenCalledWith('r1', 'approve', 'Route checked against the area.'))
   })
 
-  it('the control center is tabbed (users, scenario reviews, saved scenarios, audit log) and Saved scenarios loads every user scenario', async () => {
+  it('the control centre is tabbed (users, scenario reviews, saved scenarios, audit log) and Saved scenarios loads every user scenario', async () => {
     apiMock.generalScenarios.mockResolvedValue([])
     renderGeneral()
-    const tabs = screen.getByRole('navigation', { name: 'General control center sections' })
+    const tabs = screen.getByRole('navigation', { name: 'General control centre sections' })
     expect(Array.from(tabs.querySelectorAll('button')).map(item => item.textContent)).toEqual(['Users and requests', 'Scenario reviews', 'Saved scenarios', 'Audit log'])
     fireEvent.click(screen.getByRole('button', { name: 'Saved scenarios' }))
     await waitFor(() => expect(apiMock.generalScenarios).toHaveBeenCalled())

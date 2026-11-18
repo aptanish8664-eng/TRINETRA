@@ -1,10 +1,9 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { motion } from 'framer-motion'
-import gsap from 'gsap'
-import { ScrollTrigger } from 'gsap/ScrollTrigger'
 import { CartesianGrid, Line, LineChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import { Activity, ArrowDown, ArrowLeft, ArrowRight, AlertTriangle, Antenna, BarChart3, ChevronDown, Clock3, Compass, Download, Focus, Layers3, LoaderCircle, Pause, Play, Radio, RotateCcw, Shield, Sparkles, Square, WifiOff, Wind } from 'lucide-react'
 import { BrandMark } from './components/BrandMark'
+import { formatDateTime } from './services/format'
 import { Map2D } from './components/Map2D'
 import { AccessPortal, type AccessPage } from './components/AccessPortal'
 import { CommandDecisionPanel } from './components/CommandDecisionPanel'
@@ -16,19 +15,19 @@ import { ThreatReplayPanel } from './components/ThreatReplayPanel'
 import { api } from './services/api'
 import { CommandPalette } from './components/CommandPalette'
 import { ToastHost } from './components/Toasts'
-import { ScrubVideo } from './visuals/VideoBackdrop'
-import { VisualsControls } from './visuals/VisualsControls'
+import { FrameScrubber, SnowFall } from './visuals/VideoBackdrop'
 import { FleetStrip } from './visuals/FleetStrip'
-import { useDescent } from './visuals/useDescent'
+import { makeProgress, useDescent } from './visuals/useDescent'
+import { ELEVATION_CAPTION, ELEVATION_TOP_M, formatElevation } from './visuals/elevation'
 import { useVisuals } from './visuals/useVisuals'
 import './design-tokens.css'
 import './design-fixes.css'
 import './visuals/visuals.css'
 import './visuals/overview-descent.css'
+import './visuals/uk-defence.css'
 import type { MissionDeployment, UserSession } from './services/auth'
 import type { MissionState, RunRecord, UAV } from './types'
 
-gsap.registerPlugin(ScrollTrigger)
 const ThreeEnvironment = lazy(() => import('./components/ThreeEnvironment').then(module => ({ default: module.ThreeEnvironment })))
 
 type Tab = 'Overview' | 'Mission Control' | 'Quick Mission' | 'Scenario Lab' | 'Attack Lab' | 'Fleet' | 'Analytics' | 'History' | 'Research'
@@ -78,21 +77,32 @@ function Overview({ onNavigate, onCreate }: { onNavigate: (tab: Tab) => void; on
   const story = useRef<HTMLDivElement>(null)
   const readout = useRef<HTMLSpanElement>(null)
   const visuals = useVisuals()
-  const progress = useRef(0)
+  const progress = useRef(makeProgress()).current
+  const bay = useRef<HTMLElement>(null)
   useDescent(story, readout, progress)
-  useEffect(() => {
-    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches || !story.current) return
-    const ctx = gsap.context(() => {
-      gsap.utils.toArray<HTMLElement>('.story-beat').forEach((beat) => gsap.fromTo(beat, { y: 44, opacity: .85 }, { y: 0, opacity: 1, duration: .8, ease: 'power2.out', scrollTrigger: { trigger: beat, start: 'top 78%', end: 'top 40%', scrub: .7 } }))
-      gsap.to('.hero-orbit', { rotation: 15, duration: 24, ease: 'none', repeat: -1, yoyo: true })
-    }, story)
-    return () => ctx.revert()
+  useEffect(() => {          // the sticky programme strip sits directly under the header, whatever height the header has
+    const header = document.querySelector<HTMLElement>('.topbar')
+    const root = story.current
+    if (!header || !root) return
+    const set = () => root.style.setProperty('--topbar-h', getComputedStyle(header).position === 'sticky' ? `${header.offsetHeight}px` : '0px')
+    set()
+    window.addEventListener('resize', set, { passive: true })
+    return () => window.removeEventListener('resize', set)
   }, [])
+  useEffect(() => {          // decode the UAV picture ahead of time, so reaching the bottom never costs a large image decode
+    const picture = bay.current?.querySelector<HTMLImageElement>('.uav-scene')
+    if (!picture) return
+    const decode = () => { void picture.decode?.().catch(() => undefined) }
+    const idle = (window as Window & { requestIdleCallback?: (callback: () => void) => number }).requestIdleCallback
+    if (idle) idle(decode); else window.setTimeout(decode, 1500)
+  }, [])
+  const gap = <div className="descent-gap" aria-hidden="true"/>
   return <div className={`overview-page ${visuals.animate ? '' : 'visuals-static'}`} ref={story}>
-    <ScrubVideo progressRef={progress}/>
-    {visuals.animate && <><div className="flight-path" aria-hidden="true"/><div className="altitude-readout" role="img" aria-label="Altitude of the descent, from about 120 metres at the top of the page to 0 metres at the bottom"><small>ALT</small><span ref={readout}>120 m</span></div></>}
+    <FrameScrubber progress={progress}/>
+    <div className="programme-strip" role="note"><span>RESEARCH PLATFORM</span><i aria-hidden="true">|</i><span>SIMULATION ONLY</span></div>
+    {visuals.animate && <div className="flight-path" aria-hidden="true" style={{ clipPath: 'inset(0 0 100% 0)' }}/>}
+    <div className="altitude-readout" role="img" aria-label={`Scenic elevation of the footage, from about ${formatElevation(ELEVATION_TOP_M)} metres above sea level at the top of the page down to the valley; not live telemetry`}><small>ELEVATION</small><span className="elevation-value"><span ref={readout}>{`${formatElevation(ELEVATION_TOP_M)} m`}</span></span><small>ASL</small><em>{ELEVATION_CAPTION}</em><span className="elevation-bar"><i/></span></div>
     <section className="hero">
-      <div className="hero-visuals"><VisualsControls/></div>
       <motion.div className="hero-content" initial={{ opacity: 0, y: 18 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: .8, ease: 'easeOut' }}>
         <div className="hero-kicker"><span className="live-dot" /> CYBER-RESILIENT MULTI-UAV RESEARCH PLATFORM</div>
         <h1>See the signal.<br /><em>Keep the mission.</em></h1>
@@ -103,17 +113,30 @@ function Overview({ onNavigate, onCreate }: { onNavigate: (tab: Tab) => void; on
       </motion.div>
       <div className="hero-telemetry"><span>FIELD MODEL / 00</span><span>SIMULATION READY</span><span>LATENCY —</span></div>
       <button className="scroll-cue" onClick={() => document.getElementById('story')?.scrollIntoView({ behavior: 'smooth' })}><span>SCROLL TO EXPLORE</span><ArrowDown size={14} /></button>
-      <div className="hero-orbit" aria-hidden="true"><span /><span /><span /><i /></div>
     </section>
-    <section className="overview-fleet ov-waypoint" aria-label="Fleet summary"><div className="eyebrow">FLEET NOW <span>— LIVE FROM THE BACKEND</span></div><FleetStrip/></section>
-    <section className="story-intro ov-waypoint" id="story"><div className="eyebrow">THE RESILIENCE LOOP <span>— 01 / 04</span></div><h2>One altered coordinate<br />can change the whole picture.</h2><p>TRINETRA is a software-only research demonstrator. It makes position deception visible, evaluates telemetry, and measures what happens when a fleet adapts.</p></section>
+    {gap}
+    <section className="overview-fleet ov-waypoint sec" aria-label="Fleet summary"><div className="eyebrow">FLEET NOW <span>— LIVE FROM THE BACKEND</span></div><FleetStrip/></section>
+    {gap}
+    <section className="story-intro ov-waypoint sec" id="story"><div className="eyebrow">THE RESILIENCE LOOP <span>— 01 / 04</span></div><h2>One altered coordinate<br />can change the whole picture.</h2><p>TRINETRA is a software-only research demonstrator. It makes position deception visible, evaluates telemetry, and measures what happens when a fleet adapts.</p></section>
+    {gap}
     <section className="story-grid ov-waypoint">
-      <article className="story-beat"><div className="story-index">01 <span>DEPLOY</span></div><div className="story-graphic fleet-graphic"><img className="story-photo" src="/images/drone-flight.webp" alt="A small camera drone in flight beneath a sunset sky" loading="lazy"/><div className="graphic-grid"/><span className="mini-uav u1">◢</span><span className="mini-uav u2">◢</span><span className="mini-uav u3">◢</span><i className="graphic-route r1"/><i className="graphic-route r2"/><b>FLEET INITIALISED</b><small>WAYPOINTS ASSIGNED · TELEMETRY STREAM</small></div><div className="story-copy"><h3>Mission geometry,<br />made legible.</h3><p>Seeded starts and task locations create repeatable runs on a clearly labeled abstract coordinate plane.</p></div></article>
+      <article className="story-beat"><div className="story-index">01 <span>DEPLOY</span></div><div className="story-graphic fleet-graphic"><img className="story-photo" src="/images/drone-flight.webp" alt="A small camera drone in flight beneath a sunset sky" loading="lazy"/><div className="graphic-grid"/><span className="mini-uav u1">◢</span><span className="mini-uav u2">◢</span><span className="mini-uav u3">◢</span><i className="graphic-route r1"/><i className="graphic-route r2"/><b>FLEET INITIALISED</b><small>WAYPOINTS ASSIGNED · TELEMETRY STREAM</small></div><div className="story-copy"><h3>Mission geometry,<br />made legible.</h3><p>Seeded starts and task locations create repeatable runs on a clearly labelled abstract coordinate plane.</p></div></article>
       <article className="story-beat"><div className="story-index">02 <span>DETECT</span></div><div className="story-graphic spoof-graphic"><div className="graphic-grid"/><i className="expected-path"/><i className="reported-path"/><span className="spoof-aircraft">◢</span><span className="spoof-pulse"/><b>POSITION DIVERGENCE</b><small>REPORTED GPS / GROUND-TRUTH VIEW</small></div><div className="story-copy"><h3>Deception, shown<br />as evidence.</h3><p>The simulator separates the hidden truth state from reported GPS. Detection consumes reported trajectory and mission telemetry only.</p></div></article>
       <article className="story-beat"><div className="story-index">03 <span>ADAPT</span></div><div className="story-graphic adapt-graphic"><div className="graphic-grid"/><span className="fleet-node n1">01</span><span className="fleet-node n2">02</span><span className="fleet-node n3">03</span><i className="handoff-line"/><b>CAPACITY-AWARE RESPONSE</b><small>ASSESS · ISOLATE · REASSIGN</small></div><div className="story-copy"><h3>Continuity,<br />measured honestly.</h3><p>Compare baseline and adaptive policies on matched seeds. Results reflect each run; improvement is not assumed.</p></div></article>
     </section>
-    <section className="overview-cta ov-waypoint"><div><span className="eyebrow">ENTER THE SYSTEM</span><h2>A real simulation.<br /><em>A live operational view.</em></h2></div><div><p>Deploy a deterministic fleet, configure a GPS anomaly, inspect its response in 2D or 3D, and replay the recorded run.</p><button className="button-primary" onClick={onCreate}>OPEN MISSION CONTROL <ArrowRight size={15} /></button></div><div className="cta-glow" /></section>
-    <section className="landing-pad ov-waypoint" aria-label="Landing pad"><div className="pad" aria-hidden="true"><i/><b>H</b></div><p>Touchdown. Every run in this simulator ends on the ground, and every number on these pages comes from the backend.</p></section>
+    {gap}
+    <section className="overview-cta ov-waypoint sec"><div><span className="eyebrow">ENTER THE SYSTEM</span><h2>A real simulation.<br /><em>A live operational view.</em></h2></div><div><p>Deploy a deterministic fleet, configure a GPS anomaly, inspect its response in 2D or 3D, and replay the recorded run.</p><button className="button-primary" onClick={onCreate}>OPEN MISSION CONTROL <ArrowRight size={15} /></button></div><div className="cta-glow" /></section>
+    {gap}
+    <section className="uav-bay" aria-label="Landing pad" ref={bay}>
+      <img className="uav-scene" src="/media/uav-snow-scene.webp" alt="A survey UAV standing on snow beneath a cloudy mountain sky" decoding="async" />
+      <SnowFall target={bay} />
+      <div className="uav-copy">
+        <BrandMark surface="dark" height={56} />
+        <div className="pad" aria-hidden="true"><i/><b>H</b></div>
+        <p>Touchdown. Every run in this simulator ends on the ground, and every number on these pages comes from the backend.</p>
+      </div>
+      <div className="uav-footer"><span>TRINETRA · SOFTWARE-ONLY RESEARCH DEMONSTRATOR</span><span>MISSION CONTINUITY. ENGINEERED.</span><span className="footage-credit">Footage: “Mountain Landscape With Snow”, Free HD videos · docs/MEDIA_CREDITS.md</span><span>LOCAL SIMULATION BUILD 0.1</span></div>
+    </section>
   </div>
 }
 
@@ -450,10 +473,10 @@ function App() {
 
       {tab === 'Fleet' && <section className="panel fleet-page"><div className="panel-heading"><div><span className="eyebrow">LIVE STATE INSPECTOR</span><h3>{currentState ? `${Object.keys(currentState.uavs).length} active fleet records` : 'No active mission'}</h3></div>{currentState && <span className="mission-state running"><i/>TICK {currentState.tick}</span>}</div>{currentState ? <div className="fleet-table">{Object.values(currentState.uavs).map(uav => <button className={`fleet-record ${selected === uav.id ? 'chosen' : ''}`} key={uav.id} onClick={() => setSelected(uav.id)}><span className="uav-glyph"><Wind size={16}/></span><b>{uav.id}</b><span>{uav.status.toUpperCase()}</span><span>GT {uav.position.x.toFixed(2)}, {uav.position.y.toFixed(2)}</span><span>GPS {uav.gps.x.toFixed(2)}, {uav.gps.y.toFixed(2)}</span><span>{uav.task_id ?? 'NO TASK'}</span><span>{uav.anomaly_score.toFixed(1)}×</span></button>)}</div> : <button className="button-primary" onClick={() => void createMission(true)}>CREATE A MISSION</button>}</section>}
 
-      {tab === 'Analytics' && <div className="analytics-layout"><section className="panel analytics-run"><span className="eyebrow">PAIRED POLICY STUDY</span><h3>Baseline versus adaptive response</h3><p>Both runs use the same seed, initial coordinates, task locations, and spoof scenario. Metrics are computed from simulation traces and are not expected to favor either policy.</p><div className="study-meta"><span>SEED <b>{config.seed}</b></span><span>FLEET <b>{config.uav_count}</b></span><span>SCENARIO <b>{config.spoofing_type.toUpperCase()}</b></span></div><button className="button-primary" onClick={() => void runComparison()} disabled={busy || !apiReady || (Boolean(operatorSession) && !canCreateExperiment)}>{busy ? <LoaderCircle className="spin" size={15}/> : <BarChart3 size={15}/>} RUN PAIRED EXPERIMENT</button>{operatorSession && !canCreateExperiment && <p className="permission-note">Your role is read-only for experiment creation.</p>}<p className="formula-note">Completion rate = completed tasks / configured tasks. Detection delay is measured in simulation ticks from configured onset to first persistent detection event. Precision and recall are run-level indicators in this initial demonstrator.</p></section>
+      {tab === 'Analytics' && <div className="analytics-layout"><section className="panel analytics-run"><span className="eyebrow">PAIRED POLICY STUDY</span><h3>Baseline versus adaptive response</h3><p>Both runs use the same seed, initial coordinates, task locations, and spoof scenario. Metrics are computed from simulation traces and are not expected to favour either policy.</p><div className="study-meta"><span>SEED <b>{config.seed}</b></span><span>FLEET <b>{config.uav_count}</b></span><span>SCENARIO <b>{config.spoofing_type.toUpperCase()}</b></span></div><button className="button-primary" onClick={() => void runComparison()} disabled={busy || !apiReady || (Boolean(operatorSession) && !canCreateExperiment)}>{busy ? <LoaderCircle className="spin" size={15}/> : <BarChart3 size={15}/>} RUN PAIRED EXPERIMENT</button>{operatorSession && !canCreateExperiment && <p className="permission-note">Your role is read-only for experiment creation.</p>}<p className="formula-note">Completion rate = completed tasks / configured tasks. Detection delay is measured in simulation ticks from configured onset to first persistent detection event. Precision and recall are run-level indicators in this initial demonstrator.</p></section>
         {experiment ? <ExperimentResults result={experiment} onExport={canExportAnalytics ? id => void exportExperiment(id) : undefined}/> : <div className="analytics-placeholder panel"><BarChart3 size={27}/><b>Measured outcomes appear here.</b><span>Run the paired experiment to compute result tables and compare mission continuity.</span></div>}</div>}
 
-      {tab === 'History' && <section className="panel history-panel"><div className="panel-heading"><div><span className="eyebrow">PERSISTED RUNS · SQLITE</span><h3>Mission history & replay</h3></div><button className="button-secondary" onClick={() => void loadHistory()}><RotateCcw size={14}/> REFRESH HISTORY</button></div>{replayId && currentState && <div className="replay-current"><span className="eyebrow">REPLAYING STORED SNAPSHOT</span><b>{replayId} · tick {currentState.tick} · {currentState.progress.completed}/{currentState.progress.total} tasks</b><div className="replay-inline-controls"><button onClick={() => setReplayPlaying(!replayPlaying)}>{replayPlaying ? <Pause size={14}/> : <Play size={14}/>} {replayPlaying ? 'PAUSE' : 'PLAY'}</button><input type="range" min="0" max={Math.max(0,replayFrames.length-1)} value={replayIndex} onChange={event => setReplayIndex(Number(event.target.value))}/><button onClick={() => void exportRun(replayId)}><Download size={14}/> CSV</button></div></div>}{history.length ? <div className="history-list">{history.map(record => <article key={record.id} className="history-row"><span className="history-symbol"><Clock3 size={16}/></span><div><b>{record.id}</b><small>{new Date(record.created_at).toLocaleString()} · seed {String(record.config.seed)} · {String(record.config.spoofing_type)}</small></div><span className={`mission-state ${record.status}`}><i/>{record.status}</span><button className="button-secondary" onClick={() => void loadReplay(record.id)}>REPLAY <Play size={13}/></button><button className="small-icon" title="Export run CSV" onClick={() => void exportRun(record.id)}><Download size={15}/></button></article>)}</div> : <div className="empty-inline history-empty">{apiReady ? 'No persisted runs loaded. Refresh to check the local SQLite history.' : 'Connect the backend to inspect persisted runs.'}</div>}</section>}
+      {tab === 'History' && <section className="panel history-panel"><div className="panel-heading"><div><span className="eyebrow">PERSISTED RUNS · SQLITE</span><h3>Mission history & replay</h3></div><button className="button-secondary" onClick={() => void loadHistory()}><RotateCcw size={14}/> REFRESH HISTORY</button></div>{replayId && currentState && <div className="replay-current"><span className="eyebrow">REPLAYING STORED SNAPSHOT</span><b>{replayId} · tick {currentState.tick} · {currentState.progress.completed}/{currentState.progress.total} tasks</b><div className="replay-inline-controls"><button onClick={() => setReplayPlaying(!replayPlaying)}>{replayPlaying ? <Pause size={14}/> : <Play size={14}/>} {replayPlaying ? 'PAUSE' : 'PLAY'}</button><input type="range" min="0" max={Math.max(0,replayFrames.length-1)} value={replayIndex} onChange={event => setReplayIndex(Number(event.target.value))}/><button onClick={() => void exportRun(replayId)}><Download size={14}/> CSV</button></div></div>}{history.length ? <div className="history-list">{history.map(record => <article key={record.id} className="history-row"><span className="history-symbol"><Clock3 size={16}/></span><div><b>{record.id}</b><small>{formatDateTime(record.created_at)} · seed {String(record.config.seed)} · {String(record.config.spoofing_type)}</small></div><span className={`mission-state ${record.status}`}><i/>{record.status}</span><button className="button-secondary" onClick={() => void loadReplay(record.id)}>REPLAY <Play size={13}/></button><button className="small-icon" title="Export run CSV" onClick={() => void exportRun(record.id)}><Download size={15}/></button></article>)}</div> : <div className="empty-inline history-empty">{apiReady ? 'No persisted runs loaded. Refresh to check the local SQLite history.' : 'Connect the backend to inspect persisted runs.'}</div>}</section>}
 
       {tab === 'Research' && <>
         <Research open={researchOpen} setOpen={setResearchOpen}/>
@@ -486,7 +509,7 @@ function App() {
           <DetectorStatus detector={currentState.detector} detection={selectedUav?.ml_detection}/>
           {replayId && <div className="replay-ruler panel"><span>RECORDED REPLAY</span><input type="range" min="0" max={Math.max(0, replayFrames.length - 1)} value={replayIndex} onChange={event => setReplayIndex(Number(event.target.value))}/><b>T+{currentState.time.toFixed(1)}s</b><small>{replayIndex + 1} / {replayFrames.length}</small></div>}
           <div className="metrics-row"><Metric label="MISSION PROGRESS" value={`${Math.round(100 * currentState.progress.completed / Math.max(1, currentState.progress.total))}%`} hint={`${currentState.progress.completed} / ${currentState.progress.total} tasks`}/><Metric label="FLEET READY" value={`${Object.values(currentState.uavs).filter(u => u.status === 'active').length} / ${Object.keys(currentState.uavs).length}`} hint="active aircraft"/><Metric label="THREAT EVENTS" value={currentState.events.filter(event => event.type === 'anomaly_detected' || event.type === 'uav_isolated').length} hint="detected from telemetry" tone={currentState.events.some(event => event.type === 'uav_isolated') ? 'metric-alert' : ''}/><Metric label="SIMULATION TIME" value={`${currentState.time.toFixed(1)}s`} hint={`tick ${currentState.tick} · seed ${currentState.seed}`}/></div>
-          <div className="mission-grid"><section className="map-panel panel"><div className="panel-heading"><div><span className="eyebrow">TACTICAL PICTURE <span className="live-dot"/></span><h3>Fleet & task geometry</h3></div><div className="view-switch"><button className={mapMode === '2D' ? 'selected' : ''} onClick={() => setMapMode('2D')}><Layers3 size={14}/> 2D</button><button className={mapMode === '3D' ? 'selected' : ''} onClick={() => setMapMode('3D')}><Compass size={14}/> 3D</button></div></div>{mapMode === '2D' ? <Map2D state={currentState} frames={replayId ? replayFrames.slice(0, replayIndex + 1) : trajectory} selected={selected} onSelect={setSelected}/> : <Suspense fallback={<div className="three-loading">INITIALIZING LOCAL 3D ENVIRONMENT...</div>}><ThreeEnvironment state={currentState} frames={replayId ? replayFrames.slice(0, replayIndex + 1) : trajectory} selected={selected} onSelect={setSelected}/></Suspense>}</section>
+          <div className="mission-grid"><section className="map-panel panel"><div className="panel-heading"><div><span className="eyebrow">TACTICAL PICTURE <span className="live-dot"/></span><h3>Fleet & task geometry</h3></div><div className="view-switch"><button className={mapMode === '2D' ? 'selected' : ''} onClick={() => setMapMode('2D')}><Layers3 size={14}/> 2D</button><button className={mapMode === '3D' ? 'selected' : ''} onClick={() => setMapMode('3D')}><Compass size={14}/> 3D</button></div></div>{mapMode === '2D' ? <Map2D state={currentState} frames={replayId ? replayFrames.slice(0, replayIndex + 1) : trajectory} selected={selected} onSelect={setSelected}/> : <Suspense fallback={<div className="three-loading">INITIALISING LOCAL 3D ENVIRONMENT...</div>}><ThreeEnvironment state={currentState} frames={replayId ? replayFrames.slice(0, replayIndex + 1) : trajectory} selected={selected} onSelect={setSelected}/></Suspense>}</section>
             <aside className="fleet-panel panel"><div className="panel-heading"><div><span className="eyebrow">AUTONOMOUS FLEET</span><h3>Aircraft status <span className="count-tag">{Object.keys(currentState.uavs).length}</span></h3></div><button className="small-icon" onClick={() => changeTab('Fleet')} title="Fleet detail"><ArrowRight size={15}/></button></div><div className="fleet-list">{Object.values(currentState.uavs).map(uav => <button className={`fleet-item ${selectedUav?.id === uav.id ? 'chosen' : ''}`} key={uav.id} onClick={() => setSelected(uav.id)}><span className={`uav-glyph ${uav.status}`}><Wind size={15}/></span><span className="fleet-primary"><b>{uav.id}</b><small>{uav.task_id ? `TASK ${uav.task_id}` : 'NO ACTIVE TASK'} · {uav.speed.toFixed(2)} u/s</small></span><span className={`threat-tag ${uav.threat_level}`}>{uav.status === 'isolated' ? 'ISOLATED' : uav.threat_level.toUpperCase()}</span></button>)}</div><div className="selected-uav"><div className="selected-head"><div><span className="eyebrow">SELECTED AIRCRAFT</span><h4>{selectedUav?.id ?? '—'}</h4></div><span className={`mission-state ${selectedUav?.status ?? ''}`}><i/>{selectedUav?.status}</span></div>{selectedUav && <div className="telemetry-pairs"><div><span>GROUND TRUTH</span><b>{selectedUav.position.x.toFixed(2)}, {selectedUav.position.y.toFixed(2)}</b></div><div><span>GPS REPORTED</span><b className={Math.hypot(selectedUav.position.x-selectedUav.gps.x, selectedUav.position.y-selectedUav.gps.y) > .28 ? 'text-danger' : ''}>{selectedUav.gps.x.toFixed(2)}, {selectedUav.gps.y.toFixed(2)}</b></div><div><span>RESIDUAL / SCORE</span><b>{selectedUav.residual.toFixed(3)} / {selectedUav.anomaly_score.toFixed(1)}×</b></div><div><span>ASSIGNED TASK</span><b>{selectedUav.task_id ?? 'NONE'}</b></div><div><span>ABSTRACT RESOURCES</span><b>{selectedUav.battery_pct?.toFixed(0) ?? '—'}% · workload {selectedUav.workload ?? '—'}/{selectedUav.workload_capacity ?? '—'}</b></div><div><span>CAPABILITY / LINK</span><b>{selectedUav.capabilities?.join(', ') ?? '—'} · {selectedUav.communications_available === false ? 'NO LINK' : 'LINKED'}</b></div><div><span>PAYLOAD / ENDURANCE</span><b>{selectedUav.payload_capacity_kg?.toFixed(1) ?? '—'} kg · {selectedUav.endurance_remaining_ticks ?? '—'} ticks</b></div></div>}</div></aside>
           </div>
           {!replayId && runId && <ThreatResponsePanel
@@ -507,7 +530,7 @@ function App() {
         </section>
       </>}
     </main>}
-    {!accessPage && <footer className="footer"><BrandMark compact/><span>TRINETRA · SOFTWARE-ONLY RESEARCH DEMONSTRATOR</span><span>MISSION CONTINUITY. ENGINEERED.</span><span className="footage-credit">Footage: “Mountain Landscape With Snow”, Free HD videos · docs/MEDIA_CREDITS.md</span><span>LOCAL SIMULATION BUILD 0.1</span></footer>}
+    {!accessPage && tab !== 'Overview' && <footer className="footer"><BrandMark compact/><span>TRINETRA · SOFTWARE-ONLY RESEARCH DEMONSTRATOR</span><span>MISSION CONTINUITY. ENGINEERED.</span><span className="footage-credit">Footage: “Mountain Landscape With Snow”, Free HD videos · docs/MEDIA_CREDITS.md</span><span>LOCAL SIMULATION BUILD 0.1</span></footer>}
   </div>
 }
 

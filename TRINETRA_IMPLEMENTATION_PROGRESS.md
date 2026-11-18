@@ -1389,3 +1389,17 @@ Status: implemented and unit/API tested; static screenshots taken in headless Ed
 
 ## Run 18 - Jobs 1-3 complete, 2026-11-18
 - Backend slowdown, detector retraining, frontend design done with the gaps in docs/FINAL_REPORT_RUN18.md. Tests: backend 689 passed/1 skipped; frontend 351 passed; build OK.
+
+
+## Frontend visual rework: final logo, Login pane, frame-sequence Overview, UAV section (2026-11-18)
+- Status: implemented and tested (tsc 0; frontend 33 files, 359 tests; production build OK). Visual checks done in headless Edge at 1914x826, 1440x900 and 900 px wide; see docs/FRONTEND_DESIGN.md Update 3 and docs/screenshots/v2-*.
+- Files: frontend/public/brand/*, public/manifest.webmanifest, public/media/overview-frames/*, uav-*.webp/png, poster-slope.jpg; src/components/BrandMark.tsx (+test), AccessPortal.tsx, App.tsx; src/visuals/{VideoBackdrop.tsx, useDescent.ts, useVisuals.ts, elevation.ts, visuals.css, overview-descent.css, uk-defence.css, login-scene.css, visuals.test.tsx}; src/services/format.ts; docs/MEDIA_CREDITS.md.
+- Not verified: GPU/CPU cost of the frame sequence; tab icon in a headed browser. Blockers: source/licence details for the clip and the UAV photo are the owner's to fill in.
+- Next exact step: owner review; nothing has been committed.
+
+
+## Overview fixes: UAV section flush at the bottom, smooth scrolling (2026-11-18)
+- Status: implemented and tested (tsc 0; frontend 33 files, 361 tests; production build OK). Bottom geometry verified by script at 1914x826, 1440x900, 900x900; frame times measured before and after (see docs/FRONTEND_DESIGN.md Update 4).
+- Files: frontend/src/App.tsx, src/visuals/{VideoBackdrop.tsx, useDescent.ts, overview-descent.css, visuals.css, visuals.test.tsx}.
+- Not met: 95th percentile under 20 ms in the middle third under wheel scrolling on this loaded machine (about 33 ms); not measured on a real-GPU laptop or a production preview.
+- Next exact step: owner review; nothing has been committed.

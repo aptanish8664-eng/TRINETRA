@@ -1,24 +1,24 @@
-/* Overview "descent" (FE-B): everything lines up on one container, layers move at different speeds, the drone lands on the footer pad. */
-.overview-page { position: relative; --progress: 0; --descent: 0; --land: 1; }
-.overview-page .hero { background: transparent; border-bottom: 0; }
+/* Overview structure: footage fixed behind the page, long footage-only gaps so the descent plays out gently (about 800 vh in all), content panels in between. */
+.overview-page { position: relative; --topbar-h: 74px; counter-reset: section; padding: 0; margin: 0; }
+.overview-page .hero { background: transparent; border-bottom: 0; min-height: 100vh; }
 .overview-page .hero-shade, .overview-page .hero-orbit, .overview-page .hero-telemetry, .overview-page .hero-image { display: none; }
-.overview-page > :not(.video-backdrop):not(.altitude-readout):not(.flight-path) { position: relative; z-index: 1; }
-.overview-page .hero-content { position: relative; z-index: 2; width: min(680px, calc(100% - 2 * var(--page-gutter))); max-width: none; margin: 0 auto 0 max(var(--page-gutter), calc((100% - var(--page-width)) / 2)); padding: var(--sp-10) var(--sp-8); background: rgba(5, 12, 22, .9); border: 1px solid rgba(140, 200, 245, .3); border-radius: var(--card-radius); }
+.overview-page > :not(.video-backdrop):not(.altitude-readout):not(.flight-path):not(.programme-strip) { position: relative; z-index: 1; }
+
+/* footage-only gap between panels: 90 vh each; five gaps plus hero, panels and the UAV bay come to about 800 vh */
+.descent-gap { height: 90vh; pointer-events: none; }
+
+.overview-page .hero-content { position: relative; z-index: 2; width: min(680px, calc(100% - 2 * var(--page-gutter))); max-width: none; margin: 0 auto 0 max(var(--page-gutter), calc((100% - var(--page-width)) / 2)); padding: var(--sp-10) var(--sp-8); }
 .overview-page .hero { padding: var(--sp-10) 0 var(--sp-12); align-items: center; }
-.overview-page .scroll-cue { z-index: 3; }
+.overview-page .scroll-cue { z-index: 3; left: max(var(--page-gutter), calc((100% - var(--page-width)) / 2)); color: #e9f6ff; }
 .overview-page .hero h1 { font-size: clamp(44px, 5.6vw, 76px); margin: var(--sp-6) 0 var(--sp-4); }
 .overview-page .hero-content > * { max-width: 100%; }
 .overview-page .hero-content > .hero-actions, .overview-page .hero-content > .hero-wordmark { max-width: none; }
-.overview-page .scroll-cue { z-index: 2; left: max(var(--page-gutter), calc((100% - var(--page-width)) / 2)); color: #e9f6ff; }
-.hero-visuals { position: absolute; z-index: 3; top: var(--sp-4); right: max(var(--page-gutter), calc((100% - var(--page-width)) / 2)); }
 @media (max-width: 900px) { .overview-page .hero-content { padding: var(--sp-6) var(--sp-4); } }
 
 /* every section on the same container and left edge */
-.overview-page .overview-fleet, .overview-page .story-intro, .overview-page .story-grid, .overview-page .landing-pad {
+.overview-page .overview-fleet, .overview-page .story-intro, .overview-page .story-grid {
   width: min(var(--page-width), calc(100% - 2 * var(--page-gutter))); max-width: none; margin-inline: auto; padding-inline: 0; position: relative; }
-.overview-page .overview-fleet { padding-top: var(--sp-10); }
-.overview-page .story-intro { padding-top: var(--sp-12); padding-bottom: var(--sp-6); }
-.overview-page .story-grid { padding-bottom: var(--sp-12); align-items: stretch; gap: var(--sp-5); }
+.overview-page .story-grid { padding-bottom: 0; align-items: stretch; gap: var(--sp-5); }
 .overview-page .story-beat { display: flex; flex-direction: column; background: var(--surface-1); border: 1px solid var(--border-1); border-radius: var(--card-radius); padding: var(--card-pad); }
 .overview-page .story-beat .story-graphic { margin-inline: 0; }
 .overview-page .story-beat .story-copy { margin-top: auto; }
@@ -37,21 +37,46 @@
 .fleet-strip .skeleton-row { grid-template-columns: repeat(3, 1fr); margin-top: var(--sp-3); }
 .fleet-strip .skeleton { height: 76px; }
 
-/* the descent itself: altitude readout, a flight path that draws itself, waypoint markers, and the landing pad */
-.altitude-readout { position: fixed; right: var(--sp-3); top: 50%; z-index: 20; transform: translateY(-50%); display: grid; justify-items: center; gap: var(--sp-1); padding: var(--sp-3) var(--sp-2); background: rgba(5, 12, 22, .82); border: 1px solid rgba(140, 200, 245, .4); border-radius: var(--card-radius); color: #e9f6ff; font: 600 12px var(--mono, monospace); min-width: 56px; pointer-events: none; }
-.altitude-readout small { font-size: 9px; letter-spacing: .15em; color: #8fdcff; }
-.altitude-readout::after { content: ''; display: block; width: 2px; height: 80px; margin-top: var(--sp-1); background: linear-gradient(180deg, #8fdcff calc(var(--progress) * 100%), rgba(143, 220, 255, .22) calc(var(--progress) * 100%)); }
-.flight-path { position: absolute; top: 0; bottom: 0; left: max(10px, calc((100% - var(--page-width)) / 2 - 28px)); width: 2px; z-index: 1; pointer-events: none;
-  background: repeating-linear-gradient(180deg, #8fdcff 0 10px, transparent 10px 18px); clip-path: inset(0 0 calc((1 - var(--progress)) * 100%) 0); opacity: .75; }
-.ov-waypoint::before { content: ''; position: absolute; left: -33px; top: var(--sp-10); width: 11px; height: 11px; border-radius: 50%; background: #8fdcff; box-shadow: 0 0 0 4px rgba(143, 220, 255, .25); }
+/* elevation readout (scenic, not telemetry), flight path that follows the scroll, waypoint markers */
+.altitude-readout { position: fixed; right: var(--sp-4); top: 50%; z-index: 20; transform: translateY(-50%); display: grid; justify-items: end; gap: 2px; padding: var(--sp-3) var(--sp-4); background: rgba(5, 13, 23, .86); border: 1px solid rgba(140, 180, 210, .35); border-radius: 2px; color: #e6eff6; font: 500 11px var(--mono, monospace); letter-spacing: .08em; min-width: 132px; pointer-events: none; font-variant-numeric: tabular-nums; contain: layout paint style; }
+.altitude-readout small { font-size: 9px; letter-spacing: .18em; color: #9fb3c3; }
+.altitude-readout .elevation-value { font-size: 20px; letter-spacing: .02em; color: #eaf4fa; }
+.altitude-readout em { font-style: normal; font-size: 8.5px; letter-spacing: .06em; color: #9fb3c3; text-transform: none; max-width: 150px; text-align: right; line-height: 1.35; margin-top: 4px; padding-top: 4px; border-top: 1px solid rgba(140, 180, 210, .25); }
+.elevation-bar { display: block; width: 100%; height: 2px; margin-top: var(--sp-2); background: rgba(160, 190, 210, .22); overflow: hidden; }
+.elevation-bar i { display: block; width: 100%; height: 100%; background: #67e8f9; transform-origin: left center; transform: scaleX(0); will-change: transform; }
+.flight-path { position: absolute; top: 0; bottom: 0; left: max(10px, calc((100% - var(--page-width)) / 2 - 28px)); width: 1px; z-index: 1; pointer-events: none;
+  background: repeating-linear-gradient(180deg, #8fb4cc 0 8px, transparent 8px 16px); clip-path: inset(0 0 100% 0); opacity: .7; contain: layout paint style; }
+.ov-waypoint::before { content: ''; position: absolute; left: -33px; top: var(--sp-10); width: 9px; height: 9px; border-radius: 0; background: #8fb4cc; box-shadow: 0 0 0 3px rgba(143, 180, 204, .2); }
 .visuals-static .flight-path, .visuals-static .ov-waypoint::before { display: none; }
-@media (max-width: 1260px) { .flight-path { left: 6px; } .ov-waypoint::before { display: none; } .altitude-readout { display: none; } }
-.overview-page .landing-pad { display: grid; justify-items: center; gap: var(--sp-3); padding: var(--sp-12) 0 var(--sp-10); text-align: center; color: var(--text-2); }
-.pad { width: 220px; height: 22px; border-radius: 50%; background: radial-gradient(ellipse, #1d3a52, #0b1a29); border: 2px solid #8fdcff; display: grid; place-items: center; position: relative; }
-.pad b { position: absolute; top: -34px; font: 700 14px var(--mono, monospace); color: #8fdcff; opacity: 0; }
-.pad i { position: absolute; inset: 3px 24px; border-radius: 50%; border: 1px dashed rgba(143, 220, 255, .5); }
-.landing-pad p { margin: 0; max-width: 520px; font-size: 13px; }
+@media (max-width: 1260px) { .flight-path { left: 6px; } .ov-waypoint::before { display: none; } }
+@media (max-width: 900px) { .altitude-readout { top: auto; bottom: 84px; right: var(--sp-3); transform: none; min-width: 0; padding: var(--sp-2) var(--sp-3); } .altitude-readout em { display: none; } }
 
-.overview-page .story-intro, .overview-page .overview-fleet { background: rgba(5, 12, 22, .78); border: 1px solid rgba(140, 200, 245, .18); border-radius: var(--card-radius); padding: var(--sp-6) var(--sp-8) !important; margin-top: var(--sp-6); }
-.overview-page .overview-cta { background: rgba(7, 17, 28, .9); }
-.overview-page .landing-pad { background: rgba(5, 12, 22, .78); border-radius: var(--card-radius); margin-bottom: var(--sp-6); }
+/* the UAV section: the photograph as a real foreground picture, about a full viewport tall */
+.uav-bay { position: relative; z-index: 1; min-height: 100vh; min-height: 100svh; margin: 0; padding: 0; overflow: hidden; display: flex; align-items: center; background: #cfd9e3; border-top: 1px solid rgba(140, 180, 210, .35); }
+.uav-scene { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; object-position: 78% 100%; z-index: 0; }
+.uav-bay::before { content: ''; position: absolute; inset: 0; z-index: 1; background: linear-gradient(90deg, rgba(4, 11, 20, .94) 0%, rgba(4, 11, 20, .82) 26%, rgba(4, 11, 20, .35) 48%, rgba(4, 11, 20, 0) 62%); pointer-events: none; }
+.snow-fall { position: absolute; inset: 0; z-index: 2; pointer-events: none; overflow: hidden; contain: strict;
+  -webkit-mask-image: linear-gradient(90deg, transparent 0, transparent 46%, #000 62%); mask-image: linear-gradient(90deg, transparent 0, transparent 46%, #000 62%); }
+.snow-fall i { position: absolute; top: 0; display: block; border-radius: 50%; background: rgba(255, 255, 255, .72); transform: translate3d(0, -4vh, 0); animation: snow-drift linear infinite; animation-play-state: paused; }
+.snow-fall.is-running i { animation-play-state: running; will-change: transform; }
+@keyframes snow-drift { to { transform: translate3d(var(--drift, 0px), 104vh, 0); } }
+@media (prefers-reduced-motion: reduce) { .snow-fall i { animation: none; display: none; } }
+.uav-footer { position: absolute; left: 0; right: 0; bottom: 0; z-index: 3; display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px 10px; padding: 8px max(var(--page-gutter), calc((100% - var(--page-width)) / 2)); font: 9px var(--mono, monospace); letter-spacing: .1em; text-transform: uppercase; pointer-events: none; }
+.uav-footer span { background: rgba(5, 13, 23, .62); color: #c3d3df; padding: 3px 9px; border-radius: 2px; }
+.uav-copy { position: relative; z-index: 3; width: min(430px, 100%); margin-left: max(var(--page-gutter), calc((100% - var(--page-width)) / 2)); padding: var(--sp-8) var(--sp-6); display: grid; gap: var(--sp-5); justify-items: start; color: #dbe7f0; }
+.uav-copy p { margin: 0; font-size: 15px; line-height: 1.65; color: #dbe7f0; max-width: 40ch; }
+.uav-copy .brand-lockup { filter: none; }
+.pad { width: 160px; height: 18px; border-radius: 50%; background: radial-gradient(ellipse, #1d3a52, #0b1a29); border: 1px solid #8fb4cc; display: grid; place-items: center; position: relative; }
+.pad b { position: absolute; top: -30px; font: 700 13px var(--mono, monospace); color: #8fb4cc; opacity: 0; }
+.pad i { position: absolute; inset: 3px 22px; border-radius: 50%; border: 1px dashed rgba(143, 180, 204, .5); }
+@media (max-width: 900px) {
+  .snow-fall { -webkit-mask-image: linear-gradient(180deg, transparent 0, transparent 42%, #000 58%); mask-image: linear-gradient(180deg, transparent 0, transparent 42%, #000 58%); }
+  .uav-bay { align-items: flex-start; }
+  .uav-bay::before { background: linear-gradient(180deg, rgba(4, 11, 20, .92) 0%, rgba(4, 11, 20, .75) 34%, rgba(4, 11, 20, 0) 58%); }
+  .uav-scene { object-position: 76% 100%; }
+  .uav-copy { margin-left: var(--page-gutter); padding: var(--sp-8) 0 0; width: calc(100% - 2 * var(--page-gutter)); }
+}
+
+/* panels sit on solid dark surfaces over the footage */
+.overview-page .story-intro, .overview-page .overview-fleet { background: rgba(5, 13, 23, .84); border: 1px solid rgba(140, 180, 210, .22); border-radius: 2px; padding: var(--sp-6) var(--sp-8) !important; }
+.overview-page .overview-cta { background: rgba(6, 15, 26, .92); }

@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { LoopingVideo } from '../visuals/VideoBackdrop'
-import { VisualsControls } from '../visuals/VisualsControls'
 import { useVisuals } from '../visuals/useVisuals'
 import '../visuals/login-scene.css'
 import { motion } from 'framer-motion'
 import gsap from 'gsap'
 import { Activity, ArrowLeft, ArrowRight, Download, Eye, EyeOff, Fingerprint, KeyRound, LockKeyhole, Search, ShieldAlert, ShieldCheck, UserRound, Wifi } from 'lucide-react'
 import { BrandMark } from './BrandMark'
+import { formatDateTime } from '../services/format'
 import type { AccountStatus, ApplicationRole, AuditLogEntry, ManagedUser, RegistrationApplication, RegistrationStatus, ScenarioApprovalRequest, UserSession } from '../services/auth'
 import { api } from '../services/api'
 import { SavedScenarios } from './SavedScenarios'
@@ -33,7 +33,7 @@ type AccessPortalProps = {
 }
 
 function EyeStages({ active = 0, failed = false }: { active?: number; failed?: boolean }) {
-  const stages = ['IDENTITY', 'VERIFICATION', 'AUTHORIZATION']
+  const stages = ['IDENTITY', 'VERIFICATION', 'AUTHORISATION']
   return <ol className="eye-stages" aria-label="Authentication progress">
     {stages.map((label, index) => <li className={`eye-stage ${failed && index === active ? 'failure' : index === active ? 'active' : 'inactive'}`} key={label}>
       <span className="eye-stage-mark"><i>{['I', 'II', 'III'][index]}</i></span>
@@ -64,7 +64,7 @@ function SystemTerminal({ apiReady, streamConnected, hasActiveRun }: Pick<Access
   </section>
 }
 
-function LoginForm({ onPageChange, onAuthenticated, onOutcome }: Pick<AccessPortalProps, 'onPageChange' | 'onAuthenticated'> & { onOutcome?: (outcome: 'success' | 'failed') => void }) {
+function LoginForm({ onPageChange, onAuthenticated, onOutcome, pane = false }: Pick<AccessPortalProps, 'onPageChange' | 'onAuthenticated'> & { onOutcome?: (outcome: 'success' | 'failed') => void; pane?: boolean }) {
   const { animate } = useVisuals()
   const [identity, setIdentity] = useState({ username: '', password: '' })
   const [passwordVisible, setPasswordVisible] = useState(false)
@@ -100,16 +100,18 @@ function LoginForm({ onPageChange, onAuthenticated, onOutcome }: Pick<AccessPort
     }
   }
 
-  return <div className="access-form-wrap">
-    <div className="access-form-heading"><span className="eyebrow">USER ACCESS / 01</span><h1>Identify<br/><em>yourself.</em></h1><p>One secure sign-in for all permitted TRINETRA modules.</p></div>
+  return <div className={`access-form-wrap ${pane ? 'login-pane-body' : ''}`}>
+    {pane && <div className="login-pane-brand"><BrandMark surface="dark" height={50}/></div>}
+    {pane ? <h1 className="login-headline">Identify <em>yourself.</em></h1>
+      : <div className="access-form-heading"><span className="eyebrow">USER ACCESS / 01</span><h1>Identify<br/><em>yourself.</em></h1><p>One secure sign-in for all permitted TRINETRA modules.</p></div>}
     <EyeStages active={identity.username || identity.password ? 1 : 0} failed={Boolean(invalid) || refused}/>
     <form className="access-form" onSubmit={submit} noValidate>
       <label className="access-field"><span>USERNAME</span><span className={`access-input ${invalid && !identity.username.trim() ? 'invalid' : ''}`}><UserRound size={15}/><input autoComplete="username" value={identity.username} onChange={event => setIdentity({ ...identity, username: event.target.value })} aria-label="Username" placeholder="Enter your username"/></span></label>
       <label className="access-field"><span>PASSWORD</span><span className={`access-input ${invalid && !identity.password ? 'invalid' : ''}`}><LockKeyhole size={15}/><input type={passwordVisible ? 'text' : 'password'} autoComplete="current-password" value={identity.password} onChange={event => setIdentity({ ...identity, password: event.target.value })} aria-label="Password" placeholder="Enter password"/><button className="visibility-toggle" type="button" onClick={() => setPasswordVisible(value => !value)} aria-label={passwordVisible ? 'Hide password' : 'Show password'}>{passwordVisible ? <EyeOff size={15}/> : <Eye size={15}/>}</button></span></label>
       <button className="access-submit" type="submit" disabled={busy}>{busy ? 'SIGNING IN…' : <><KeyRound size={15}/> SIGN IN <ArrowRight size={15}/></>}</button>
-      <div className={`access-form-message ${refused || (message && submitted) ? 'is-error' : ''}`} role="status" aria-live="polite">{message || 'The backend verifies credentials and returns a revocable session.'}</div>
+      <div className={`access-form-message ${refused || (message && submitted) ? 'is-error' : ''}`} role="status" aria-live="polite">{message || (pane ? '' : 'The backend verifies credentials and returns a revocable session.')}</div>
     </form>
-    <div className="access-form-links"><span>Need an account?</span><button type="button" onClick={() => onPageChange('register')}>REGISTER <ArrowRight size={13}/></button></div>
+    {!pane && <div className="access-form-links"><span>Need an account?</span><button type="button" onClick={() => onPageChange('register')}>REGISTER <ArrowRight size={13}/></button></div>}
   </div>
 }
 
@@ -380,15 +382,15 @@ function GeneralConsole({ session, onPageChange, onOpenScenario, onOpenQuick }: 
   }
 
   if (session.user.role !== 'GENERAL') return <section className="admin-console">
-    <div className="admin-api-warning"><ShieldAlert size={17}/><span><b>GENERAL ROLE REQUIRED</b><small>This control center is available only to General users.</small></span></div>
+    <div className="admin-api-warning"><ShieldAlert size={17}/><span><b>GENERAL ROLE REQUIRED</b><small>This control centre is available only to General users.</small></span></div>
     <button className="button-secondary" onClick={() => onPageChange('login')}>SIGN IN WITH A GENERAL ACCOUNT</button>
   </section>
 
   return <section className="admin-console">
-    <div className="access-form-heading"><span className="eyebrow">GENERAL CONTROL CENTER</span><h1>Review.<br/><em>Protect.</em></h1><p>Manage registrations, review exact scenario versions, and inspect persistent audit events.</p></div>
+    <div className="access-form-heading"><span className="eyebrow">GENERAL CONTROL CENTRE</span><h1>Review.<br/><em>Protect.</em></h1><p>Manage registrations, review exact scenario versions, and inspect persistent audit events.</p></div>
     <div className="admin-console-actions"><span>{session.user.full_name} · {session.user.username} · GENERAL</span><button className="button-secondary" disabled={busy} onClick={() => void refresh()}>{busy ? 'REFRESHING…' : 'REFRESH DATA'}</button></div>
     {error && <div className="admin-inline-error" role="alert">{error}</div>}
-    <nav className="admin-tabs" aria-label="General control center sections">
+    <nav className="admin-tabs" aria-label="General control centre sections">
       {([['users', 'Users and requests'], ['reviews', 'Scenario reviews'], ['saved', 'Saved scenarios'], ['audit', 'Audit log']] as [AdminTab, string][]).map(([key, label]) =>
         <button key={key} type="button" className={adminTab === key ? 'active' : ''} aria-current={adminTab === key ? 'page' : undefined} onClick={() => setAdminTab(key)}>{label}</button>)}
     </nav>
@@ -409,14 +411,14 @@ function GeneralConsole({ session, onPageChange, onOpenScenario, onOpenQuick }: 
         </div>}
         {user.account_status === 'DEACTIVATED' && <button className="button-secondary" disabled={busy || user.id === session.user.id} onClick={() => setUserAction({ id: user.id, kind: 'activate', note: '' })}>ACTIVATE</button>}
         {userActionPanel(user)}
-        <time>{new Date(user.created_at).toLocaleString()}</time>
+        <time>{formatDateTime(user.created_at)}</time>
       </article>)}</div>}
     </section>}
 
     {adminTab === 'reviews' && <section className="admin-queue panel">
       <div className="admin-queue-head"><div><span className="eyebrow">SCENARIO APPROVAL REQUESTS</span><h2>Immutable version review</h2></div><span className="terminal-state online">{approvalRequests.length} PENDING</span></div>
       {!approvalRequests.length ? <div className="admin-empty"><ShieldCheck size={22}/><b>No scenario versions await review</b><span>Operator submissions will appear here with their exact configuration hash.</span></div> : approvalRequests.map(item => <article className="admin-request-card" key={item.id}>
-        <div className="admin-request-heading"><div><b>{item.scenario_title} · v{item.version_number}</b><span>{item.owner_name} · {item.config_hash.slice(0, 16)}</span></div><time>{new Date(item.submitted_at).toLocaleString()}</time></div>
+        <div className="admin-request-heading"><div><b>{item.scenario_title} · v{item.version_number}</b><span>{item.owner_name} · {item.config_hash.slice(0, 16)}</span></div><time>{formatDateTime(item.submitted_at)}</time></div>
         <p>Version status: {item.latest_version ? 'CURRENT' : 'SUPERSEDED'}{item.sandbox_run_id ? ` · SANDBOX RUN ${item.sandbox_run_id}` : ' · NO SAVED SANDBOX RUN'}</p>
         {(() => {
           const plan = (item.intent as unknown as { mission_plan?: { objectives?: string[]; aircraft?: { uav_id: string; role: string | null; task_type: string | null; speed_mps: number | null; altitude_m: number | null; route?: { waypoints: unknown[]; length_m: number; duration_s: number } | null }[] } }).mission_plan
@@ -452,7 +454,7 @@ function GeneralConsole({ session, onPageChange, onOpenScenario, onOpenQuick }: 
         <label className="audit-date-filter"><span>TO</span><input aria-label="Audit events to date" type="datetime-local" value={untilFilter} onChange={event => setUntilFilter(event.target.value)}/></label>
         <button className="button-secondary" disabled={busy} onClick={() => { if (offset !== 0) setOffset(0); else void refresh() }}>FILTER</button>
       </div>
-      {!audit.length ? <p>No audit events match these filters.</p> : <div className="admin-audit-list">{audit.map(entry => <article key={entry.id}><time dateTime={entry.created_at}>{new Date(entry.created_at).toLocaleString()}</time><b>{entry.event_type.replace(/_/g, ' ').toUpperCase()}</b><span>{entry.actor_name ?? 'ANONYMOUS'} · {entry.actor_role ?? 'ROLE NOT RECORDED'} · {entry.target_type ?? '—'} {entry.target_id ?? ''}</span><small>{entry.reason} · {entry.outcome}</small></article>)}</div>}
+      {!audit.length ? <p>No audit events match these filters.</p> : <div className="admin-audit-list">{audit.map(entry => <article key={entry.id}><time dateTime={entry.created_at}>{formatDateTime(entry.created_at)}</time><b>{entry.event_type.replace(/_/g, ' ').toUpperCase()}</b><span>{entry.actor_name ?? 'ANONYMOUS'} · {entry.actor_role ?? 'ROLE NOT RECORDED'} · {entry.target_type ?? '—'} {entry.target_id ?? ''}</span><small>{entry.reason} · {entry.outcome}</small></article>)}</div>}
       <div className="audit-pagination"><span>{totalAudit ? `${offset + 1}–${Math.min(offset + pageSize, totalAudit)} of ${totalAudit}` : '0 events'}</span><div><button className="button-secondary" disabled={busy || offset === 0} onClick={() => setOffset(Math.max(0, offset - pageSize))}>PREVIOUS</button><button className="button-secondary" disabled={busy || offset + pageSize >= totalAudit} onClick={() => setOffset(offset + pageSize)}>NEXT</button></div></div>
     </section>}
   </section>
@@ -481,15 +483,16 @@ export function AccessPortal({ page, onPageChange, onExit, onAuthenticated, user
   return <main className={`access-portal-page ${isGeneralPage ? 'admin-console-only' : ''} ${page === 'login' ? 'is-login' : ''} ${outcome?.kind === 'success' ? 'leaving' : ''}`} ref={rootRef}>
     {isGeneralPage ? <><div className="access-backdrop"/><div className="access-grid" aria-hidden="true"/><div className="access-glow" aria-hidden="true"/></> : <LoopingVideo leaving={outcome?.kind === 'success'}/>}
     {sessionEnded && page === 'login' && !userSession && <div className="access-session-ended" role="status">Your session ended (it expired or was closed from elsewhere). Sign in again to continue; anything unsaved in Scenario Lab is kept on this browser and offered back.</div>}
-    <div className="access-topline"><div className="access-brand"><BrandMark/><span className="access-brand-tag">SURVEIL. DETECT. PROTECT.</span></div><div className="access-top-actions">{!isGeneralPage && <VisualsControls/>}{!isGeneralPage && <button className="access-exit" type="button" onClick={onExit}><ArrowLeft size={14}/> RETURN TO OVERVIEW</button>}</div></div>
+    <div className="access-topline">{page === 'login' ? <span/> : <div className="access-brand"><BrandMark/><span className="access-brand-tag">SURVEIL. DETECT. PROTECT.</span></div>}<div className="access-top-actions">{!isGeneralPage && <button className="access-exit" type="button" onClick={onExit}><ArrowLeft size={14}/> RETURN TO OVERVIEW</button>}</div></div>
     <div className={`access-layout ${isGeneralPage ? 'admin-access-layout' : ''}`}>
       <motion.section className={`access-card ${isGeneralPage ? 'wide' : ''} access-reveal ${shaking ? 'shake-card' : ''}`} initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} transition={{ duration: .5 }}>
-        {!isGeneralPage && <div className="access-route-tabs" aria-label="User access routes"><button className={mode === 'login' ? 'active' : ''} onClick={() => onPageChange('login')}>SIGN IN</button><button className={mode === 'register' ? 'active' : ''} onClick={() => onPageChange('register')}>REGISTER</button></div>}
-        {page === 'login' && <LoginForm onPageChange={onPageChange} onAuthenticated={onAuthenticated} onOutcome={kind => setOutcome({ kind, at: Date.now() })}/>}
+        {!isGeneralPage && page !== 'login' && <div className="access-route-tabs" aria-label="User access routes"><button className={mode === 'login' ? 'active' : ''} onClick={() => onPageChange('login')}>SIGN IN</button><button className={mode === 'register' ? 'active' : ''} onClick={() => onPageChange('register')}>REGISTER</button></div>}
+        {page === 'login' && <LoginForm pane onPageChange={onPageChange} onAuthenticated={onAuthenticated} onOutcome={kind => setOutcome({ kind, at: Date.now() })}/>}
         {page === 'register' && <RegistrationForm onPageChange={onPageChange}/>}
         {page === 'general' && userSession && <GeneralConsole session={userSession} onPageChange={onPageChange} onOpenScenario={onOpenScenario} onOpenQuick={onOpenQuickMission}/>}
-        {page === 'general' && !userSession && <div className="access-form-wrap"><div className="access-form-heading"><span className="eyebrow">GENERAL CONTROL CENTER</span><h1>General<br/><em>sign in.</em></h1><p>Sign in with a provisioned General account to manage users and scenario reviews.</p></div><LoginForm onPageChange={onPageChange} onAuthenticated={onAuthenticated}/></div>}
+        {page === 'general' && !userSession && <div className="access-form-wrap"><div className="access-form-heading"><span className="eyebrow">GENERAL CONTROL CENTRE</span><h1>General<br/><em>sign in.</em></h1><p>Sign in with a provisioned General account to manage users and scenario reviews.</p></div><LoginForm onPageChange={onPageChange} onAuthenticated={onAuthenticated}/></div>}
       </motion.section>
+      {page === 'login' && <p className="login-aside">Need an account? <button type="button" onClick={() => onPageChange('register')}>REGISTER <ArrowRight size={13}/></button></p>}
     </div>
     {!isGeneralPage && <details className="access-diagnostics"><summary>System diagnostics (read only)</summary><SystemTerminal apiReady={apiReady} streamConnected={streamConnected} hasActiveRun={hasActiveRun}/></details>}
     {!isGeneralPage && <footer className="access-footer"><span>TRINETRA / SOFTWARE-ONLY RESEARCH DEMONSTRATOR</span><span className="footage-credit">BACKGROUND FOOTAGE: “MOUNTAIN LANDSCAPE WITH SNOW”, FREE HD VIDEOS · docs/MEDIA_CREDITS.md</span><span>LOCAL ENVIRONMENT · NO OPERATIONAL FLIGHT CONTROL</span></footer>}

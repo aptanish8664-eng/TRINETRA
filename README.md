@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="frontend/public/brand/trinetra-logo-dark.svg">
+    <img src="frontend/public/brand/trinetra-logo-light.svg" alt="TRINETRA" height="96">
+  </picture>
+</p>
+
 # TRINETRA
 
 TRINETRA is a software-only research demonstrator for cyber-resilient multi-UAV mission simulation. Its deterministic abstract simulator remains the default. The existing Mission Control route contains an optional read-only PX4 MAVLink receiver, authenticated telemetry REST/WebSocket, CesiumJS visualization, and a read-only Gazebo pose mirror. Prior 2026-11-08 smoke checks observed three disarmed X500 systems and Gazebo models, but the latest runtime check found no running WSL distribution and `/api/health` reports PX4/Gazebo `not_integrated`; those earlier observations are historical, not current live availability. A separate synthetic sensor-fusion, fault dataset, and model-analysis pipeline is research-only and is not connected to PX4 or vehicle response. The native Gazebo world/video is not streamed, no verified flight is claimed, and no real aircraft operation is in scope. See `TRINETRA_IMPLEMENTATION_PROGRESS.md` for current evidence and blockers.

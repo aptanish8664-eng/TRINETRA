@@ -103,3 +103,88 @@ The video costs roughly 10-15 points on the Login page and 20-40 points only whi
 `tsc` clean; frontend **32 files, 352 tests passed** (a first run right after the build had 2 failures in two slow Mission Control render tests that passed on the next full run and when run alone: the known timing flakiness under load); production build OK (72 s). Tests updated or added: `src/visuals/visuals.test.tsx` now covers the two-video crossfade setup, Lite, reduced motion and narrow screens (poster), autoplay refused (poster), pause while hidden, 720p default and the scrubbed position following the scroll; `App.test.tsx` expects the video backdrop instead of the photograph. Click-through (browser): failed sign-in shake and message, successful sign-in transition, Lite toggle and its memory, Ctrl+K navigation, Lite Overview.
 
 Files changed: `.gitignore`; new `frontend/public/media/*`, `docs/MEDIA_CREDITS.md`, `src/visuals/VideoBackdrop.tsx`; changed `src/visuals/{visuals.css,overview-descent.css,login-scene.css,useDescent.ts,VisualsControls.tsx,visuals.test.tsx}`, `src/App.tsx`, `src/App.test.tsx`, `src/components/AccessPortal.tsx`; deleted `SkyScene.tsx`, `Quadcopter.tsx`, `LoginScene.tsx`. The day/night toggle was removed (there is no night footage). Not done: 1080p was not exercised on any test screen; no GPU measurement; the footage source URL, creator and licence still need to be filled in.
+
+
+---
+
+# Update 3: final logo, slim Login pane, slow frame-sequence Overview, UAV section
+
+Frontend only. Mission Control components and all backend code are unchanged (`git diff --stat` lists none). Screenshots: `docs/screenshots/v2-*`.
+
+## What changed
+* **Logo**: the supplied final artwork (nine files from `brand/trinetra-logo-final.zip`, byte-identical copies in `frontend/public/brand`) replaces the old drawn mark everywhere through one `BrandMark` component: lockup in the header and Login pane and UAV section, mark alone in the footer and hero line. `favicon.svg`, `favicon-32.png`, `apple-touch-icon.png` and a new `manifest.webmanifest` (192 and 512 icons) are linked from `index.html`; `README.md` has a logo header. There is no light theme, so the light files are only wired in (`surface="light"`). The old `public/logo/*` files are no longer referenced and were not deleted. The frontend produces only CSV and JSON exports, so there is no export header to carry a logo.
+* **Login**: the big card is gone. A slim dark translucent pane (rgba(5,13,23,.5), 6 px blur, 1 px cyan-tinted hairline, 2 px corners, 400 to 440 px wide) sits 8 % in from the right edge, opposite the summit, vertically centred, with a soft dark vignette behind that side only. It holds the logo, "Identify yourself.", the three steps in one row, underline fields and Sign in. "Need an account? REGISTER" sits just under it. Below 1100 px the pane is centred. The Lite visuals button is removed everywhere; automatic fallbacks stay (reduced motion, data-saver, under 800 px, refused autoplay). No clip with a UAV in flight exists in `media`, so the same scenic clip plays.
+* **Overview**: about 8.0 viewport heights long (7.9 at 1440x900, 8.9 at 900x900). The whole 24.4 s clip is an image sequence (194 WebP frames, 8 per second, 1280 px wide, 8.8 MB) drawn on a canvas with a crossfade between neighbouring frames, eased towards the scroll position (0.22 s time constant), loaded nearest-first, poster until ready; reduced motion, data-saver, under 800 px or a load failure show one still per section (summit, slope, valley). Programme strip "RESEARCH PLATFORM | SIMULATION ONLY", numbered sections, 2 px corners, 1 px rules, no glow.
+* **Elevation**: `ELEVATION_TOP_M = 5400` and `ELEVATION_BOTTOM_M = 2300` in `src/visuals/elevation.ts`; label ELEVATION, unit ASL, nearest 10 m, thousands separators, caption "scenic elevation, not live telemetry". Swept at 101 scroll positions: 5,400 down to 2,310 m, never 0.
+* **UAV section**: `uav-snow-scene.webp` (1920x1080), `uav-cutout.webp` and `.png` in `public/media`. The green grass background was keyed out (green dominance plus a yellowness test, connected-component clean-up, background decontamination, despill, 1 px feather), then the aircraft was placed on a mirrored, blurred and snow-graded frame from the clip with cool-tinted contact shadows and snow haze. Light snow falls only when motion is allowed. The original wording is kept ("Touchdown. Every run in this simulator ends on the ground, and every number on these pages comes from the backend.").
+* **British text and dates**: "labelled", "favour", "INITIALISING", "AUTHORISATION", "control centre"; dates from `src/services/format.ts` as `18 NOV 2026 14:05` (24-hour). Applied in `App.tsx` and `AccessPortal.tsx` only; other components still use browser-locale dates and were not touched (several are Mission Control).
+
+## Measured worst-case Login text contrast (98 real footage frames, every 0.25 s plus the last frame, pane 50 % opaque, nothing raised)
+Computed from screenshots of the pane with its text hidden, using the brightest pixel behind each text box.
+
+| | 1914x826 | 1440x900 | 900x900 |
+|---|---|---|---|
+| Headline #eaf4fa | 9.37 | 8.40 | 8.79 |
+| Labels and step titles #c3d3df | 6.92 | 6.42 | 6.45 |
+| Error text #ffc4c8 | 6.84 | 6.54 | 6.88 |
+| Muted captions and placeholders #9fb3c3 | 4.91 | 4.57 | 4.57 |
+| Sign in label (#04121c on #55d9ff) | 11.51 | 11.51 | 11.51 |
+
+Sampled, not all 729 video frames. The loop crossfade shows only frames from the same clip.
+
+## Verified
+`tsc` exit 0; frontend 33 files, 359 tests passed; production build OK in 1m 13s with one warning (chunk over 600 kB, Cesium, as before). Login: no inner scroll and the Sign in button visible at 1914x826, 1440x826, 1914x700, 1914x640, 1440x640, 1100x640, 900x640 and 1914x600. Failed sign-in: the card swung 19 px side to side (36 frames) and showed "Invalid username or password". Success: mid-transition opacity 0.56 and scale 1.018, then the Overview opened. Autoplay refused: poster, no video elements.
+
+## UAV cut-out: what is left
+No green halo. The left propeller is a translucent blue shape with torn edges. The right propeller is a dark motion-blur smear (as in the photograph). The right skid has a light grey fringe where grass blades were, there is one tiny purple speck near the right propeller root, and the far-left foot is clipped (hidden under snow haze). The source is 1024 px wide, so the aircraft is slightly soft at full size.
+
+## Not verified or not done
+Contrast was measured in headless Edge only. No GPU or CPU measurement was repeated for the frame sequence. The tab icon itself cannot be seen in headless mode; the favicon link resolves to `/brand/favicon.svg` and the files load. Source URL, creator and licence of the clip and the UAV photo are still "fill in" in `docs/MEDIA_CREDITS.md`. The older notes above in this file about the sky, cloud and Lite toggle are superseded.
+
+
+---
+
+# Update 4: UAV section flush at the bottom, smooth scrolling
+
+Frontend only; Mission Control and the backend are untouched.
+
+## 1. The UAV section is the last thing on the page
+**Cause:** the shared 63 px footer was rendered after the Overview. The fixed scenic backdrop is painted above non-positioned content, so that strip showed mountains instead of a footer, and the UAV section ended 63 px above the document bottom (its top 63 px scrolled out of view). **Fix:** the Overview no longer renders the shared footer; its four lines sit inside the bottom of the UAV picture as small dark chips (other pages keep the normal footer). The section is exactly one screen tall. While it covers the screen the fixed backdrop is hidden (`visibility`), so nothing is composited behind it.
+
+Checked by script at maximum scroll (document height minus viewport height equals the maximum scroll; the section's bottom equals the viewport bottom, which is the document bottom; the section's top is 0 and its height equals the viewport; the element at the bottom pixel is the UAV picture; no footer element):
+
+| size | document | max scroll | section top / bottom / height | before |
+|---|---|---|---|---|
+| 1914x826 | 6,714 px | 5,888 | 0 / 826 / 826 | section ended 63 px short, top at -63 |
+| 1440x900 | 7,195 px | 6,295 | 0 / 900 / 900 | same |
+| 900x900 | 8,095 px | 7,195 | 0 / 900 / 900 | same |
+
+Falling snow is now 22 plain elements moved by CSS transform animations (no canvas), running only while motion is allowed, the tab is visible and the picture is on screen, behind a CSS mask that keeps them out of the left 46 % (wide screens) or the top 42 % (narrow screens), which is where the logo and text are. On 900 wide the elevation readout was moved above the footer lines.
+
+## 2. Smooth scrolling: measured, then fixed
+Method: Playwright with headless Edge at 1914x826, a per-frame `requestAnimationFrame` timer and a long-task observer, scrolling the whole Overview with real mouse-wheel events (40 px every 40 ms) and with 150 px jumps every 100 ms, results split into top, middle and bottom thirds, all 194 frames loaded first. A Chromium trace located the cost.
+
+**Real causes found, in order of size**
+1. Every animation frame wrote `--progress` and `--descent` on the Overview root. Custom properties inherit, so each write re-resolved styles for the whole page (ablation: switching the writes off took the median frame from 33 ms to 16.7 ms and slow frames from 408 to 159 of 491).
+2. Frames were decoded on the main thread inside the animation callback (trace: 171 `Decode Image` events, up to 128 ms each, inside my `step` function, 5.1 s in all), because the canvas drew `<img>` elements and `createImageBitmap(img)` also decodes on the main thread.
+3. The canvas was redrawn whenever any frame finished loading, and the scroll handler read layout (`getBoundingClientRect`).
+4. A scroll-scrubbed card animation, an extra scroll listener and a full-size snow canvas.
+
+**Fixes:** progress is written only to the readout text (when the displayed value changes), a transform on the progress bar and the flight path's clip, never to a custom property; page geometry is cached and measured only on mount, resize and when the Overview resizes; the eased value has a time constant of 0.22 s and cannot move faster than 1.6 progress per second; frames are downloaded as files and decoded with `createImageBitmap(blob)` on a worker, keeping 6 behind and 22 ahead of the reader decoded (about 100 MB) and releasing the rest; the canvas draws only when the frame pair or the blend (24 steps) changes, from the one eased animation frame, and never draws an undecoded image; the UAV picture is decoded early; the card scroll-scrub is removed; the snow is compositor-only; the backdrop gets its own contained layer.
+
+**Results (medians across runs, wheel scrolling; 95th percentile frame time in ms / frames over 20 ms / long tasks over 50 ms)**
+
+| third | before (1 run, software) | after (3 runs, software) | after (3 runs, GPU flags) |
+|---|---|---|---|
+| top | 33.6 / 62 / 0 | 17.1 / 5 / 0 | 18.0 / 11 / 0 |
+| middle | 49.9 / 79 / 0 | 33.3 / 14 / 0 | 34.3 / 37 / 0 |
+| bottom | 49.7 / 90 / 0 | 17.1 / 7 / 0 | 20.6 / 15 / 0 |
+
+Stepped scrolling after: 95th percentile 16.9, 17.7, 17.5 ms (software) and 17.6, 18.4, 18.9 ms (GPU flags), with 0 to 7 frames over 20 ms and no long tasks; before it was 33.4, 33.8, 49.1 ms with 4 and 2 long tasks (53 and 55 ms). Worst single frames in wheel mode are still 50 to 150 ms now and then (1 to 3 per third). The main thread in a GPU-flag trace never ran a task over 13.6 ms.
+
+**Target (95th percentile under 20 ms and no long tasks over 50 ms in all three thirds):** met for the top and bottom thirds and for stepped scrolling in all thirds, with no long tasks at all in the median runs. **Not met:** the middle third in wheel mode (median 95th percentile 33 to 34 ms in both configurations). A clean middle-third-only run (729 frames) gave 17.1 ms and 10 slow frames, and the ablations that looked much worse had no plausible cause and were load spikes, so the middle-third figure is mostly noise from other work on this machine; I could not separate it further.
+
+**Caveats:** the machine was busy with other work during every run (overall CPU 81 % at one check, a Python process using about 85 % of a core, WSL running, about 3 GB free memory), so run-to-run spread is large (for example one GPU-flag run had 24 long tasks in the bottom third and the next had none). The "before" figures are a single run and were taken with the old code, which no longer exists, so they cannot be repeated; the same-session ablation is the stronger evidence for cause 1. Everything was measured on the Vite dev server (React development build), not a production preview, because the production API address and origin checks were not set up for a second server. No measurement on a laptop with a real GPU was made; "GPU flags" in headless Edge may still fall back to software.
+
+## Tests
+`src/visuals/visuals.test.tsx` now also covers: no CSS custom property writes and no layout reads in the scroll handler, the capped easing step and the readout text, redraw only on change, the bounded decoded-frame window, the backdrop hidden once the UAV section covers the screen, and the snow as plain elements. Final: `tsc` exit 0; frontend 33 files, 361 tests passed (two earlier full runs lost worker processes under memory pressure and were discarded; the third, with three workers, was complete); production build OK in 1m 3s with the same single chunk-size warning (Cesium).

@@ -1,11 +1,14 @@
-export function BrandMark({ compact = false }: { compact?: boolean }) {
-  return <div className={`brand-lockup ${compact ? 'brand-compact' : ''}`} aria-label="TRINETRA">
-    <svg className="brand-eye" viewBox="0 0 54 40" role="img" aria-hidden="true">
-      <path d="M3 20 12 9h30l9 11-9 11H12L3 20Z" fill="none" stroke="currentColor" strokeWidth="1.5" />
-      <path d="M14 20h26M20 15l7 5 7-5M20 25l7-5 7 5" fill="none" stroke="currentColor" strokeWidth="1.4" />
-      <circle cx="27" cy="20" r="5.2" fill="#55d9ff" fillOpacity=".16" stroke="#55d9ff" strokeWidth="1.2" />
-      <circle cx="27" cy="20" r="1.7" fill="#a7e8ff" />
-    </svg>
-    {!compact && <span><b>TRINETRA</b><small>AUTONOMOUS AERIAL INTELLIGENCE</small></span>}
-  </div>
+/** The final TRINETRA logo (files in public/brand, supplied as-is: never redrawn or recoloured here).
+ * `compact` uses the mark alone where space is tight; otherwise the full lockup is used. "dark" artwork is for dark surfaces, "light" for light ones. */
+export const BRAND = {
+  lockup: { dark: '/brand/trinetra-logo-dark.svg', light: '/brand/trinetra-logo-light.svg' },
+  mark: { dark: '/brand/trinetra-mark-dark.svg', light: '/brand/trinetra-mark-light.svg' },
+} as const
+
+export function BrandMark({ compact = false, surface = 'dark', height }: { compact?: boolean; surface?: 'dark' | 'light'; height?: number }) {
+  const src = (compact ? BRAND.mark : BRAND.lockup)[surface]
+  const size = height ?? (compact ? 28 : 46)
+  return <span className={`brand-lockup ${compact ? 'brand-compact' : ''}`}>
+    <img className="brand-img" src={src} alt="TRINETRA" height={size} style={{ height: size, width: 'auto' }} decoding="async" draggable={false} />
+  </span>
 }

@@ -1,15 +1,77 @@
-/* Sign-in page: full-screen real video, one centred card. Nothing here depends on scroll. */
-.access-portal-page.is-login { height: 100vh; overflow: hidden; position: relative; display: flex; flex-direction: column; transition: opacity .6s ease-in, transform .6s ease-in; }
+/* Sign-in page: the real footage fills the whole screen and plays by itself. One slim dark translucent pane on the side opposite the subject,
+   a soft vignette only behind that side, and nothing else over the picture. Nothing here depends on scrolling. */
+.access-portal-page.is-login { height: 100vh; height: 100svh; overflow: hidden; position: relative; display: flex; flex-direction: column; background: #06101a; border-bottom: 0; transition: opacity .6s ease-in, transform .6s ease-in; }
+.access-portal-page.is-login::before { display: none; }
 .access-portal-page.is-login.leaving { opacity: 0; transform: scale(1.04); }
-.is-login .access-topline { position: relative; z-index: 4; }
-.is-login .access-layout { position: relative; z-index: 3; flex: 1; display: grid; grid-template-columns: min(520px, 100%); justify-content: center; align-items: center; padding: 0 var(--sp-4, 16px); min-height: 0; }
-.is-login .access-card { width: 100%; padding: var(--sp-6); max-height: calc(100vh - 150px); overflow: auto; background: rgba(5, 12, 22, .9); border: 1px solid rgba(140, 200, 245, .4); box-shadow: 0 24px 60px rgba(0, 10, 25, .55); }
-.is-login .access-form-heading h1 { font-size: clamp(30px, 3.6vw, 40px); margin-bottom: var(--sp-2, 8px); }
+.is-login .access-topline { position: relative; z-index: 4; background: transparent; border-bottom: 0; height: 52px; flex: none; }
+.is-login .access-exit { color: #c3d3df; text-shadow: 0 1px 6px rgba(0, 0, 0, .6); }
+.is-login .access-layout { position: relative; z-index: 3; flex: 1; min-height: 0; max-width: none; margin: 0; padding: 0 8vw; display: flex; flex-direction: column; justify-content: center; align-items: flex-end; gap: var(--sp-3, 12px); }
+
+/* the pane: about half opaque deep navy, light blur, hairline cyan-tinted border, 2 px corners */
+.is-login .access-card { align-self: flex-end; margin: 0; width: clamp(400px, 30vw, 440px); max-width: 100%; padding: 22px 28px 24px; max-height: none; overflow: visible; background: rgba(5, 13, 23, .5); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); border: 1px solid rgba(190, 230, 245, .24); border-radius: 2px; box-shadow: none; }
+.is-login .access-form-wrap { max-width: none; margin: 0; }
+.login-pane-brand { display: flex; align-items: center; margin-bottom: 12px; }
+.login-headline { margin: 0 0 10px; font: 600 24px/1.15 var(--sans, Manrope, sans-serif); letter-spacing: -.01em; color: #eaf4fa; }
+.login-headline em { font-style: normal; color: #eaf4fa; border-bottom: 2px solid var(--cyan, #55d9ff); }
+
+/* the three steps in one compact row */
+.login-pane-body .eye-stages { margin: 0 0 14px; border-block: 1px solid rgba(190, 230, 245, .22); }
+.login-pane-body .eye-stage { min-height: 38px; grid-template-columns: 20px 1fr; column-gap: 7px; padding: 5px 2px; }
+.login-pane-body .eye-stage-mark { width: 20px; height: 20px; border-color: rgba(195, 211, 223, .55); color: #c3d3df; font-size: 8px; }
+.login-pane-body .eye-stage > span:nth-child(2) b { font-size: 8px; letter-spacing: .1em; color: #c3d3df; }
+.login-pane-body .eye-stage > span:nth-child(2) small { font-size: 7px; letter-spacing: .05em; color: #9fb3c3; }
+.login-pane-body .eye-stage-status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.login-pane-body .eye-stage.active .eye-stage-mark { border-color: #67e8f9; color: #eaf4fa; }
+.login-pane-body .eye-stage.failure .eye-stage-mark { border-color: #ff8a92; color: #ffc4c8; }
+
+/* fields: thin underline, transparent fill */
+.login-pane-body .access-form { gap: 10px; }
+.login-pane-body .access-field { gap: 3px; }
+.login-pane-body .access-field > span:first-child { color: #c3d3df; font-size: 9px; letter-spacing: .12em; }
+.login-pane-body .access-input { height: 36px; padding: 0 2px; gap: 9px; background: transparent; border: 0; border-bottom: 1px solid rgba(195, 211, 223, .55); border-radius: 0; color: #9fb3c3; box-shadow: none; }
+.login-pane-body .access-input input { color: #eaf4fa; font-size: 14px; }
+.login-pane-body .access-input input::placeholder { color: #9fb3c3; opacity: 1; }
+.login-pane-body .access-input:focus-within { border-bottom-color: #67e8f9; box-shadow: 0 1px 0 0 #67e8f9; }
+.login-pane-body .access-input.invalid { border-bottom-color: #ff8a92; }
+.login-pane-body .visibility-toggle { color: #c3d3df; }
+.login-pane-body .access-submit { height: 42px; margin-top: 4px; border-radius: 2px; background: #55d9ff; border: 1px solid #55d9ff; color: #04121c; font-weight: 600; letter-spacing: .12em; box-shadow: none; transform: none; }
+.login-pane-body .access-submit:hover { filter: none; background: #8be5fb; transform: none; }
+.login-pane-body .access-form-message { min-height: 0; margin: 2px 0 0; color: #c3d3df; }
+.login-pane-body .access-form-message:empty { display: none; }
+.access-form-message.is-error { color: #ffc4c8; border-left: 3px solid #ff8a92; padding-left: 10px; font-size: 13px; line-height: 1.4; }
+.login-aside { align-self: flex-end; margin: 0; font: 500 10px var(--mono, monospace); letter-spacing: .08em; color: #c3d3df; text-shadow: 0 1px 6px rgba(0, 0, 0, .7); }
+.login-aside button { border: 0; background: none; color: #8be5fb; font: inherit; letter-spacing: .1em; cursor: pointer; padding: 0; display: inline-flex; align-items: center; gap: 4px; }
+.login-aside button:hover { color: #fff; }
+
+/* soft dark vignette behind the pane side only (not a full-screen overlay) */
+.is-login .video-vignette { background: radial-gradient(ellipse 36% 82% at 78% 50%, rgba(3, 9, 18, .62) 0%, rgba(3, 9, 18, .44) 48%, rgba(3, 9, 18, 0) 100%); }
+
+/* failed sign-in shake and messages */
 .access-card.shake-card { animation: card-shake .5s ease-in-out; }
 @keyframes card-shake { 20% { transform: translateX(-10px); } 40% { transform: translateX(9px); } 60% { transform: translateX(-6px); } 80% { transform: translateX(4px); } }
-.access-form-message.is-error { color: #ffb4b8; border-left: 3px solid var(--status-bad, #ff6b72); padding-left: 10px; font-size: 13px; }
-.access-diagnostics { position: absolute; z-index: 4; left: var(--sp-4, 16px); bottom: 44px; max-width: 360px; background: rgba(5, 12, 22, .92); border: 1px solid rgba(140, 200, 245, .35); border-radius: 4px; padding: 6px 10px; }
-.access-diagnostics summary { cursor: pointer; font: 10px var(--mono, monospace); letter-spacing: .1em; color: #cfe3f2; }
-.is-login .access-footer { position: relative; z-index: 4; }
+
+.access-diagnostics { position: absolute; z-index: 4; left: var(--sp-4, 16px); bottom: 44px; max-width: 360px; background: rgba(5, 13, 23, .8); border: 1px solid rgba(190, 230, 245, .24); border-radius: 2px; padding: 6px 10px; }
+.access-diagnostics summary { cursor: pointer; font: 10px var(--mono, monospace); letter-spacing: .1em; color: #c3d3df; }
+.is-login .access-footer { position: relative; z-index: 4; flex: none; background: transparent; border-top: 0; color: #c3d3df; text-shadow: 0 1px 6px rgba(0, 0, 0, .7); }
+.is-login .access-footer .footage-credit { color: #c3d3df; }
+
+/* narrower than 1100 px: the pane is centred and the vignette follows */
+@media (max-width: 1099px) {
+  .is-login .access-layout { align-items: center; padding: 0 var(--sp-4, 16px); }
+  .is-login .access-card { align-self: center; width: min(440px, 100%); }
+  .login-aside { align-self: center; }
+  .is-login .video-vignette { background: radial-gradient(ellipse 70% 80% at 50% 50%, rgba(3, 9, 18, .62) 0%, rgba(3, 9, 18, .42) 55%, rgba(3, 9, 18, 0) 100%); }
+}
+@media (max-width: 900px) { .access-diagnostics { position: static; margin: var(--sp-2, 8px) var(--sp-4, 16px); } }
+/* very short windows: the page itself may scroll instead of squeezing the pane */
+@media (max-height: 639px) {
+  .access-portal-page.is-login { height: auto; min-height: 100vh; overflow-y: auto; overflow-x: hidden; }
+  .is-login .access-layout { padding-top: var(--sp-4, 16px); padding-bottom: var(--sp-4, 16px); }
+}
 @media (prefers-reduced-motion: reduce) { .access-card.shake-card { animation: none; } .access-portal-page.is-login { transition: none; } }
-@media (max-width: 900px) { .access-diagnostics { position: static; margin: var(--sp-2, 8px) var(--sp-4, 16px); } .is-login .access-topline { flex-wrap: wrap; gap: 8px; } }
+
+/* small items that sit directly on the footage get a dark translucent chip so they stay readable on the brightest snow frames */
+.is-login .access-footer span, .is-login .access-exit, .login-aside { background: rgba(5, 13, 23, .62); padding: 3px 9px; border-radius: 2px; text-shadow: none; }
+.is-login .access-footer { gap: 8px; }
+.is-login .access-footer span { color: #c3d3df; }
+.login-aside { padding: 5px 10px; }

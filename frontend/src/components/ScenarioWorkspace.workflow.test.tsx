@@ -5,7 +5,7 @@ import { ScenarioWorkspace } from './ScenarioWorkspace'
 import { api } from '../services/api'
 import type { MissionDeployment, ScenarioConfig, ScenarioDetail, ScenarioIntent } from '../services/auth'
 import type { Px4TelemetryVehicle } from '../types'
-import type { AircraftPlan, GeneratedRoute, OperatingArea } from './missionPlan'
+import { type AircraftPlan, type GeneratedRoute, type OperatingArea } from './missionPlan'
 
 vi.mock('../services/api', () => ({
   api: {
@@ -16,14 +16,15 @@ vi.mock('../services/api', () => ({
 }))
 vi.mock('./PlanMapEditor', () => ({
   PlanMapEditor: ({ scope, aircraft, onAreaChange, onAircraftChange }: {
-    scope: 'area' | 'aircraft'; aircraft?: AircraftPlan
+    scope: 'area' | 'aircraft' | 'both'; aircraft?: AircraftPlan
     onAreaChange: (area: OperatingArea | null) => void; onAircraftChange: (patch: Partial<AircraftPlan>) => void
-  }) => scope === 'area'
-    ? <button type="button" onClick={() => onAreaChange({ kind: 'circle', centre: { latitude: 12.975, longitude: 77.596 }, radius_m: 400, vertices: [] })}>SET TEST AREA</button>
-    : <div>
+  }) => <div>
+    {scope !== 'aircraft' && <button type="button" onClick={() => onAreaChange({ kind: 'circle', centre: { latitude: 12.975, longitude: 77.596 }, radius_m: 400, vertices: [] })}>SET TEST AREA</button>}
+    {aircraft && scope !== 'area' && <div>
       <button type="button" onClick={() => onAircraftChange({ start_location: { latitude: 12.9716, longitude: 77.5946 } })}>SET TEST START</button>
       <button type="button" onClick={() => onAircraftChange({ parameters: { ...aircraft?.parameters, points: [{ latitude: 12.973, longitude: 77.595 }] } })}>SET TEST POINTS</button>
-    </div>,
+    </div>}
+  </div>,
 }))
 
 // These tests drive whole multi-step workflows; give them headroom when the full suite runs in parallel.
@@ -103,7 +104,7 @@ async function completeToReview(count: number) {
 
 describe('Scenario Lab workflow (schema 2)', () => {
   beforeEach(() => {
-    sessionStorage.clear()
+    sessionStorage.clear(); localStorage.clear()
     store = null
     apiMock.scenarioList.mockImplementation(async () => (store ? [{ ...store, latest_version: store.versions[0] }] : []) as never)
     apiMock.myScenarioRequests.mockResolvedValue([])
@@ -261,7 +262,7 @@ describe('Scenario Lab workflow (schema 2)', () => {
     expect(document.querySelector('.scenario-save-status')?.textContent).toBe('Unsaved changes')
   })
 
-  it('shows the fleet as NOT VERIFIED with a one-click Activate and verify, and keeps the deploy action disabled until it is verified', async () => {
+  it('shows the fleet as NOT VERIFIED with a one-click Activate and verify; Deploy stays available because pressing it checks the fleet and offers what to do', async () => {
     apiMock.fleetStatus.mockResolvedValue({ capacity: 5, verified_count: 0, instances: [], manager_error: null } as never)
     renderLab()
     await completeToReview(1)
@@ -269,8 +270,9 @@ describe('Scenario Lab workflow (schema 2)', () => {
     const deploy = await within(await nextActionReady()).findByRole('button', { name: /DEPLOY TO MISSION CONTROL/ }) as HTMLButtonElement
     const status = screen.getByLabelText('Fleet verification')
     await waitFor(() => expect(within(status).getByText('NOT VERIFIED')).toBeTruthy())
-    expect(deploy.disabled).toBe(true)
-    expect(reasons()).toEqual(['Fleet not freshly verified: run Activate and verify'])
+    // A fleet that is not running no longer blocks the button: the backend check on Deploy says what is missing and offers to activate or to deploy as a plan only.
+    expect(deploy.disabled).toBe(false)
+    expect(reasons()).toEqual([])
     apiMock.fleetStatus.mockResolvedValue({ capacity: 5, verified_count: 1, manager_error: null, instances: [{ aircraft_id: 'px4-1', instance_number: 0, system_id: 1, gazebo_model: 'x500_0', verified: true }] } as never)
     fireEvent.click(within(status).getByRole('button', { name: 'ACTIVATE AND VERIFY' }))
     await waitFor(() => expect(within(status).getByText('VERIFIED')).toBeTruthy())
@@ -328,5 +330,41 @@ describe('Scenario Lab workflow (schema 2)', () => {
     say('can I deploy?')
     await waitFor(() => expect(lastReply()).toMatch(/General approval of this exact version/))
     view.unmount()
+  })
+})
+
+describe('Scenario Lab: any number of aircraft and the reasons next to disabled buttons', () => {
+  beforeEach(() => { sessionStorage.clear(); localStorage.clear(); store = null })
+  afterEach(() => { cleanup(); vi.clearAllMocks() })
+  it('plans 12 aircraft without activating any, with no fixed five, and Section B walks all of them', async () => {
+    renderLab()
+    await screen.findByLabelText(/HOW MANY UAVS ARE REQUIRED/)
+    expect(screen.getByLabelText(/HOW MANY UAVS ARE REQUIRED/).getAttribute('max')).toBeNull()             // no fixed maximum
+    fireEvent.change(countInput(), { target: { value: '12' } })
+    click('PLAN THIS MANY AIRCRAFT WITHOUT ACTIVATING')
+    const progress = await screen.findByRole('navigation', { name: 'Individual aircraft configuration progress' })
+    expect(within(progress).getAllByRole('button')).toHaveLength(12)
+    expect(progress.textContent).toContain('AIRCRAFT 2 OF 12')
+    expect(screen.getByText(/CURRENT AIRCRAFT · 1 OF 12/)).toBeTruthy()
+    expect(apiMock.activateFleet).not.toHaveBeenCalled()                                                   // planning never starts an aircraft
+    expect(document.body.textContent).toMatch(/Planned 12 aircraft \(px4-1 to px4-12\) without starting any/)
+  })
+
+  it('says next to the disabled Generate and Confirm buttons what is missing, and highlights the first missing field', async () => {
+    renderLab()
+    await screen.findByLabelText(/HOW MANY UAVS ARE REQUIRED/)
+    fireEvent.change(countInput(), { target: { value: '2' } })
+    click('PLAN THIS MANY AIRCRAFT WITHOUT ACTIVATING')
+    await screen.findByText(/CURRENT AIRCRAFT · 1 OF 2/)
+    const generate = screen.getByRole('button', { name: /GENERATE \/ PREVIEW ROUTE/ }) as HTMLButtonElement
+    expect(generate.disabled).toBe(true)
+    const why = screen.getByLabelText('Why the route cannot be generated yet')
+    expect(why.textContent).toMatch(/The route cannot be generated yet\. Missing: /)
+    expect(why.textContent).toMatch(/task type/i)
+    const confirm = screen.getByRole('button', { name: /CONFIRM px4-1 AND CONTINUE/ }) as HTMLButtonElement
+    expect(confirm.disabled).toBe(true)
+    expect(screen.getByLabelText('Why this aircraft cannot be confirmed yet').textContent).toMatch(/cannot be confirmed yet\. Missing: /)
+    expect(document.querySelectorAll('.first-missing')).toHaveLength(1)                                  // exactly one field is pointed at: the first missing one
+    expect(document.querySelector('.first-missing')?.textContent).toMatch(/TASK TYPE/)
   })
 })

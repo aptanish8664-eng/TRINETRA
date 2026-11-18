@@ -9,14 +9,14 @@
 .mc-chip.ok i,.mc-dot.ok{background:var(--green)}.mc-chip.warn i,.mc-dot.warn{background:var(--amber)}.mc-chip.bad i,.mc-dot.bad{background:var(--red)}
 :root{--mc-map-h:clamp(420px,60vh,720px);--mc-chrome:150px}
 /* Middle row: left rail | map | right rail. The row has a bounded height; rails and map fill it (no content-driven height). */
-.mc-main{display:grid;grid-template-columns:minmax(260px,320px) minmax(0,1fr) minmax(260px,320px);grid-template-areas:"left map right";grid-template-rows:minmax(0,1fr);gap:14px;align-items:stretch;height:calc(var(--mc-map-h) + var(--mc-chrome));min-height:0}
+.mc-main{display:grid;grid-template-columns:minmax(240px,270px) minmax(0,1fr) minmax(240px,270px);grid-template-areas:"left map right";grid-template-rows:minmax(0,1fr);gap:14px;align-items:stretch;height:calc(var(--mc-map-h) + var(--mc-chrome));min-height:0}
 .mc-rail{display:flex;flex-direction:column;gap:14px;min-width:0;min-height:0;overflow:hidden}
 .mc-rail-left{grid-area:left}.mc-rail-right{grid-area:right}
 .mc-rail>.panel{flex:1 1 auto;min-height:0;overflow:auto}
 .mc-panel{min-width:0;padding-bottom:12px}
 .mc-map-panel{grid-area:map;display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden}
 .mc-map-panel>.panel-heading,.mc-map-panel>.mc-map-toolbar,.mc-map-panel>.mc-drawer{flex:none}
-.mc-map-panel .cesium-live-map{flex:1 1 0;height:auto;min-height:260px;min-width:0}
+.mc-map-panel .cesium-live-map{flex:1 1 0;height:auto;min-height:620px;max-height:720px;min-width:0}
 .mc-lower{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;align-items:stretch}
 .mc-lower>.panel{min-width:0;overflow:auto}
 .mc-empty{display:grid;gap:5px;justify-items:start;margin:10px 14px;color:var(--muted);font-size:12px}.mc-empty small{font:10px var(--mono)}

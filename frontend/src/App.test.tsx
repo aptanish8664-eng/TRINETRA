@@ -130,7 +130,7 @@ describe('Mission Control routing', () => {
     fireEvent.click(screen.getByRole('button', { name: 'RETURN TO HOME' }))
     expect(await screen.findByRole('heading', { name: /See the signal/ })).toBeTruthy()
     expect(window.location.pathname).toBe('/')
-    expect(document.querySelector('.hero-image img')?.getAttribute('fetchpriority')).toBeNull()
+    expect(document.querySelector('[data-testid="video-backdrop"]')).not.toBeNull()       // the footage backdrop replaced the photograph
     expect(consoleError.mock.calls.flat().join(' ')).not.toContain('fetchPriority')
     consoleError.mockRestore()
   })

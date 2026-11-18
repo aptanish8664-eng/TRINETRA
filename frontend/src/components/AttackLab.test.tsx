@@ -10,6 +10,7 @@ import { findGroundTruthKeys } from './threatSession'
 
 const apiMock = vi.hoisted(() => ({
   attackLabLimits: vi.fn(), attackExperiments: vi.fn(), attackLabMissions: vi.fn(), applyAttackPreset: vi.fn(),
+  implementExperiment: vi.fn(), attackLabResults: vi.fn(), exportRunRecords: vi.fn(),
   validateExperiment: vi.fn(), createExperiment: vi.fn(), updateExperiment: vi.fn(), deleteExperiment: vi.fn(), copyExperiment: vi.fn(), repinExperiment: vi.fn(),
 }))
 vi.mock('../services/api', () => ({ api: apiMock }))
@@ -31,6 +32,7 @@ beforeEach(() => {
   apiMock.attackLabLimits.mockResolvedValue(limits)
   apiMock.attackExperiments.mockResolvedValue([])
   apiMock.attackLabMissions.mockResolvedValue({ missions: [], legacy_only_count: 0 })
+  apiMock.attackLabResults.mockResolvedValue([])
 })
 afterEach(() => { cleanup(); vi.clearAllMocks() })
 
@@ -39,7 +41,7 @@ describe('AttackLab', () => {
     render(<AttackLab canEdit/>)
     expect(await screen.findByRole('heading', { name: ATTACK_LAB_NAME })).toBeTruthy()
     expect(screen.getByText(/does not affect the aircraft/)).toBeTruthy()
-    expect(screen.getByText(/not executed until the experiment runner exists/i)).toBeTruthy()
+    expect(screen.getByText(/only while Implement is switched on/i)).toBeTruthy()
     expect(screen.getByText(/never changes an aircraft's role/)).toBeTruthy()
     expect(document.body.textContent).toContain(HIDDEN_SCHEDULE_NOTE)
     expect(document.body.textContent).toContain(GROUND_TRUTH_NOTE)
@@ -193,5 +195,71 @@ describe('AttackLab saved experiments and layout', () => {
     await screen.findByRole('heading', { name: ATTACK_LAB_NAME })
     expect(document.body.textContent?.toLowerCase()).not.toMatch(/arm for run|armed for run/)
     expect(screen.queryByRole('checkbox', { name: /arm/i })).toBeNull()
+  })
+})
+
+describe('AttackLab Implement switch and run records', () => {
+  beforeEach(() => {
+    apiMock.attackLabMissions.mockResolvedValue({ missions: [mission([version({ id: 'v1' })])], legacy_only_count: 0 })
+  })
+  const liveRecord = {
+    kind: 'live_run' as const, execution_id: 'x1', started_at: '2026-11-17T10:00:00Z', ended_at: '2026-11-17T10:05:00Z', run_seconds: 300, end_reason: 'completed',
+    false_alarms: 1, outcome: 'detected' as const, assessments_recorded: 280, caveats: ['One flight is one sample.'], operator_responses: [{ at: 't', after_run_start_s: 95, aircraft_id: 'px4-1', action: 'return_to_launch', tier: 'High', threat_score: 71, by: 'gen' }],
+    attacks: [{ target_aircraft: 'px4-1', type: 'drift', start_s: 30, duration_s: 60, magnitude: 1, direction_deg: null, reached: true, fully_run: true, outcome: 'detected' as const,
+      first_reaction_s: 41, first_reaction_tier: 'Medium', latency_s: 11, first_alert_s: 52, first_alert_latency_s: 22, peak_score: 80, peak_tier: 'High' }],
+    timeline: { 'px4-1': Array.from({ length: 30 }, (_, index) => ({ t: index * 10, score: index > 4 ? 60 : 10, tier: index > 4 ? 'High' : 'Low', attacked: index > 2 && index < 9 })) },
+  }
+
+  it('switches Implement on with the exact-version wording and locks edit/delete while it is on', async () => {
+    apiMock.attackExperiments.mockResolvedValue([experimentRecord({ implemented: false })])
+    apiMock.implementExperiment.mockResolvedValue(experimentRecord({ implemented: true, status: 'implemented' }))
+    render(<AttackLab canEdit/>)
+    const card = await screen.findByRole('listitem', { name: 'Experiment Drift test' })
+    const toggle = within(card).getByRole('switch', { name: 'Implement Drift test' }) as HTMLInputElement
+    expect(toggle.checked).toBe(false)
+    apiMock.attackExperiments.mockResolvedValue([experimentRecord({ implemented: true, status: 'implemented' })])
+    fireEvent.click(toggle)
+    await waitFor(() => expect(apiMock.implementExperiment).toHaveBeenCalledWith('e1', true))
+    expect(await screen.findByText(/is implemented: it runs automatically in the next flight/)).toBeTruthy()
+    const locked = await screen.findByRole('listitem', { name: 'Experiment Drift test' })
+    expect((within(locked).getByRole('button', { name: 'Delete Drift test' }) as HTMLButtonElement).disabled).toBe(true)
+    expect(within(locked).getByRole('button', { name: 'Open experiment Drift test' }).textContent).toBe('OPEN')
+    expect(locked.textContent).toContain('Edit and delete are locked while Implement is on.')
+  })
+
+  it('refuses to switch a baseline without attacks on and warns when an implemented experiment is pinned to an old version', async () => {
+    apiMock.attackExperiments.mockResolvedValue([
+      experimentRecord({ id: 'b', name: 'Baseline', config: { ...DEFAULT_CONFIG, attacks: [] } }),
+      experimentRecord({ id: 'o', name: 'Old one', implemented: true, status: 'implemented', superseded: true }),
+    ])
+    render(<AttackLab canEdit/>)
+    const base = await screen.findByRole('listitem', { name: 'Experiment Baseline' })
+    expect((within(base).getByRole('switch', { name: 'Implement Baseline' }) as HTMLInputElement).disabled).toBe(true)
+    const old = screen.getByRole('listitem', { name: 'Experiment Old one' })
+    expect(old.textContent).toMatch(/will not run in a flight of the newer version/)
+  })
+
+  it('lists run records, opens one with its timeline, operator responses and caveats, and exports', async () => {
+    apiMock.attackExperiments.mockResolvedValue([])
+    apiMock.attackLabResults.mockResolvedValue([{ id: 'r1', experiment_id: 'e1', experiment_name: 'Drift test', scenario_version_id: 'v1', created_at: 't', from_deleted_experiment: false, result: liveRecord }])
+    apiMock.exportRunRecords.mockResolvedValue(new Blob(['x']))
+    ;(URL as unknown as { createObjectURL: () => string }).createObjectURL = () => 'blob:x'
+    ;(URL as unknown as { revokeObjectURL: () => void }).revokeObjectURL = () => undefined
+    render(<AttackLab canEdit/>)
+    const table = await screen.findByRole('region', { name: 'Run records' })
+    expect(within(table).getByText('Detected')).toBeTruthy()
+    expect(within(table).getByText('11.0 s')).toBeTruthy()
+    fireEvent.click(within(table).getByRole('button', { name: 'Open run record of Drift test' }))
+    const detail = await screen.findByRole('region', { name: 'Run record of Drift test' })
+    expect(within(detail).getByRole('img', { name: 'Threat score of px4-1 over flight time' })).toBeTruthy()
+    expect(detail.textContent).toContain('gen chose “return_to_launch” for px4-1')
+    expect(detail.textContent).toContain('One flight is one sample.')
+    fireEvent.click(within(table).getByRole('button', { name: /EXPORT RUN RECORDS/ }))
+    await waitFor(() => expect(apiMock.exportRunRecords).toHaveBeenCalled())
+  })
+
+  it('says plainly that there are no run records yet', async () => {
+    render(<AttackLab canEdit/>)
+    expect(await screen.findByText(/No run records yet\. Switch Implement on/)).toBeTruthy()
   })
 })

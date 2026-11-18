@@ -1,0 +1,33 @@
+/* Confirmations are centred over the page so they are fully visible without scrolling; the Land here / Restart controls and the restart steps. */
+.mc-modal-backdrop{position:fixed;inset:0;z-index:1200;display:grid;place-items:center;padding:16px;background:rgba(3,8,14,.72)}
+.mc-modal{width:min(640px,100%);max-height:calc(100vh - 32px);overflow:auto;margin:0;padding:18px 20px;border:1px solid #3a566b;background:#0b1825;box-shadow:0 18px 60px rgba(0,0,0,.6)}
+.mc-modal>b{display:block;margin-bottom:8px;font-size:14px}
+.mc-modal p{margin:0 0 10px;font-size:12px;line-height:1.6}
+.mc-modal .mc-exec-checklist{max-height:none}
+.mc-exec-explain{display:block;margin:0 12px 8px;color:var(--muted);font:9px var(--mono);line-height:1.6}
+.mc-land-status{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:0 12px 8px;padding:6px 10px;border-left:2px solid var(--cyan);background:rgba(85,217,255,.08);font-size:11px}
+.mc-land-status.done{border-color:var(--green);background:rgba(86,227,177,.08)}
+.restart-steps{display:grid;gap:4px;margin:10px 0;padding:0;list-style:none}
+.restart-steps li{display:grid;grid-template-columns:18px minmax(150px,220px) 62px minmax(0,1fr);gap:8px;align-items:start;padding:6px 8px;border:1px solid var(--border);font-size:11px}
+.restart-steps li b{font-weight:500}.restart-steps li i{font:9px var(--mono);font-style:normal;letter-spacing:.06em;color:var(--muted)}
+.restart-steps li small{color:var(--muted);font-size:10px;line-height:1.5;overflow-wrap:anywhere}
+.restart-steps li.ok i{color:var(--green)}.restart-steps li.running i{color:var(--cyan)}.restart-steps li.failed{border-color:var(--red)}.restart-steps li.failed i{color:var(--red)}
+.restart-steps li.skipped i{color:var(--muted)}.restart-steps li.skipped{opacity:.7}
+.restart-aircraft{display:grid;gap:6px;margin:10px 0}.restart-aircraft>b{font:600 12px var(--sans)}
+.restart-aircraft ul{display:grid;gap:3px;margin:0;padding:0;list-style:none;max-height:190px;overflow-y:auto}
+.restart-aircraft li{display:grid;grid-template-columns:62px 104px minmax(0,1fr);gap:8px;align-items:start;padding:4px 8px;border:1px solid var(--border);font-size:11px}
+.restart-aircraft li i{font:9px var(--mono);font-style:normal;letter-spacing:.06em;color:var(--muted)}.restart-aircraft li small{color:var(--muted);font-size:10px;line-height:1.5;overflow-wrap:anywhere}
+.restart-aircraft li.ready i{color:var(--green)}.restart-aircraft li.failed{border-color:var(--red)}.restart-aircraft li.failed i{color:var(--red)}.restart-aircraft li.telemetry_ok i,.restart-aircraft li.pose_ok i{color:var(--cyan)}
+.restart-result{display:grid;gap:4px;margin:6px 0 10px;padding:8px 10px;border-left:2px solid var(--green);background:rgba(86,227,177,.08);font-size:12px}
+.restart-failure{display:grid;gap:4px;margin:6px 0 10px;padding:8px 10px;border-left:2px solid var(--red);background:rgba(255,92,92,.08);font-size:12px}
+.mission-switch-banner .mc-switch-note{flex:1 0 100%;color:var(--muted);font-size:10px}
+@keyframes mcspin{to{transform:rotate(360deg)}}.spin{animation:mcspin 1s linear infinite}
+
+/* Part 5: one block per aircraft run */
+.mc-fleet-runs { display: grid; gap: 6px; margin-top: 8px; }
+.mc-fleet-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.mc-fleet-list li { display: grid; gap: 4px; padding: 8px; border: 1px solid color-mix(in srgb, currentColor 16%, transparent); border-radius: 6px; }
+.mc-fleet-head { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; }
+.mc-fleet-head span { margin-left: auto; font-size: 11px; opacity: 0.85; }
+.mc-fleet-buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
+.mc-fleet-buttons button { font-size: 10px; padding: 4px 6px; }

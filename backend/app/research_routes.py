@@ -14,7 +14,7 @@ import uuid
 from datetime import datetime, timezone
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Literal, Optional
+from typing import Any, Callable, Literal, Optional
 
 import numpy as np
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
@@ -26,7 +26,7 @@ from .authorization import Permission, has_permission
 from .config import LIVE_ASSESSMENT_INTERVAL_S, MIN_HANDOVER_BATTERY_PCT
 from .persistence.database import (add_audit_event, get_attack_experiment, latest_mission_deployment, list_attack_experiments,
                                    list_research_decisions, record_research_decision)
-from .research import live_inputs
+from .research import live_experiments, live_inputs
 from .research import threat_engine as engine
 from .research.attacks import AttackConfig, GroundTruthLeak, assert_no_ground_truth_deep
 from .research.threat_data import DT, FEATURE_COLUMNS, FEATURE_COLUMNS_LONG, HZ, compute_features, residual_series, simulate_aircraft
@@ -98,10 +98,12 @@ def _arrays(samples: list[Sample]) -> tuple[np.ndarray, np.ndarray, np.ndarray, 
 
 def assess_arrays(model: ThreatModel, t, gps_position, gps_velocity, imu_velocity, role: str, battery_pct: float, remaining_fraction: float,
                   peer_res10: Optional[np.ndarray], candidates: list[dict], min_battery_pct: float, candidate_roles: list[str],
-                  peer_res30: Optional[np.ndarray] = None) -> dict[str, Any]:
-    """Pure assessment of the LAST sample of a window from sensor arrays only."""
+                  peer_res30: Optional[np.ndarray] = None, recorder: Optional[Callable[[dict[str, float], float], None]] = None) -> dict[str, Any]:
+    """Pure assessment of the LAST sample of a window from sensor arrays only. `recorder` (research use) receives the feature row of the last sample."""
     features = compute_features(t, gps_position, gps_velocity, imu_velocity, peer_res10, 1 + (0 if peer_res10 is None else 1), peer_res30,
                                  include_long=any(name in FEATURE_COLUMNS_LONG for name in model.feature_columns))
+    if recorder is not None:
+        recorder({name: float(features[name].iloc[-1]) for name in features.columns}, float(t[-1]))
     recent = np.flatnonzero(t >= t[-1] - HOLD_S)
     recent_confidence = model.confidence(features.iloc[recent])   # the model scores rows independently: only the hold window is needed
     pick = int(recent[len(recent) - 1 - int(np.argmax(recent_confidence[::-1]))])  # latest of the strongest
@@ -162,7 +164,20 @@ telemetry_store: Any = None        # set by main.py to the Px4TelemetryStore; No
 _live_cache: dict[tuple, dict[str, Any]] = {}
 _live_last: dict[tuple, dict[str, dict[str, Any]]] = {}   # per role map: last computed assessment per aircraft (landed / link lost)
 _live_lock = threading.Lock()
+
+
+def reset_live_threat() -> None:
+    """Forget every cached live assessment (a simulation restart starts a new window; the old aircraft is gone)."""
+    live_experiments.close_all("simulation restarted")
+    ROLE_OVERRIDES.clear()
+    _roles_cache.clear()
+    with _live_lock:
+        _live_cache.clear()
+        _live_last.clear()
 _roles_cache: dict[str, tuple[float, dict[str, str]]] = {}
+# Roles changed during a flight by an operator response (switch primary, hand over): deployment id -> {aircraft: role}. In memory only: it is
+# forgotten when the backend restarts or the simulation is restarted (`reset_live_threat`); the deployed plan itself is never edited.
+ROLE_OVERRIDES: dict[str, dict[str, str]] = {}
 LANDED_KEEP_S = 600.0        # a landed aircraft keeps its last assessment on screen this long; then the monitor waits for a flight
 LINK_LOST_KEEP_S = 1800.0    # an aircraft whose link dropped in flight stays listed (stale) this long
 UNKNOWN_DISTANCE_M = 2000.0  # the ranking's distance limit: an unknown distance earns no credit
@@ -198,6 +213,7 @@ def _deployment_roles(context: AuthContext) -> dict[str, str]:
             plan, _scenario, _issues = load_pinned_plan(context, deployment["scenario_id"], deployment["scenario_version_id"])
             if plan is not None:
                 roles = {item.uav_id: item.role for item in plan.aircraft if item.role in engine.ROLE_WEIGHT}
+                roles.update(ROLE_OVERRIDES.get(deployment["id"], {}))
     except Exception:   # a role is context for mission impact only; never fail the assessment over it
         roles = {}
     if len(_roles_cache) > 64:
@@ -312,6 +328,38 @@ def _data_quality(inputs: dict[str, Any], window: dict[str, Any], notes: list[st
     }
 
 
+# --- research recording of live feature rows (off unless TRINETRA_RECORD_LIVE_DIR is set) ---------------------------------------
+_RECORD_DIR = os.environ.get("TRINETRA_RECORD_LIVE_DIR")
+_RECORD_LAST: dict[str, float] = {}
+_RECORD_FLIGHT: dict[str, int] = {}
+
+
+def _live_recorder(row: dict[str, Any], inputs: dict[str, Any], window: dict[str, Any]) -> Optional[Callable[[dict[str, float], float], None]]:
+    """When recording is on: a callback that appends one JSON line per assessment (features of the last sample, plus the context needed to
+    label the flight phase and to judge timing quality). Never used in normal operation; never contains ground truth beyond what telemetry reports."""
+    if not _RECORD_DIR:
+        return None
+    key = f"{inputs['id']}"
+    vehicle_alt = None
+
+    def write(features: dict[str, float], t_last: float) -> None:
+        previous = _RECORD_LAST.get(key)
+        if previous is not None and t_last <= previous:
+            if previous - t_last < 20.0:
+                return                                       # the same sample again
+            _RECORD_FLIGHT[key] = _RECORD_FLIGHT.get(key, 0) + 1      # time went back: a new flight of this aircraft
+        _RECORD_LAST[key] = t_last
+        context = {"aircraft_id": inputs["id"], "flight_idx": _RECORD_FLIGHT.get(key, 0), "t": t_last, "px4_time_s": float(window["px4_time_s"]), "armed_for_s": inputs.get("armed_for_seconds"),
+                   "flight_mode": inputs.get("flight_mode"), "rates_hz": inputs.get("rates_hz"), "gap_restart": window.get("restarted_after_gap"),
+                   "alt_m": float(window["gps_position"][-1][2]), "ground_speed_m_s": float(np.linalg.norm(window["gps_velocity"][-1][:2])),
+                   "heading_deg": float(np.degrees(np.arctan2(window["gps_velocity"][-1][0], window["gps_velocity"][-1][1])) % 360.0),
+                   "east_m": float(window["gps_position"][-1][0]), "north_m": float(window["gps_position"][-1][1]),
+                   "battery_pct": (inputs.get("battery") or {}).get("remaining_percent"), "mission": inputs.get("mission"), "wall_s": time.time()}
+        with open(os.path.join(_RECORD_DIR, "live_features.jsonl"), "a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"ctx": context, "features": features}, default=float) + chr(10))
+    return write
+
+
 def compute_live(store: Any, roles: dict[str, str]) -> dict[str, Any]:
     """Assess every aircraft from the server's own telemetry buffer (same feature and model code as /assess)."""
     model = get_model()
@@ -322,6 +370,10 @@ def compute_live(store: Any, roles: dict[str, str]) -> dict[str, Any]:
         if inputs is not None:
             rows.append(_live_aircraft(inputs, roles.get(vehicle_id, "primary"), "deployed_plan" if vehicle_id in roles else "assumed_primary", last_by_aircraft))
     ready = [row for row in rows if row["state"] == "live"]
+    for row in ready:      # an implemented Attack Lab experiment changes only the monitor's software copy of the GPS stream, never the aircraft
+        window = row["_window"]
+        window["gps_position"], window["gps_velocity"], row["_attacked"] = live_experiments.apply_to_window(
+            row["aircraft_id"], window["t"], window["gps_position"], window["gps_velocity"])
     for row in ready:
         window, inputs = row["_window"], row["_inputs"]
         if model is None:
@@ -354,11 +406,12 @@ def compute_live(store: Any, roles: dict[str, str]) -> dict[str, Any]:
         candidates = [{"aircraft_id": other["aircraft_id"], "role": other["role"] if known[other["aircraft_id"]]["role"] else "",
                        "battery_pct": other["battery_pct"] if known[other["aircraft_id"]]["battery"] else 0.0,
                        "distance_to_task_m": UNKNOWN_DISTANCE_M, "workload": 1.0} for other in others]
+        record = _live_recorder(row, inputs, window)
         result = assess_arrays(model, window["t"], window["gps_position"], window["gps_velocity"], window["imu_velocity"], row["role"],
                                100.0 if battery is None else float(battery), remaining,
                                np.median(np.vstack(peers10), axis=0) if peers10 else None,
                                candidates, float(MIN_HANDOVER_BATTERY_PCT), ["standby", "decoy"],
-                               np.median(np.vstack(peers30), axis=0) if peers30 else None)
+                               np.median(np.vstack(peers30), axis=0) if peers30 else None, recorder=record)
         for candidate in result["handover_candidates"]:
             facts = known[candidate["aircraft_id"]]
             candidate.update(distance_to_task_m=None, workload=None, distance_known=False, workload_known=False, battery_known=facts["battery"], role_known=facts["role"])
@@ -370,10 +423,12 @@ def compute_live(store: Any, roles: dict[str, str]) -> dict[str, Any]:
                                               "credit in the ranking. An aircraft with an unknown battery or role is never eligible.")
         result.update(aircraft_id=row["aircraft_id"], source="live_telemetry", px4_time_s=round(window["px4_time_s"], 2), flight_time_s=round(float(window["t"][-1]), 1), computed_at=_utc())
         row["assessment"], row["assessment_age_s"] = result, 0.0
+        live_experiments.observe(row["aircraft_id"], float(window["t"][-1]), result, bool(row.pop("_attacked", False)))
         row["data_quality"] = _data_quality(inputs, window, notes)
         last_by_aircraft[row["aircraft_id"]] = {"at": time.monotonic(), "assessment": result}
     for row in rows:
         row.pop("_window", None)
+        row.pop("_attacked", None)
         row.pop("_inputs", None)
     return {"source": "live_telemetry", "generated_at": _utc(), "model_available": model is not None, "model_id": None if model is None else model.model_id,
             "flight_running": any(row["armed"] and row["link"]["status"] == "connected" for row in rows),

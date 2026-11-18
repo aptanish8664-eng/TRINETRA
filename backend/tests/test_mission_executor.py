@@ -73,6 +73,12 @@ class FakePx4:
         self.alive = True
         self._last_heartbeat = None
         self.arms_on_command = True
+        self.stream_requests = []
+        self.rel_alt = None
+        self.speed = 0.0
+        self._last_extended = None
+        self._last_position = None
+        self.landed = None      # None: PX4 sends no EXTENDED_SYS_STATE; 1 on ground, 2 in air, 4 landing
 
     # --- what the executor calls -----------------------------------------------------------------
     def recv(self):
@@ -105,6 +111,9 @@ class FakePx4:
             self._request(fields["seq"] + 1)
 
     def send_command(self, command, params):
+        if command == 511:      # SET_MESSAGE_INTERVAL (EXTENDED_SYS_STATE at 2 Hz): recorded apart so flight-command assertions stay exact
+            self.stream_requests.append(params)
+            return
         self.sent.append(("command", command, params))
         if not self.answer_commands:
             return
@@ -138,6 +147,12 @@ class FakePx4:
             self.heartbeat()
         if self.awaiting is not None and now - self.last_request >= 0.25:
             self._request(self.awaiting)
+        if self.alive and self.landed is not None and (self._last_extended is None or now - self._last_extended >= 0.5):
+            self._last_extended = now
+            self.queue.append(Message(kind="EXTENDED_SYS_STATE", landed_state=self.landed))
+        if self.alive and self.rel_alt is not None and (self._last_position is None or now - self._last_position >= 0.2):
+            self._last_position = now
+            self.queue.append(Message(kind="GLOBAL_POSITION_INT", relative_alt=int(self.rel_alt * 1000), vx=int(self.speed * 100), vy=0))
 
     def current(self, seq, mission_state=3):
         self.queue.append(Message(kind="MISSION_CURRENT", seq=seq, mission_state=mission_state))
@@ -213,7 +228,7 @@ def test_a_valid_mission_is_normalised_and_mapped_to_fixed_mavlink_fields():
     (lambda m: m["items"].pop(), "last item must be the landing"),
     (lambda m: m["items"][0].update(altitude_m=0.5), "at least 1 m"),
     (lambda m: m.update(system_id=7), "managed SITL identity"),
-    (lambda m: m.update(instance=9), "fleet capacity"),
+    (lambda m: m.update(instance=16), "fleet capacity"),
     (lambda m: m.update(execution_id="../../etc/passwd"), "32 lowercase hex"),
     (lambda m: m.update(route_total=9), "route_total"),
     (lambda m: m.update(raw_mavlink="fe0102"), "unexpected mission field"),
@@ -233,7 +248,7 @@ def test_item_count_limits_and_non_object_payloads():
         ex.validate_mission(mission(extra_items=[{"command": 22, "latitude": 1, "longitude": 1, "altitude_m": 30, "route_seq": 0}]))
     with pytest.raises(ex.MissionError, match="must be an object"):
         ex.validate_mission([1, 2, 3])
-    assert set(ex.SENDABLE_COMMANDS) == {300, 400, 176, 20}  # mission start, arm/disarm, set mode, return to launch
+    assert set(ex.SENDABLE_COMMANDS) == {300, 400, 176, 20, 511}  # mission start, arm/disarm, set mode, return to launch, message interval (landed state)
     assert set(ex.ITEM_COMMANDS) == {16, 21, 22, 178}
 
 
@@ -584,13 +599,13 @@ def test_control_files_only_accept_the_three_commands_for_the_running_execution(
     monkeypatch.setattr(ex, "runtime_dir", lambda instance: tmp_path)
     (tmp_path / "status.json").write_text(json.dumps({"execution_id": EXECUTION_ID, "state": "executing"}), encoding="utf-8")
     (tmp_path / "daemon.pid").write_text("4321", encoding="utf-8")
-    monkeypatch.setattr(ex, "_pid_alive", lambda pid: pid == 4321)
+    monkeypatch.setattr(ex, "_pid_alive", lambda pid, word="run": pid == 4321)
     accepted = ex.cli_control(0, EXECUTION_ID, "pause")
     assert accepted["accepted"] is True and accepted["daemon_alive"] is True
     assert json.loads((tmp_path / "control.jsonl").read_text(encoding="utf-8").splitlines()[0])["command"] == "pause"
     other = ex.cli_control(0, "f" * 32, "abort")
     assert other["failure_code"] == "execution_mismatch"
-    monkeypatch.setattr(ex, "_pid_alive", lambda pid: False)
+    monkeypatch.setattr(ex, "_pid_alive", lambda pid, word="run": False)
     assert ex.cli_control(0, EXECUTION_ID, "resume")["failure_code"] == "executor_not_running"
     (tmp_path / "events.jsonl").write_text('{"index": 0, "type": "a"}\n{"index": 1, "type": "b"}\nbroken\n', encoding="utf-8")
     assert [event["type"] for event in ex.read_events(tmp_path, 0)] == ["b"]

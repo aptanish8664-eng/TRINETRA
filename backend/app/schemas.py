@@ -291,6 +291,36 @@ class MissionPlannerMessage(BaseModel):
     content: str = Field(min_length=1, max_length=2000)
 
 
+class QuickSourceAircraft(BaseModel):
+    """One row of the Quick Mission aircraft box exactly as the user left it: `None` is "use the default" (auto stays auto when reopened)."""
+    name: Optional[str] = Field(default=None, max_length=40)
+    role: Optional[str] = Field(default=None, pattern=r"^(primary|decoy|standby)$")
+    altitude_m: Optional[float] = Field(default=None, gt=0, le=10000, allow_inf_nan=False)
+    speed_mps: Optional[float] = Field(default=None, gt=0, le=1000, allow_inf_nan=False)
+    start_offset_m: Optional[float] = Field(default=None, ge=-100000, le=100000, allow_inf_nan=False)
+
+
+class QuickSource(BaseModel):
+    """How a version was created by Quick Mission: the user-chosen values, so Quick Mission can be reopened with them.
+
+    Kept only while the plan still equals what these values produce (`plan_fingerprint` in mission_planning/quick.py); a fine-tuned plan drops it.
+    """
+    mission_type: str = Field(max_length=32)
+    where: Optional[dict] = None                      # {latitude, longitude} of the clicked place (area centre / destination)
+    points: list[dict] = Field(default_factory=list, max_length=20)
+    drop_index: Optional[int] = Field(default=None, ge=0, le=19)
+    where_source: str = Field(default="map", pattern=r"^(map|place|aircraft)$")
+    place_name: Optional[str] = Field(default=None, max_length=80)
+    size_m: Optional[float] = Field(default=None, gt=0, le=1_000_000, allow_inf_nan=False)
+    drone_count: int = Field(default=1, ge=1, le=999)
+    roles: list[str] = Field(default_factory=list, max_length=998)           # older saves: roles of the 2nd, 3rd ... aircraft
+    aircraft: list[QuickSourceAircraft] = Field(default_factory=list, max_length=999)   # one row per aircraft, in order (typed values only)
+    speed_mps: Optional[float] = Field(default=None, gt=0, le=1000, allow_inf_nan=False)
+    altitude_m: Optional[float] = Field(default=None, gt=0, le=10000, allow_inf_nan=False)
+    name: str = Field(default="", max_length=120)
+    fingerprint: str = Field(default="", max_length=64)
+
+
 class ScenarioIntent(BaseModel):
     mission_objectives: list[str] = Field(default_factory=list, max_length=8)
     mission_description: str = Field(default="", max_length=2000)
@@ -305,6 +335,7 @@ class ScenarioIntent(BaseModel):
     mission_plan: Optional[MissionPlan] = None
     uav_fault_assignments: list[ScenarioUavFaultIntent] = Field(default_factory=list, max_length=12)
     planner_conversation: list[MissionPlannerMessage] = Field(default_factory=list, max_length=80)
+    quick_source: Optional[QuickSource] = None
 
     @model_validator(mode="after")
     def validate_fault_assignments(self) -> "ScenarioIntent":

@@ -167,5 +167,6 @@ export function stableStringify(value: unknown): string {
 }
 
 /** Allowed fleet size for one mission; shared by the form, the assistant validation and the assistant option picker. */
-export const UAV_COUNT_RANGE = { min: 1, max: 5 } as const
+/** Any whole number of aircraft can be planned; the only ceiling is the id format (px4-1 ... px4-999). How many can be SIMULATED is the backend's capacity setting. */
+export const UAV_COUNT_RANGE = { min: 1, max: 999 } as const
 export const MISSION_DURATION_RANGE_MINUTES = { min: 1, max: 1440 } as const

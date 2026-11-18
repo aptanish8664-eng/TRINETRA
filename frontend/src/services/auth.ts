@@ -196,6 +196,37 @@ export type ScenarioFaultType =
   | 'degradation'
   | 'velocity_inconsistency'
 
+export interface QuickSource {
+  mission_type: string
+  where?: { latitude: number; longitude: number } | null
+  points?: { latitude: number; longitude: number }[]
+  drop_index?: number | null
+  where_source: 'map' | 'place' | 'aircraft'
+  place_name?: string | null
+  size_m?: number | null
+  drone_count: number
+  roles?: string[]
+  /** one row per aircraft exactly as typed (null = auto) */
+  aircraft?: { name?: string | null; role?: 'primary' | 'decoy' | 'standby' | null; altitude_m?: number | null; speed_mps?: number | null; start_offset_m?: number | null }[]
+  speed_mps?: number | null
+  altitude_m?: number | null
+  name: string
+  fingerprint: string
+}
+
+/** One row of the General's saved-scenarios list. */
+export interface GeneralScenarioRow {
+  id: string; title: string; owner_user_id: string; owner_username: string | null; owner_name: string | null; owner_role: string | null
+  latest_version_number: number; status: 'draft' | 'submitted' | 'approved' | 'deployed'; approval_status: string | null
+  created_at: string; updated_at: string; source: 'quick' | 'manual' | 'legacy'; deployments: number; executions: number; active_execution: boolean
+  versions: { id: string; number: number; hash: string; source: string; approval_status: string | null; deployed: boolean; created_at: string }[]
+}
+export interface ScenarioDeletePreview {
+  scenario_id: string; title: string
+  counts: { versions: number; approvals: number; deployments: number; executions: number; execution_events: number; run_records: number; experiments: number; experiment_results: number }
+  blockers: { code: string; message: string }[]
+}
+
 export interface ScenarioIntent {
   mission_objectives: string[]
   mission_description?: string
@@ -209,6 +240,8 @@ export interface ScenarioIntent {
   schema_version?: number
   mission_plan?: import('../components/missionPlan').MissionPlan | null
   planner_conversation?: PlannerConversationMessage[]
+  /** How a version was created by Quick Mission (kept only while the plan still equals what these values produce). */
+  quick_source?: QuickSource | null
   uav_fault_assignments: {
     uav_id: string
     fault_type: ScenarioFaultType
@@ -248,6 +281,13 @@ export interface ScenarioDetail {
   created_at: string
   updated_at: string
   versions: ScenarioVersion[]
+}
+
+/** `GET /api/mission-control/deployments/latest`: the latest deployment and the deployment the newest execution belongs to. */
+export interface DeploymentOverview {
+  deployment: MissionDeployment | null
+  execution: { id: string; deployment_id: string; aircraft_id: string; state: string; reason?: string | null; active: boolean; finished_at: string | null } | null
+  execution_deployment: MissionDeployment | null
 }
 
 export interface MissionDeployment {

@@ -201,6 +201,10 @@ def test_px4_telemetry_rest_and_websocket_serve_authoritative_store(operator_cli
     assert response.status_code == 200
     assert response.json()["vehicles"][0]["system_id"] == 7
     assert response.json()["vehicles"][0]["position"]["latitude"] == 1.0
+    assert "flight_trail" in response.json()["vehicles"][0]
+    light = operator.get("/api/telemetry/px4?trails=false").json()           # the page's polls leave the 3000-point trail out
+    assert "flight_trail" not in light["vehicles"][0] and light["vehicles"][0]["position"]["latitude"] == 1.0
+    assert operator.get("/api/mission-plans/limits", headers={"Accept-Encoding": "gzip"}).headers.get("content-encoding") == "gzip"   # JSON is compressed
 
     with operator.websocket_connect("/api/telemetry/px4/stream") as websocket:
         streamed = websocket.receive_json()

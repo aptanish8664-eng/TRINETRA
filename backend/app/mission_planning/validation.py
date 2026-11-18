@@ -19,6 +19,7 @@ REQUIRED_PARAMETERS: dict[str, tuple[str, ...]] = {
     "waypoint_route": ("points",),
     "loiter_hold": (),
     "payload_dropoff": ("drop_point", "drop_altitude_m", "hover_duration_s", "payload_category"),
+    "ground_standby": (),   # stays on the ground at its start: never armed or flown
 }
 AREA_BASED_TASKS = {"coverage_survey"}
 TRACKING_ONLY_OBJECTIVES = {"target_tracking", "custom_mission"}
@@ -128,13 +129,17 @@ def validate_aircraft(aircraft: AircraftPlan, plan: MissionPlan, limits: Plannin
         add("missing_parameter", f"{name} is required for {kind}.", name)
 
     objectives = set(plan.objectives)
-    if objectives and objectives <= TRACKING_ONLY_OBJECTIVES and kind != "waypoint_route":
+    if objectives and objectives <= TRACKING_ONLY_OBJECTIVES and kind not in ("waypoint_route", "ground_standby"):
         add("task_not_allowed", "Target Tracking and Custom Mission only allow a waypoint route; no tracking capability exists.", "task_type")
     if kind == "payload_dropoff" and not objectives & DELIVERY_OBJECTIVES:
         add("task_not_allowed", "payload_dropoff needs the Relief Supply Delivery, Search and Rescue or Disaster Assessment objective.", "task_type")
 
     p = aircraft.parameters
     if kind == "payload_dropoff":
+        if p.points and (p.drop_index or 0) >= len(p.points):
+            add("drop_index_out_of_range", f"drop_index must point at one of the {len(p.points)} waypoints.", "drop_index")
+        if p.points and p.drop_point is not None and p.points[min(p.drop_index if p.drop_index is not None else len(p.points) - 1, len(p.points) - 1)] != p.drop_point:
+            add("drop_point_mismatch", "The drop point must be the marked waypoint.", "drop_point")
         if p.drop_altitude_m is not None and not limits.min_altitude_m <= p.drop_altitude_m <= max_alt:
             add("drop_altitude_out_of_range", f"drop_altitude_m must be between {limits.min_altitude_m:g} and {max_alt:g} m.", "drop_altitude_m")
         if p.hover_duration_s is not None and not limits.min_hover_s <= p.hover_duration_s <= limits.max_hover_s:
@@ -181,9 +186,10 @@ def validate_aircraft(aircraft: AircraftPlan, plan: MissionPlan, limits: Plannin
         add("waypoint_cap", f"The route has {len(route.waypoints)} waypoints; the limit is {limits.max_waypoints}.")
     # Endurance of the simulated X500 applies to every plan, with or without max_duration_minutes.
     advice = "Reduce the area, widen track spacing, or raise speed."
-    if route.duration_s > limits.max_flight_s:
+    raised = endurance_raised(plan, limits)      # the user explicitly raised the maximum duration above the aircraft default: warn, do not block
+    if route.duration_s > limits.max_flight_s and not raised:
         add("endurance_time_exceeded", f"Route takes about {route.duration_s / 60:.0f} min; the aircraft limit is {limits.max_flight_s / 60:g} min. {advice}", "duration_s")
-    if route.length_m > limits.max_flight_distance_m:
+    if route.length_m > limits.max_flight_distance_m and not raised:
         add("endurance_distance_exceeded", f"Route is about {route.length_m / 1000:.1f} km long; the aircraft limit is {limits.max_flight_distance_m / 1000:g} km. {advice}", "length_m")
     if plan.max_duration_minutes is not None and plan.max_duration_minutes * 60 < limits.max_flight_s and route.duration_s > plan.max_duration_minutes * 60:
         add("duration_over_limit", f"The route takes about {route.duration_s / 60:.1f} min; max_duration_minutes is {plan.max_duration_minutes}.", "max_duration_minutes")
@@ -192,6 +198,30 @@ def validate_aircraft(aircraft: AircraftPlan, plan: MissionPlan, limits: Plannin
     if require_route and aircraft.route is None:
         add("route_missing", "Generate and preview the route before confirming this aircraft.", "route")
     return issues, route
+
+
+def endurance_raised(plan: MissionPlan, limits: PlanningLimits) -> bool:
+    """True when the plan's own maximum duration is above the aircraft endurance default: the user took that responsibility explicitly."""
+    return plan.max_duration_minutes is not None and plan.max_duration_minutes * 60 > limits.max_flight_s
+
+
+def plan_warnings(aircraft: AircraftPlan, plan: MissionPlan, limits: PlanningLimits, route: Optional[GeneratedRoute]) -> list[PlanIssue]:
+    """Things worth showing that do not make the plan invalid. The authoritative errors stay in validate_aircraft."""
+    found: list[PlanIssue] = []
+    uav = aircraft.uav_id
+    if plan.operating_area is not None and aircraft.start_location is not None:
+        gap = start_to_area_distance_m(plan.operating_area, aircraft.start_location)
+        if 0 < gap <= min(limits.max_start_to_area_m, limits.max_planar_extent_m if aircraft.task_type in PLANAR_TASKS else limits.max_start_to_area_m):
+            found.append(PlanIssue(code="start_outside_area", uav_id=uav, field="start_location",
+                                   message=f"The start is {gap:.0f} m outside the operating area. The plan is still valid; the aircraft flies there first."))
+    if route is not None and endurance_raised(plan, limits):
+        if route.duration_s > limits.max_flight_s:
+            found.append(PlanIssue(code="endurance_time_raised", uav_id=uav, field="duration_s",
+                                   message=f"The route takes about {route.duration_s / 60:.0f} min, above the aircraft default of {limits.max_flight_s / 60:g} min; you raised the maximum duration, so this is a warning."))
+        if route.length_m > limits.max_flight_distance_m:
+            found.append(PlanIssue(code="endurance_distance_raised", uav_id=uav, field="length_m",
+                                   message=f"The route is about {route.length_m / 1000:.1f} km, above the aircraft default of {limits.max_flight_distance_m / 1000:g} km; you raised the maximum duration, so this is a warning."))
+    return found
 
 
 def validate_plan(plan: MissionPlan, limits: PlanningLimits, *, complete: bool) -> list[PlanIssue]:

@@ -9,7 +9,7 @@ import { api } from '../services/api'
 vi.mock('../services/api', () => ({
   ApiError: class ApiError extends Error { status: number; constructor(status: number) { super('API error'); this.status = status } },
   api: {
-    px4Telemetry: vi.fn(), px4TelemetrySocket: vi.fn(), latestMissionDeployment: vi.fn(), simulationLocation: vi.fn(), relocateSimulation: vi.fn(),
+    px4Telemetry: vi.fn(), px4TelemetrySocket: vi.fn(), latestMissionDeployment: vi.fn(), missionDeployments: vi.fn(), landHere: vi.fn(), startRestart: vi.fn(), restartJob: vi.fn(), retryMissingAircraft: vi.fn(), continueWithReady: vi.fn(), latestRestart: vi.fn(async () => null), deploymentRoleRule: vi.fn(async () => ({ allowed: true, code: 'general', message: 'General accounts deploy and start directly.' })), simulationLocation: vi.fn(), relocateSimulation: vi.fn(),
     health: vi.fn(), fleetStatus: vi.fn(), gazeboPoses: vi.fn(),
     latestExecution: vi.fn(), executionPreflight: vi.fn(), executionEvents: vi.fn(), startExecution: vi.fn(), pauseExecution: vi.fn(), resumeExecution: vi.fn(), abortExecution: vi.fn(),
     researchModelInfo: vi.fn(async () => ({ available: false, formula: '', live_residual_inputs_available: false })), researchDecisions: vi.fn(async () => []), recordDecision: vi.fn(),
@@ -107,6 +107,8 @@ describe('Mission Control live dashboard', () => {
     apiMock.px4Telemetry.mockResolvedValue(snapshot([vehicle(1)]))
     apiMock.px4TelemetrySocket.mockReturnValue(socket as unknown as WebSocket)
     apiMock.latestMissionDeployment.mockResolvedValue(null)
+    // Mission Control reads one overview; most tests only care about the latest deployment, so it is derived from that mock.
+    apiMock.missionDeployments.mockImplementation(async () => ({ deployment: await apiMock.latestMissionDeployment(), execution: null, execution_deployment: null }))
     apiMock.health.mockResolvedValue(health())
     apiMock.fleetStatus.mockResolvedValue({ capacity: 5, verified_count: 1, instances: [], manager_error: null, bridges: { telemetry: { status: 'running' }, pose: { status: 'running' } } } as never)
     apiMock.gazeboPoses.mockResolvedValue(poses(['x500_0']))
@@ -294,7 +296,9 @@ describe('Mission Control live dashboard', () => {
       expect(main).toMatch(/height:calc\(var\(--mc-map-h\)/)
       expect(css).toMatch(/--mc-map-h:clamp\(420px,\s*60vh,\s*720px\)/)
       expect(rule('.mc-map-panel{')).toContain('grid-area:map')
-      expect(rule('.mc-map-panel .cesium-live-map{')).toMatch(/flex:1 1 0;height:auto;min-height:260px/)
+      // the map is the one thing made larger: a landscape canvas of at least 620 px (never a thin strip), slimmer rails give it width
+      expect(rule('.mc-map-panel .cesium-live-map{')).toMatch(/flex:1 1 0;height:auto;min-height:620px;max-height:720px/)
+      expect(main).toContain('grid-template-columns:minmax(240px,270px) minmax(0,1fr) minmax(240px,270px)')
       expect(rule('.mc-rail{')).toContain('min-height:0')
       expect(rule('.mc-rail>.panel{')).toMatch(/flex:1 1 auto.*overflow:auto/)
       expect(rule('.mc-lower{')).toContain('repeat(2,minmax(0,1fr))')
@@ -388,18 +392,18 @@ describe('Mission Control live dashboard', () => {
     apiMock.simulationLocation.mockResolvedValue({
       mission_start: { latitude: 12.9717, longitude: 77.5946, altitude_m: 488, uav_id: 'px4-1', role: 'primary', definition: 'Take-off point of the primary aircraft.' },
       aircraft: [], max_distance_to_start_m: 7_594_000, max_distance_to_area_m: 7_593_600, position_known: true, relocation_recommended: true, far_from_mission_area: true,
-      message: 'The aircraft is about 7594 km from the mission area. The simulation is running at a different location than this mission. Use Move simulation to mission start.',
+      message: 'The aircraft is about 7594 km from the mission area. The simulation is running at a different location than this mission. Use Restart at mission start.',
       thresholds: { relocation_notice_m: 1000, far_from_area_m: 50000, home_tolerance_m: 50 } } as never)
     const view = render(<Px4MissionControl canManageFleet />)
     const region = await screen.findByRole('region', { name: 'Mission location' })
     expect((await within(region).findByRole('alert')).textContent).toMatch(/about 7594 km from the mission area/)
-    expect(within(region).getByRole('button', { name: /MOVE SIMULATION TO MISSION START/ })).toBeTruthy()
+    expect(within(region).getByRole('button', { name: /RESTART AT MISSION START/ })).toBeTruthy()
     expect(apiMock.relocateSimulation).not.toHaveBeenCalled()  // nothing restarts without the press and the confirmation
     view.unmount()
     render(<Px4MissionControl />)
     const readOnly = await screen.findByRole('region', { name: 'Mission location' })
     await within(readOnly).findByRole('alert')
-    expect(within(readOnly).queryByRole('button', { name: /MOVE SIMULATION TO MISSION START/ })).toBeNull()
+    expect(within(readOnly).queryByRole('button', { name: /RESTART AT MISSION START/ })).toBeNull()
   })
 
   it('feeds the flight log with backend execution events and shows live progress in the deployed mission panel', async () => {
@@ -448,3 +452,273 @@ describe('Mission Control header while the deployment loads (walkthrough fix)', 
     expect(screen.getByText('NOT DEPLOYED')).toBeTruthy()
   })
 })
+
+// --- mission switching: one aircraft runs one mission at a time; a newer deployment never disturbs the flight --------------------------
+
+describe('Mission Control mission switching', () => {
+  const firstDeployment = (): MissionDeployment => ({ ...deployment(), id: 'deployment-first', scenario_title: 'Harbour search', scenario_version_number: 2 })
+  const secondDeployment = (): MissionDeployment => ({ ...deployment(), id: 'deployment-second', scenario_title: 'Ridge survey', scenario_version_number: 1 })
+  const execution = (patch: Record<string, unknown> = {}) => ({ id: 'e1', deployment_id: 'deployment-first', aircraft_id: 'px4-1', state: 'executing', reason: null, active: true, finished_at: null, ...patch })
+  const overview = (state: Record<string, unknown> = {}) => ({ deployment: secondDeployment(), execution: execution(state), execution_deployment: firstDeployment() })
+  const groundedVehicle = () => vehicle(1, { armed: true, position: { ...vehicle(1).position!, relative_altitude_m: 0.1 }, velocity: { ...vehicle(1).velocity!, ground_speed_m_s: 0 } })
+
+  beforeEach(() => {
+    mapProps.last = null
+    socket = { onopen: null, onmessage: null, onerror: null, onclose: null, close: vi.fn() }
+    apiMock.px4Telemetry.mockResolvedValue(snapshot([vehicle(1)]))
+    apiMock.px4TelemetrySocket.mockReturnValue(socket as unknown as WebSocket)
+    apiMock.health.mockResolvedValue(health())
+    apiMock.fleetStatus.mockResolvedValue({ capacity: 5, verified_count: 1, instances: [], manager_error: null } as never)
+    apiMock.gazeboPoses.mockResolvedValue(poses(['x500_0']))
+    apiMock.latestExecution.mockResolvedValue(null)
+    apiMock.executionEvents.mockResolvedValue({ execution_id: 'x', state: 'executing', events: [] })
+    apiMock.simulationLocation.mockRejectedValue(new Error('not needed'))
+    // queued answers must not leak from one test into the next
+    apiMock.startRestart.mockReset(); apiMock.restartJob.mockReset(); apiMock.latestRestart.mockReset(); apiMock.latestRestart.mockResolvedValue(null)
+    apiMock.deploymentRoleRule.mockReset(); apiMock.deploymentRoleRule.mockResolvedValue({ allowed: true, code: 'general', message: 'General accounts deploy and start directly.' })
+  })
+  afterEach(() => { cleanup(); vi.clearAllMocks(); vi.useRealTimers() })
+
+  it('keeps showing the deployment of the active flight when a newer one is deployed, with the banner text and no Switch button', async () => {
+    apiMock.missionDeployments.mockResolvedValue(overview() as never)
+    render(<Px4MissionControl/>)
+    expect(await screen.findByText(/A newer deployment \(Ridge survey v1\) is ready\. Finish or abort the current flight to switch\./)).toBeTruthy()
+    expect(document.body.textContent).toContain('Harbour search')
+    expect(screen.queryByRole('button', { name: /SWITCH TO NEW MISSION/ })).toBeNull()
+    expect(screen.queryByRole('button', { name: /DISARM AND SWITCH/ })).toBeNull()
+  })
+
+  it.each(['completed', 'aborted', 'failed', 'link_lost'])('after the flight is %s the banner offers "Switch to new mission", which shows the latest deployment', async state => {
+    apiMock.missionDeployments.mockResolvedValue(overview({ state, active: false, finished_at: '2026-11-15T10:00:00Z' }) as never)
+    render(<Px4MissionControl/>)
+    const button = await screen.findByRole('button', { name: /SWITCH TO NEW MISSION/ })
+    expect(document.body.textContent).toContain('Harbour search')
+    fireEvent.click(button)
+    await waitFor(() => expect(document.body.textContent).toContain('Ridge survey'))
+    expect(screen.queryByRole('button', { name: /SWITCH TO NEW MISSION/ })).toBeNull()
+    expect(screen.queryByLabelText('A newer deployment is ready')).toBeNull()
+  })
+
+  it('with nothing flown yet there is no banner and the latest deployment shows', async () => {
+    apiMock.missionDeployments.mockResolvedValue({ deployment: secondDeployment(), execution: null, execution_deployment: null } as never)
+    render(<Px4MissionControl/>)
+    await waitFor(() => expect(document.body.textContent).toContain('Ridge survey'))
+    expect(screen.queryByLabelText('A newer deployment is ready')).toBeNull()
+  })
+
+  it('armed on the ground: "Disarm and switch" is one confirmed step that calls the disarm endpoint and then switches', async () => {
+    apiMock.px4Telemetry.mockResolvedValue(snapshot([groundedVehicle()]))
+    apiMock.missionDeployments.mockResolvedValue(overview({ state: 'completed', active: false, finished_at: 'x' }) as never)
+    apiMock.landHere.mockResolvedValue({ aircraft_id: 'px4-1', already_landing: false, mode: 'ground', state: 'disarmed', simulation_only: true })
+    render(<Px4MissionControl/>)
+    fireEvent.click(await screen.findByRole('button', { name: /DISARM AND SWITCH/ }))
+    expect(screen.queryByRole('button', { name: /SWITCH TO NEW MISSION/ })).toBeNull()          // never a switch without the disarm
+    expect(apiMock.landHere).not.toHaveBeenCalled()                                        // the first click only opens the confirmation
+    fireEvent.click(screen.getByRole('button', { name: /CONFIRM DISARM AND SWITCH/ }))
+    await waitFor(() => expect(apiMock.landHere).toHaveBeenCalledWith('px4-1'))
+    await waitFor(() => expect(document.body.textContent).toContain('Ridge survey'))
+  })
+
+  it('a refused disarm keeps the old mission and shows the reason', async () => {
+    apiMock.px4Telemetry.mockResolvedValue(snapshot([groundedVehicle()]))
+    apiMock.missionDeployments.mockResolvedValue(overview({ state: 'completed', active: false, finished_at: 'x' }) as never)
+    apiMock.landHere.mockRejectedValue(new Error('PX4 refused the disarm: not landed.'))
+    render(<Px4MissionControl/>)
+    fireEvent.click(await screen.findByRole('button', { name: /DISARM AND SWITCH/ }))
+    fireEvent.click(screen.getByRole('button', { name: /CONFIRM DISARM AND SWITCH/ }))
+    expect(await screen.findByText(/PX4 refused the disarm: not landed\./)).toBeTruthy()
+    expect(document.body.textContent).toContain('Harbour search')
+  })
+
+  it('armed in the air: says Abort comes first and offers no switch', async () => {
+    apiMock.px4Telemetry.mockResolvedValue(snapshot([vehicle(1, { armed: true })]))              // 20 m up, 2.2 m/s
+    apiMock.missionDeployments.mockResolvedValue(overview({ state: 'aborted', active: false, finished_at: 'x' }) as never)
+    render(<Px4MissionControl/>)
+    expect(await screen.findByText(/still armed in the air: Land here or Abort \(return to launch\) comes first/)).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /SWITCH TO NEW MISSION|DISARM AND SWITCH/ })).toBeNull()
+  })
+
+  // --- one-click "Switch and restart at the new start", and "Restart at mission start" ----------------------------------------------------
+  const STEP_KEYS = ['managed', 'executor', 'stop_sim', 'start_sim', 'bridges', 'telemetry', 'gazebo_pose', 'position', 'orphans']
+  const steps = (done: number, failedAt = -1) => STEP_KEYS.map((key, index) => ({ key, label: `step ${key}`, status: failedAt === index ? 'failed' : index < done ? 'ok' : index === done ? 'running' : 'pending', detail: index < done ? `${key} done` : '' }))
+  const job = (patch: Record<string, unknown> = {}) => ({ id: 'job-1', status: 'running', purpose: 'switch', deployment_id: 'deployment-second', reason: 'simulation restarted for a new mission', steps: steps(2),
+    failure: null, can_retry: false, elapsed_s: 3, started_at: 't', finished_at: null, started_by_name: 'Test General', result: null, simulation_only: true,
+    aircraft: [], requested_count: 1, ready_count: 0, summary: '', partial: false, accepted_partial: false, missing: [], can_retry_missing: false, can_continue: false, retry_of: null, ...patch })
+  const done = { status: 'succeeded', steps: steps(9), finished_at: 't2', result: { mission_start: { latitude: 1, longitude: 2 }, max_distance_to_start_m: 0.4, armed: false, ended_executions: ['e1'], killed_processes: [] } }
+  const advance = async (ms = 1100) => act(async () => { await vi.advanceTimersByTimeAsync(ms) })
+
+  it('while a flight is active the banner also offers "Switch and restart at the new start"; the confirmation says what happens, then the steps run and the new deployment is shown', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    apiMock.missionDeployments.mockResolvedValue(overview() as never)
+    apiMock.startRestart.mockResolvedValue(job() as never)
+    apiMock.restartJob.mockResolvedValue(job(done) as never)
+    render(<Px4MissionControl/>)
+    fireEvent.click(await screen.findByRole('button', { name: /SWITCH AND RESTART AT THE NEW START/ }))
+    const dialog = await screen.findByRole('dialog', { name: 'Confirm switch and restart' })
+    expect(dialog.textContent).toMatch(/The current flight ends, and PX4 and Gazebo restart at the NEW mission's start \(about 20 s\)/)
+    expect(apiMock.startRestart).not.toHaveBeenCalled()                                       // nothing happens before the confirmation
+    fireEvent.click(within(dialog).getByRole('button', { name: 'SWITCH AND RESTART' }))
+    await waitFor(() => expect(apiMock.startRestart).toHaveBeenCalledWith('deployment-second', 'switch'))
+    const progress = await screen.findByRole('dialog', { name: 'Restart progress' })
+    expect(within(progress).getAllByRole('listitem')).toHaveLength(9)
+    expect(progress.textContent).toMatch(/step managed.*DONE.*step executor.*DONE.*step stop_sim.*RUNNING/)
+    apiMock.missionDeployments.mockResolvedValue(overview({ state: 'aborted', reason: 'simulation restarted for a new mission', active: false, finished_at: 'x' }) as never)   // the backend ended the old run
+    await advance()
+    expect((await screen.findByRole('dialog', { name: 'Restart progress' })).textContent).toMatch(/0\.4 m from the mission start · disarmed · ready/)
+    await waitFor(() => expect(screen.getByLabelText('Mission header').textContent).toContain('Ridge survey'))      // the new deployment is now the shown one
+    expect(screen.queryByLabelText('A newer deployment is ready')).toBeNull()
+    fireEvent.click(within(screen.getByRole('dialog', { name: 'Restart progress' })).getByRole('button', { name: 'CLOSE' }))
+    expect(screen.queryByRole('dialog', { name: 'Restart progress' })).toBeNull()
+  })
+
+  it('the switch-and-restart button is disabled with the reason when the new version is one this account may not start yet', async () => {
+    apiMock.missionDeployments.mockResolvedValue(overview({ state: 'completed', active: false, finished_at: 'x' }) as never)
+    apiMock.deploymentRoleRule.mockResolvedValue({ allowed: false, code: 'approval_required', message: 'Operators need a General approval of this exact version. Submit version 1 for review in Scenario Lab.' })
+    render(<Px4MissionControl/>)
+    const button = await screen.findByRole('button', { name: /SWITCH AND RESTART AT THE NEW START/ }) as HTMLButtonElement
+    await waitFor(() => expect(button.disabled).toBe(true))
+    expect(button.title).toMatch(/Submit version 1 for review/)
+    expect(screen.getAllByText(/Submit version 1 for review in Scenario Lab/).length).toBeGreaterThan(0)
+    expect(screen.getByRole('button', { name: /SWITCH TO NEW MISSION/ })).toBeTruthy()                 // the plain switch is still there
+    expect(apiMock.deploymentRoleRule).toHaveBeenCalledWith('deployment-second')
+  })
+
+  it('a failed restart shows the failed step, its reason and a Retry that starts a new restart; it never stays on "Restarting"', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    apiMock.missionDeployments.mockResolvedValue(overview() as never)
+    apiMock.startRestart.mockResolvedValueOnce(job() as never)
+    apiMock.restartJob.mockResolvedValueOnce(job({ status: 'failed', steps: steps(3, 3), can_retry: true, failure: { step: 'start_sim', code: 'sitl_start_failed', message: 'PX4 SITL did not start: PX4 SITL instance 0 exited at once.' } }) as never)
+    render(<Px4MissionControl/>)
+    fireEvent.click(await screen.findByRole('button', { name: /SWITCH AND RESTART AT THE NEW START/ }))
+    fireEvent.click(within(await screen.findByRole('dialog', { name: 'Confirm switch and restart' })).getByRole('button', { name: 'SWITCH AND RESTART' }))
+    await screen.findByRole('dialog', { name: 'Restart progress' })
+    await advance()
+    const failure = await screen.findByRole('alert')
+    expect(failure.textContent).toMatch(/Failed step: step start_sim/)
+    expect(failure.textContent).toMatch(/PX4 SITL did not start: PX4 SITL instance 0 exited at once\./)
+    expect(document.body.textContent).toContain('Harbour search')                                     // the old mission stays shown
+    apiMock.startRestart.mockResolvedValueOnce(job({ id: 'job-2' }) as never)
+    apiMock.restartJob.mockResolvedValue(job({ id: 'job-2', ...done }) as never)
+    fireEvent.click(screen.getByRole('button', { name: 'RETRY' }))
+    await waitFor(() => expect(apiMock.startRestart).toHaveBeenCalledTimes(2))
+    apiMock.missionDeployments.mockResolvedValue(overview({ state: 'aborted', reason: 'simulation restarted for a new mission', active: false, finished_at: 'x' }) as never)
+    await advance()
+    await waitFor(() => expect(screen.getByLabelText('Mission header').textContent).toContain('Ridge survey'))
+  })
+
+  it('Restart at mission start (Deployed mission panel) restarts at the deployment shown, in any state, after a confirmation that states the effect', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    apiMock.latestMissionDeployment.mockResolvedValue({ ...firstDeployment() })
+    apiMock.missionDeployments.mockResolvedValue({ deployment: firstDeployment(), execution: null, execution_deployment: null } as never)
+    apiMock.startRestart.mockResolvedValue(job({ purpose: 'restart', deployment_id: 'deployment-first', reason: 'simulation restarted' }) as never)
+    apiMock.restartJob.mockResolvedValue(job({ purpose: 'restart', deployment_id: 'deployment-first', ...done }) as never)
+    render(<Px4MissionControl/>)
+    const button = await screen.findByRole('button', { name: /^RESTART AT MISSION START$/ }) as HTMLButtonElement
+    await waitFor(() => expect(button.disabled).toBe(false))
+    fireEvent.click(button)
+    const dialog = await screen.findByRole('dialog', { name: 'Confirm restart at mission start' })
+    expect(dialog.textContent).toMatch(/This restarts PX4 and Gazebo at the mission start \(about 20 s\)\. A flight in progress ends\./)
+    fireEvent.click(within(dialog).getByRole('button', { name: 'RESTART NOW' }))
+    await waitFor(() => expect(apiMock.startRestart).toHaveBeenCalledWith('deployment-first', 'restart'))
+    await advance()
+    expect((await screen.findByRole('dialog', { name: 'Restart progress' })).textContent).toMatch(/ready/)
+  })
+
+  // --- several aircraft: every aircraft with its own state, a live count, NOT RUN after a failure, a partial result ----------------------------------------------
+  const rowsOf = (states: string[]) => states.map((state, index) => ({ aircraft_id: `px4-${index + 1}`, state, detail: state === 'failed' ? 'PX4 exited: broke' : state === 'starting' ? 'PX4 is starting.' : '' }))
+
+  it('shows every aircraft with its own state and a live count while the restart runs', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    apiMock.missionDeployments.mockResolvedValue(overview() as never)
+    apiMock.startRestart.mockResolvedValue(job() as never)
+    apiMock.restartJob.mockResolvedValue(job({ requested_count: 5, ready_count: 3, summary: '3 of 5 ready, waiting for px4-4 and px4-5',
+      aircraft: rowsOf(['ready', 'ready', 'ready', 'starting', 'telemetry_ok']) }) as never)
+    render(<Px4MissionControl/>)
+    fireEvent.click(await screen.findByRole('button', { name: /SWITCH AND RESTART AT THE NEW START/ }))
+    fireEvent.click(within(await screen.findByRole('dialog', { name: 'Confirm switch and restart' })).getByRole('button', { name: 'SWITCH AND RESTART' }))
+    await screen.findByRole('dialog', { name: 'Restart progress' })
+    await advance()
+    const progress = await screen.findByRole('dialog', { name: 'Restart progress' })
+    expect(within(progress).getByText('3 of 5 ready, waiting for px4-4 and px4-5')).toBeTruthy()
+    const list = within(progress).getByRole('list', { name: 'Aircraft state' })
+    expect(within(list).getAllByRole('listitem')).toHaveLength(5)
+    expect(list.textContent).toMatch(/px4-1READY.*px4-4STARTING.*PX4 is starting\..*px4-5TELEMETRY OK/)
+    expect(progress.textContent).toMatch(/they start in small groups and each is waited for/)
+  })
+
+  it('after a failure the steps that never ran say NOT RUN and nothing stays on RUNNING or WAITING', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    apiMock.missionDeployments.mockResolvedValue(overview() as never)
+    apiMock.startRestart.mockResolvedValue(job() as never)
+    const skipped = steps(3, 3).map((item, index) => (index > 3 ? { ...item, status: 'skipped', detail: 'Not run: an earlier step failed.' } : item))
+    apiMock.restartJob.mockResolvedValue(job({ status: 'failed', steps: skipped, can_retry: true, failure: { step: 'start_sim', code: 'sitl_start_failed', message: 'PX4 SITL did not start.' } }) as never)
+    render(<Px4MissionControl/>)
+    fireEvent.click(await screen.findByRole('button', { name: /SWITCH AND RESTART AT THE NEW START/ }))
+    fireEvent.click(within(await screen.findByRole('dialog', { name: 'Confirm switch and restart' })).getByRole('button', { name: 'SWITCH AND RESTART' }))
+    await screen.findByRole('dialog', { name: 'Restart progress' })
+    await advance()
+    const rows = within(await screen.findByRole('list', { name: 'Restart steps' })).getAllByRole('listitem')
+    expect(rows.filter(row => /NOT RUN/.test(row.textContent ?? ''))).toHaveLength(5)
+    expect(rows.some(row => /RUNNING|WAITING/.test(row.textContent ?? ''))).toBe(false)
+  })
+
+  it('a partial result names the ready and the missing aircraft; "Retry the missing ones" restarts only those and "Continue with the ready aircraft" accepts the rest', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    apiMock.missionDeployments.mockResolvedValue(overview() as never)
+    apiMock.startRestart.mockResolvedValue(job() as never)
+    const partial = job({ status: 'partial', partial: true, requested_count: 5, ready_count: 3, summary: '3 of 5 ready; failed: px4-4, px4-5', missing: ['px4-4', 'px4-5'], can_retry_missing: true, can_continue: true,
+      aircraft: rowsOf(['ready', 'ready', 'ready', 'failed', 'failed']), steps: steps(9), failure: { step: 'start_sim', code: 'partial_fleet', message: 'Only 3 of 5 aircraft are ready (px4-1, px4-2, px4-3); px4-4, px4-5 did not start.' } })
+    apiMock.restartJob.mockResolvedValue(partial as never)
+    render(<Px4MissionControl/>)
+    fireEvent.click(await screen.findByRole('button', { name: /SWITCH AND RESTART AT THE NEW START/ }))
+    fireEvent.click(within(await screen.findByRole('dialog', { name: 'Confirm switch and restart' })).getByRole('button', { name: 'SWITCH AND RESTART' }))
+    await screen.findByRole('dialog', { name: 'Restart progress' })
+    await advance()
+    const progress = await screen.findByRole('dialog', { name: 'Restart progress' })
+    expect(progress.textContent).toMatch(/Only 3 of 5 aircraft are ready \(px4-1, px4-2, px4-3\); px4-4, px4-5 did not start\./)
+    expect(within(progress).getByText('3 of 5 ready; failed: px4-4, px4-5')).toBeTruthy()
+    apiMock.retryMissingAircraft.mockResolvedValue(job({ id: 'job-2', retry_of: 'job-1', requested_count: 5, ready_count: 3, summary: '3 of 5 ready, waiting for px4-4 and px4-5', aircraft: rowsOf(['ready', 'ready', 'ready', 'starting', 'starting']) }) as never)
+    fireEvent.click(within(progress).getByRole('button', { name: 'RETRY THE MISSING ONES' }))
+    await waitFor(() => expect(apiMock.retryMissingAircraft).toHaveBeenCalledWith('job-1'))
+    expect(await screen.findByText('3 of 5 ready, waiting for px4-4 and px4-5')).toBeTruthy()
+    // the other choice, on a fresh partial result
+    apiMock.restartJob.mockResolvedValue({ ...partial, id: 'job-3' } as never)
+    apiMock.retryMissingAircraft.mockResolvedValue({ ...partial, id: 'job-3', status: 'partial' } as never)
+    apiMock.continueWithReady.mockResolvedValue({ ...partial, accepted_partial: true, can_continue: false, can_retry_missing: false } as never)
+    await advance(); await advance()
+    const again = await screen.findByRole('dialog', { name: 'Restart progress' })
+    fireEvent.click(await within(again).findByRole('button', { name: 'CONTINUE WITH THE READY AIRCRAFT' }))
+    await waitFor(() => expect(apiMock.continueWithReady).toHaveBeenCalled())
+    expect(await screen.findByText(/px4-1, px4-2, px4-3 are ready\. px4-4, px4-5 are not available in Mission Control/)).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'CONTINUE WITH THE READY AIRCRAFT' })).toBeNull()
+  })
+
+  it('a restart that is still running after a page reload is picked up again with its steps', async () => {
+    apiMock.missionDeployments.mockResolvedValue({ deployment: firstDeployment(), execution: null, execution_deployment: null } as never)
+    apiMock.latestRestart.mockResolvedValue(job({ purpose: 'restart', deployment_id: 'deployment-first' }) as never)
+    apiMock.restartJob.mockResolvedValue(job({ purpose: 'restart', deployment_id: 'deployment-first' }) as never)
+    render(<Px4MissionControl/>)
+    const progress = await screen.findByRole('dialog', { name: 'Restart progress' })
+    expect(progress.textContent).toMatch(/step managed.*DONE/)
+    expect(apiMock.startRestart).not.toHaveBeenCalled()
+  })
+
+  it('reads the overview on a calm timer: no polling storm, and none while the tab is hidden', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    apiMock.missionDeployments.mockResolvedValue(overview() as never)
+    render(<Px4MissionControl/>)
+    await screen.findByText(/A newer deployment/)
+    const first = apiMock.missionDeployments.mock.calls.length
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000) })
+    const calls = apiMock.missionDeployments.mock.calls.length - first
+    expect(calls).toBeGreaterThanOrEqual(3)
+    expect(calls).toBeLessThanOrEqual(5)                                                          // one read per 15 s, never overlapping
+    Object.defineProperty(document, 'hidden', { configurable: true, get: () => true })
+    try {
+      const before = apiMock.missionDeployments.mock.calls.length
+      await act(async () => { await vi.advanceTimersByTimeAsync(120_000) })
+      expect(apiMock.missionDeployments.mock.calls.length).toBe(before)
+    } finally { Object.defineProperty(document, 'hidden', { configurable: true, get: () => false }) }
+  })
+})
+

@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import type { ActionId, ActionRow, Assessment, DecisionRecord, HandoverCandidate, Tier } from './attackLabTypes'
+import type { ActionId, ActionRow, Assessment, DecisionRecord, HandoverCandidate, ResponseOption, Tier } from './attackLabTypes'
 import { TIER_COLORS } from './attackLabTypes'
 
 export type ThreatState = 'ok' | 'stale' | 'landed' | 'no_data'
@@ -15,6 +15,10 @@ type Props = {
   canRecord: boolean
   decisions: DecisionRecord[]
   onConfirm: (action: ActionId, candidate: string | null) => Promise<void>
+  /** Live flights: real single-aircraft responses (simulator only) with their enabled state and reasons. When given, they replace the recorded-only options. */
+  responses?: ResponseOption[]
+  onRespond?: (action: string, candidate?: string) => Promise<string>
+  onRestart?: () => void
   highlighted?: boolean
   /** The backend's handover battery rule, shown as served (the backend enforces it). */
   handoverRule?: string
@@ -29,7 +33,24 @@ function Sparkline({ values }: { values: number[] }) {
 }
 
 /** One aircraft's threat assessment with a recorded-only decision flow. It never commands an aircraft. */
-export function ThreatCard({ aircraftId, role, assessment, state, history, sourceLine, canRecord, decisions, onConfirm, highlighted, handoverRule, staleNote }: Props) {
+export function ThreatCard({ aircraftId, role, assessment, state, history, sourceLine, canRecord, decisions, onConfirm, highlighted, handoverRule, staleNote, responses, onRespond, onRestart }: Props) {
+  const [respPending, setRespPending] = useState<ResponseOption | null>(null)
+  const [respMessage, setRespMessage] = useState('')
+  const [respError, setRespError] = useState('')
+  const [respBusy, setRespBusy] = useState(false)
+  const [respCandidate, setRespCandidate] = useState<string | null>(null)
+  const runResponse = async (option: ResponseOption) => {
+    if (!onRespond) return
+    setRespBusy(true); setRespError(''); setRespMessage('')
+    try { setRespMessage(await onRespond(option.action, option.candidates ? respCandidate ?? undefined : undefined)); setRespPending(null) } catch (cause) { setRespError(cause instanceof Error ? cause.message : 'The response could not be sent.') } finally { setRespBusy(false) }
+  }
+  const pickResponse = (option: ResponseOption) => {
+    setRespError(''); setRespMessage('')
+    if (option.action === 'restart') { onRestart?.(); return }
+    if (option.action === 'acknowledge') { void runResponse(option); return }
+    setRespCandidate(option.candidates?.find(item => item.eligible)?.aircraft_id ?? null)
+    setRespPending(option)
+  }
   const [pending, setPending] = useState<ActionRow | null>(null)
   const [candidate, setCandidate] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -84,13 +105,28 @@ export function ThreatCard({ aircraftId, role, assessment, state, history, sourc
       </div>
       <div className="threat-part threat-part-right">
       {top && <p className="threat-recommend"><b>Recommended: {top.label}.</b> {top.reason}. <small>Trade-off: {top.tradeoff}</small></p>}
-      <div className="threat-options" role="group" aria-label={`Response options for ${aircraftId}`}>
+      {responses && onRespond && <div className="threat-responses" role="group" aria-label={`Respond to ${aircraftId}`}>
+        <p className="threat-rule"><b>Respond (simulation only):</b> each button acts on the simulated aircraft through the same command as the matching Mission Control button, and is audited with this score and evidence.</p>
+        <div className="threat-options">{responses.map(option => <button key={option.action} type="button" disabled={!canRecord || !option.enabled || respBusy}
+          className={respPending?.action === option.action ? 'selected' : ''} title={option.enabled ? option.meaning : `Not available: ${option.reason}`} onClick={() => pickResponse(option)}>{option.label}</button>)}</div>
+        <ul className="threat-why-disabled">{responses.filter(option => !option.enabled).map(option => <li key={option.action}><small><b>{option.label}:</b> {option.reason}</small></li>)}</ul>
+        {respPending && <div className="threat-confirm" role="group" aria-label="Confirm response"><p><b>{respPending.label}</b></p><p>{respPending.meaning}</p>
+          {respPending.candidates && <fieldset><legend>Choose the other aircraft</legend>{respPending.candidates.map(item => <label key={item.aircraft_id} className={item.eligible ? '' : 'ineligible'}>
+            <input type="radio" name={`resp-candidate-${aircraftId}`} disabled={!item.eligible} checked={respCandidate === item.aircraft_id} onChange={() => setRespCandidate(item.aircraft_id)}/>
+            {item.aircraft_id} · {item.role ?? 'role unknown'} · battery {item.battery_pct == null ? 'unavailable' : `${item.battery_pct.toFixed(0)}%`}{item.eligible ? '' : ` · not available: ${item.reason}`}</label>)}</fieldset>}
+          {respError && <p role="alert" className="threat-error">{respError}</p>}
+          <div className="threat-confirm-actions"><button type="button" className="button-primary" disabled={respBusy || Boolean(respPending.candidates && !respCandidate)} onClick={() => void runResponse(respPending)}>CONFIRM: {respPending.label.toUpperCase()}</button>
+          <button type="button" className="button-quiet" disabled={respBusy} onClick={() => setRespPending(null)}>CANCEL</button></div></div>}
+        {!respPending && respError && <p role="alert" className="threat-error">{respError}</p>}
+        {respMessage && <p role="status" className="threat-recorded">{respMessage}</p>}
+      </div>}
+      {!(responses && onRespond) && <div className="threat-options" role="group" aria-label={`Response options for ${aircraftId}`}>
         {assessment.actions.map(action => <button key={action.action} type="button" disabled={!canRecord || !action.eligible || busy}
           className={pending?.action === action.action ? 'selected' : ''} title={action.eligible ? `${action.reason}. Trade-off: ${action.tradeoff}` : `Not available: ${action.reason}`}
           onClick={() => choose(action)}>{action.rank}. {action.label}{!action.eligible ? ' (unavailable)' : ''}</button>)}
-      </div>
+      </div>}
       {!canRecord && <p className="threat-empty">Your account cannot record decisions.</p>}
-      {pending && <div className="threat-confirm" role="group" aria-label="Confirm decision">
+      {!(responses && onRespond) && pending && <div className="threat-confirm" role="group" aria-label="Confirm decision">
         <p><b>{pending.label}</b></p>
         <p>This records your decision. It does not command the aircraft yet.</p>
         {pending.action === 'handover_to_standby' && <fieldset><legend>Handover candidate</legend>
@@ -110,7 +146,7 @@ export function ThreatCard({ aircraftId, role, assessment, state, history, sourc
       </div>
     </div>}
     {mine.length > 0 && <ul className="threat-history" aria-label={`Recorded decisions for ${aircraftId}`}>{mine.map(item => <li key={item.id}>
-      <time>{new Date(item.created_at).toLocaleTimeString()}</time> {item.username}: {item.action.replace(/_/g, ' ')}{item.handover_candidate ? ` → ${item.handover_candidate}` : ''} <small>(recorded, not executed)</small></li>)}</ul>}
+      <time>{new Date(item.created_at).toLocaleTimeString()}</time> {item.username}: {item.action.replace(/_/g, ' ')}{item.handover_candidate ? ` → ${item.handover_candidate}` : ''} <small>({item.executed ? 'executed in the simulator' : item.source_name?.startsWith('acknowledged') ? 'acknowledged' : item.source_name?.startsWith('refused') ? 'refused' : 'recorded, not executed'})</small></li>)}</ul>}
     <footer>{sourceLine}</footer>
   </article>
 }

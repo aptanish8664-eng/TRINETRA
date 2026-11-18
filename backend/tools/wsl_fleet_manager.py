@@ -26,7 +26,8 @@ from typing import Any
 import uuid
 
 DEFAULT_PX4_ROOT = Path("/home/apt8055/uav-sim/PX4-Autopilot")
-FLEET_CAPACITY = 5
+# Technical ceiling of instance slots this tool addresses. How many aircraft this machine RUNS is a policy set and enforced in the backend (config.SIM_MAX_AIRCRAFT).
+FLEET_CAPACITY = 16
 MODEL = "gz_x500"
 
 
@@ -414,6 +415,28 @@ def _terminate(pid: int, still_running, *, grace_s: float = 5.0) -> bool:
     return not still_running()
 
 
+def _last_home_path() -> Path:
+    return Path(os.environ.get("TRINETRA_STATE_DIR", str(Path.home() / ".trinetra"))) / "last_home.json"
+
+
+def save_last_home(home: dict[str, float] | None) -> None:
+    """Persist the home the simulation was last restarted at (read back by `status`; no database, no migration)."""
+    try:
+        path = _last_home_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"home": home, "saved_at": time.time()}), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def load_last_home() -> dict[str, Any] | None:
+    try:
+        value = json.loads(_last_home_path().read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
 def stop_gazebo(px4_root: Path, proc_root: Path = Path("/proc")) -> dict[str, Any]:
     """Stop this checkout's Gazebo server and its GUI clients so the next PX4 start creates a fresh world."""
     found = discover_gazebo_processes(px4_root, proc_root)
@@ -474,6 +497,23 @@ def bridge_arguments(name: str, pid: int, proc_root: Path = Path("/proc")) -> di
     return found
 
 
+PX4_GCS_PORTS = tuple(range(18570, 18570 + FLEET_CAPACITY))      # PX4 instance N sends its GCS telemetry from 18570 + N; the bridge must accept every instance slot
+OLD_BRIDGE_GCS_PORTS = frozenset(range(18570, 18575))              # what a bridge started without --px4-source-port accepted before: instances 1-5 only
+
+
+def bridge_px4_ports(pid: int, proc_root: Path = Path("/proc")) -> frozenset[int]:
+    """The PX4 source ports a running telemetry bridge accepts (from its command line; none given = the old default of five instances)."""
+    args = _cmdline(proc_root / str(pid))
+    ports = set()
+    for index, item in enumerate(args):
+        flag, _, inline = item.partition("=")
+        if flag == "--px4-source-port":
+            value = inline if inline else (args[index + 1] if index + 1 < len(args) else "")
+            if value.isdigit():
+                ports.add(int(value))
+    return frozenset(ports) if ports else OLD_BRIDGE_GCS_PORTS
+
+
 def bridge_mismatches(name: str, actual: dict[str, Any], expected: dict[str, Any]) -> list[str]:
     """Plain statements of how a running bridge differs from the one the backend expects (empty when it matches)."""
     title = BRIDGE_TITLES[name]
@@ -490,9 +530,19 @@ def bridge_mismatches(name: str, actual: dict[str, Any], expected: dict[str, Any
     return problems
 
 
+def process_start_ticks(pid: int, proc_root: Path = Path("/proc")) -> int | None:
+    """When a process started, in clock ticks since boot (field 22 of /proc/<pid>/stat). None when it cannot be read."""
+    try:
+        text = (proc_root / str(pid) / "stat").read_text(encoding="ascii", errors="replace")
+        return int(text.rsplit(")", 1)[1].split()[19])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
 def ensure_bridge(name: str, script: Path, argv: list[str], *, env: dict[str, str] | None = None,
                   proc_root: Path = Path("/proc"), settle_s: float = 1.5,
-                  spawn=subprocess.Popen, expected: dict[str, Any] | None = None, terminate=None) -> dict[str, Any]:
+                  spawn=subprocess.Popen, expected: dict[str, Any] | None = None, terminate=None,
+                  must_start_after: int | None = None) -> dict[str, Any]:
     """Adopt a running bridge for this script when it sends where it should, otherwise replace it; start one if none runs.
 
     `expected` holds the forward port, source port and Windows host the backend listens for. A running bridge that
@@ -504,6 +554,14 @@ def ensure_bridge(name: str, script: Path, argv: list[str], *, env: dict[str, st
     if pid is not None:
         actual = bridge_arguments(name, pid, proc_root)
         problems = bridge_mismatches(name, actual, expected) if expected else []
+        if expected and expected.get("px4_ports") and name == "telemetry":
+            accepted = bridge_px4_ports(pid, proc_root)
+            if not set(expected["px4_ports"]) <= accepted:
+                problems.append(f"{BRIDGE_TITLES[name]} accepts only PX4 instances 1-{len(accepted)}, so aircraft above that are rejected; it needs 1-{len(expected['px4_ports'])}")
+        if must_start_after is not None:
+            started = process_start_ticks(pid, proc_root)
+            if started is not None and started < must_start_after:
+                problems.append(f"{BRIDGE_TITLES[name]} started before the current Gazebo server, so it no longer receives its poses")
         if not problems:
             adopted: dict[str, Any] = {"status": "running", "pid": pid, "adopted": True}
             if expected and actual["mirror_ports"]:
@@ -577,12 +635,14 @@ def ensure_bridges(existing: dict[int, int], ports: dict[str, int], *,
         break
     telemetry = ensure_bridge("telemetry", TELEMETRY_BRIDGE_SCRIPT, [
         "--windows-host", host, "--forward-port", str(ports["telemetry_forward"]),
-        "--source-port", str(ports["telemetry_source"])], env=env, proc_root=proc_root,
-        expected={"forward_port": ports["telemetry_forward"], "source_port": ports["telemetry_source"], "windows_host": host})
+        "--source-port", str(ports["telemetry_source"]), *[item for port in PX4_GCS_PORTS for item in ("--px4-source-port", str(port))]], env=env, proc_root=proc_root,
+        expected={"forward_port": ports["telemetry_forward"], "source_port": ports["telemetry_source"], "windows_host": host, "px4_ports": PX4_GCS_PORTS})
+    servers = [ticks for ticks in (process_start_ticks(item, proc_root) for item in discover_gazebo_processes_any(proc_root)) if ticks is not None]
     pose = ensure_bridge("pose", POSE_BRIDGE_SCRIPT, [
         "--windows-host", host, "--world", "default", "--forward-port", str(ports["pose_forward"]),
         "--source-port", str(ports["pose_source"])], env=env, proc_root=proc_root,
-        expected={"forward_port": ports["pose_forward"], "source_port": ports["pose_source"], "windows_host": host})
+        expected={"forward_port": ports["pose_forward"], "source_port": ports["pose_source"], "windows_host": host},
+        must_start_after=max(servers) if servers else None)      # a pose bridge older than the Gazebo server keeps a dead subscription
     return {"telemetry": telemetry, "pose": pose}
 
 
@@ -680,7 +740,7 @@ def activate_fleet(count: int, *, px4_root: Path = DEFAULT_PX4_ROOT,
     if (profile is not None and profile["enabled"] and profile.get("ground_extent_m") and not discover_gazebo_processes(root, proc_root)["server"]
             and sum(instance in existing for instance in range(count)) < count):
         try:
-            gazebo_note = start_gazebo_with_world(root, build_runtime_world(root, profile["ground_extent_m"]), proc_root=proc_root)
+            gazebo_note = start_gazebo_with_world(root, build_runtime_world(root, profile["ground_extent_m"]), headless=True, proc_root=proc_root)   # server only: the GUI is opened by hand (gz sim -g)
         except (OSError, RuntimeError, ValueError) as exc:
             gazebo_note = {"status": "failed", "detail": str(exc)}
     enough_resources, resource_error = resource_preflight(
@@ -798,8 +858,10 @@ def relocate_fleet(count: int, home: dict[str, float] | None, *, px4_root: Path 
                                      "Activate the fleet to start it again.")
     time.sleep(1.0)  # let the Gazebo transport endpoints disappear before PX4 looks for a running world
     result = activate_fleet(max(count, len(existing)), px4_root=px4_root, proc_root=proc_root, ports=ports, home=home, profile=profile)
+    if not result.get("failure"):
+        save_last_home(home)
     return {**result, "relocated": not result.get("failure"), "stopped_instances": report["stopped_instances"],
-            "gazebo_stopped": report["gazebo_stopped"]}
+            "gazebo_stopped": report["gazebo_stopped"], "last_home": load_last_home()}
 
 
 def stop_managed(instances: list[int], *, px4_root: Path = DEFAULT_PX4_ROOT,
@@ -830,12 +892,467 @@ def stop_managed(instances: list[int], *, px4_root: Path = DEFAULT_PX4_ROOT,
     return {"stopped_instances": stopped, "errors": errors, "manager": "px4_wsl_fleet_v1"}
 
 
+# --- staged start (Part F) ---------------------------------------------------------------------------------------------------
+# Why: starting Gazebo with its GUI and every PX4 instance at once makes them fight for the same CPU while the world is still loading. On a busy host the
+# virtual machine gets about half its CPUs, Gazebo's real-time factor falls from 0.99 to 0.4 and the aircraft need minutes instead of seconds; a fixed
+# 90 s timer then gave up while the aircraft were still coming up (docs/FLEET_CAPACITY.md has the measurements).
+# What this does instead: (1) stop PX4 and Gazebo and WAIT until the processes are really gone; (2) start the Gazebo SERVER only (no GUI) and wait until the
+# world answers; (3) start the PX4 instances in small batches and wait for each aircraft to be really ready (startup script done, then a valid global
+# position on its onboard MAVLink link) before the next batch; (4) wait for PROGRESS, not for a fixed time: an aircraft fails only when nothing about it
+# changed for STALL_S, or after PER_AIRCRAFT_MAX_S. The supervisor runs detached, writes a progress file after every change and the backend polls it.
+# SITL only. The only MAVLink traffic is a HEARTBEAT from a companion-computer id on each aircraft's own onboard link; no command is ever sent.
+STALL_S = 45.0                # nothing about an aircraft or Gazebo changed for this long: it failed
+PER_AIRCRAFT_MAX_S = 180.0    # one aircraft may never take longer than this from its spawn
+GAZEBO_MAX_S = 100.0
+STOP_MAX_S = 30.0
+DEFAULT_BATCH = 2             # PX4 instances started together; chosen from the measurements in docs/FLEET_CAPACITY.md
+SCRIPT_DONE = b"Startup script returned successfully"
+ONBOARD_SOURCE = (253, 191)   # sender system / component of the readiness heartbeat (a companion computer; the executor uses 255/190)
+
+
+def _progress_path() -> Path:
+    return Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / f"trinetra-px4-fleet-{os.getuid()}-start-progress.json"
+
+
+class StartProgress:
+    """The progress file the backend polls: written atomically after every change, `last_progress_at` moves only when something really changed."""
+
+    def __init__(self, path: Path, request_id: str | None, count: int, targets: list[int], stop_first: bool, clock=time.time):
+        self.path, self.clock = path, clock
+        now = clock()
+        self.state: dict[str, Any] = {
+            "request_id": request_id, "pid": os.getpid(), "phase": "queued", "started_at": now, "updated_at": now, "last_progress_at": now, "count": count, "targets": targets,
+            "stop_first": stop_first, "stop": {"state": "pending" if stop_first else "skipped", "detail": ""}, "gazebo": {"state": "pending", "detail": ""},
+            "bridges": {"state": "pending", "detail": ""}, "aircraft": {str(i): {"aircraft_id": f"px4-{i + 1}", "state": "pending", "detail": "", "since": now} for i in range(count)},
+            "timings": {}, "finished": False, "failure": None, "result": None, "manager": "px4_wsl_fleet_v1"}
+
+    def write(self) -> None:
+        self.state["updated_at"] = self.clock()
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self.path.with_suffix(".tmp")
+            temporary.write_text(json.dumps(self.state, sort_keys=True), encoding="utf-8")
+            temporary.replace(self.path)
+        except OSError:
+            pass
+
+    def mark(self, **fields: Any) -> None:
+        self.state.update(fields)
+        self.state["last_progress_at"] = self.clock()
+        self.write()
+
+    def part(self, name: str, state: str, detail: str = "") -> None:
+        self.state[name] = {"state": state, "detail": detail}
+        self.state["last_progress_at"] = self.clock()
+        self.write()
+
+    def aircraft(self, instance: int, state: str, detail: str = "", *, progress: bool = True) -> None:
+        item = self.state["aircraft"][str(instance)]
+        changed = item["state"] != state
+        item.update(state=state, detail=detail)
+        if changed:
+            item["since"] = self.clock()
+            self.state["timings"][f"px4-{instance + 1}:{state}"] = round(self.clock() - self.state["started_at"], 1)
+        if progress or changed:
+            self.state["last_progress_at"] = self.clock()
+        self.write()
+
+    def timing(self, name: str) -> None:
+        self.state["timings"].setdefault(name, round(self.clock() - self.state["started_at"], 1))
+
+
+def read_start_progress(path: Path | None = None, now: float | None = None) -> dict[str, Any]:
+    """What `progress` answers: the file, plus its ages measured on the WSL clock and whether the supervisor is still alive."""
+    path = path or _progress_path()
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"present": False, "manager": "px4_wsl_fleet_v1"}
+    now = time.time() if now is None else now
+    alive = False
+    try:
+        os.kill(int(state.get("pid", 0)), 0)
+        alive = True
+    except (OSError, ValueError, TypeError):
+        pass
+    if not state.get("finished") and not alive and state.get("phase") != "queued":
+        state = {**state, "finished": True, "failure": state.get("failure") or {"code": "supervisor_died", "message": "The start-up supervisor stopped before it finished."}}
+    return {**state, "present": True, "alive": alive, "age_s": round(now - float(state.get("updated_at", now)), 1),
+            "stalled_s": round(now - float(state.get("last_progress_at", now)), 1), "elapsed_s": round(now - float(state.get("started_at", now)), 1)}
+
+
+def wait_processes_gone(root: Path, proc_root: Path = Path("/proc"), *, max_s: float = STOP_MAX_S, sleep=time.sleep, clock=time.monotonic) -> dict[str, Any]:
+    """Block until no PX4 instance and no Gazebo process of this checkout exists any more (killing what ignores SIGTERM). Reports what was left."""
+    started = clock()
+    escalated = False
+    while True:
+        left_px4 = discover_px4_instances(root, proc_root)
+        left_gz = discover_gazebo_processes(root, proc_root, any_world=True)
+        left_gazebo = left_gz["server"] + left_gz["gui"]
+        if not left_px4 and not left_gazebo:
+            return {"gone": True, "seconds": round(clock() - started, 1), "left": {}}
+        if clock() - started > max_s:
+            return {"gone": False, "seconds": round(clock() - started, 1), "left": {"px4": sorted(left_px4), "gazebo": left_gazebo}}
+        if not escalated and clock() - started > max(5.0, max_s / 3):
+            escalated = True
+            for pid in [*left_px4.values(), *left_gazebo]:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
+        sleep(0.3)
+
+
+def gazebo_world_answers(timeout_s: float = 6.0) -> bool:
+    """True once the Gazebo world publishes its statistics (the server finished loading the world)."""
+    env = dict(os.environ, GZ_IP="127.0.0.1")
+    try:
+        out = subprocess.run(["gz", "topic", "-e", "-t", f"/world/{WORLD_NAME}/stats", "-n", "1"], capture_output=True, text=True, timeout=timeout_s, env=env, check=False).stdout
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return "sim_time" in out
+
+
+class OnboardProbe:
+    """Readiness of ONE aircraft read from its own onboard MAVLink link (127.0.0.1:14540+i): a heartbeat is sent so PX4 starts streaming, then position and
+    estimator status are read. Passive otherwise: no command, no parameter, nothing that changes the aircraft. Closes its socket as soon as it is done."""
+
+    def __init__(self, instance: int):
+        from pymavlink import mavutil          # also used by the mission executor; absent -> the caller falls back to the log
+        self.mavutil = mavutil
+        self.connection = mavutil.mavlink_connection(f"udpin:127.0.0.1:{14540 + instance}", source_system=ONBOARD_SOURCE[0], source_component=ONBOARD_SOURCE[1], dialect="common")
+        self.last_heartbeat = 0.0
+        self.heartbeat = False
+        self.position = False
+        self.flags = 0
+
+    def poll(self, clock=time.monotonic) -> tuple[bool, bool]:
+        """Returns (heartbeat seen, global position valid). Also keeps the estimator flags for progress detection."""
+        if clock() - self.last_heartbeat >= 1.0:
+            self.last_heartbeat = clock()
+            self.connection.mav.heartbeat_send(self.mavutil.mavlink.MAV_TYPE_ONBOARD_CONTROLLER, self.mavutil.mavlink.MAV_AUTOPILOT_INVALID, 0, 0, 0)
+        deadline = clock() + 0.2
+        while clock() < deadline:
+            message = self.connection.recv_match(blocking=False)
+            if message is None:
+                break
+            kind = message.get_type()
+            if kind == "HEARTBEAT" and message.get_srcSystem() != ONBOARD_SOURCE[0]:
+                self.heartbeat = True
+            elif kind == "GLOBAL_POSITION_INT" and (message.lat or message.lon):
+                self.position = True
+            elif kind == "ESTIMATOR_STATUS":
+                self.flags = int(message.flags)
+        return self.heartbeat, self.position
+
+    def close(self) -> None:
+        try:
+            self.connection.close()
+        except OSError:
+            pass
+
+
+class StagedStart:
+    """The whole staged start as one object whose every outside effect is a replaceable callable, so the order of the steps and the waiting rules can be tested."""
+
+    def __init__(self, root: Path, count: int, targets: list[int], progress: StartProgress, *, home: dict[str, float] | None = None, profile: dict[str, Any] | None = None,
+                 ports: dict[str, int] | None = None, stop_first: bool = False, batch: int = DEFAULT_BATCH, proc_root: Path = Path("/proc"), clock=time.monotonic, sleep=time.sleep,
+                 spawn=None, start_gazebo=None, gazebo_ready=None, probe_factory=None, ensure_bridges_fn=None, log_size=None, read_log=None, stop_all=None, record_owner=None):
+        self.root, self.count, self.targets, self.progress = root, count, targets, progress
+        self.home, self.profile, self.ports, self.stop_first, self.batch = home, profile, ports, stop_first, max(1, batch)
+        self.proc_root, self.clock, self.sleep = proc_root, clock, sleep
+        self.spawn = spawn or (lambda instance: _spawn(root, instance, home, profile))
+        self.start_gazebo = start_gazebo or self._start_gazebo
+        self.gazebo_ready = gazebo_ready or gazebo_world_answers
+        self.probe_factory = probe_factory or OnboardProbe
+        self.ensure_bridges = ensure_bridges_fn or (lambda: ensure_bridges({}, {**DEFAULT_PORTS, **(ports or {})}, proc_root=proc_root))
+        self.read_log = read_log or self._read_log
+        self.log_size = log_size or self._log_size
+        self.stop_all = stop_all or self._stop_all
+        self.record_owner = record_owner or self._record_owner
+
+    # -- helpers with real effects (replaced in tests) --
+    def _log_file(self, instance: int) -> Path:
+        return self.root / "build/px4_sitl_default" / f"instance_{instance}" / "trinetra-fleet.log"
+
+    def _log_size(self, instance: int) -> int:
+        try:
+            return self._log_file(instance).stat().st_size
+        except OSError:
+            return 0
+
+    def _read_log(self, instance: int, offset: int) -> bytes:
+        try:
+            with self._log_file(instance).open("rb") as handle:
+                handle.seek(offset)
+                return handle.read(400_000)
+        except OSError:
+            return b""
+
+    def _start_gazebo(self) -> dict[str, Any]:
+        extent = self.profile.get("ground_extent_m") if self.profile and self.profile.get("enabled") else None
+        world = build_runtime_world(self.root, extent) if extent else self.root / "Tools/simulation/gz/worlds/default.sdf"
+        return start_gazebo_with_world(self.root, world, headless=True, proc_root=self.proc_root, timeout_s=30.0)
+
+    def _record_owner(self, instance: int) -> None:
+        """The PX4 instance this supervisor just started becomes one the manager owns (a later restart may stop it; a foreign instance is never touched)."""
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            pid = discover_px4_instances(self.root, self.proc_root).get(instance)
+            if pid is not None:
+                owned = _load_owned(_state_path())
+                owned[instance] = pid
+                _save_owned(_state_path(), owned)
+                return
+            time.sleep(0.1)
+
+    def _stop_all(self) -> dict[str, Any]:
+        existing = discover_px4_instances(self.root, self.proc_root)
+        owned_path = _state_path()
+        owned = _load_owned(owned_path)
+        foreign = sorted(instance for instance, pid in existing.items() if owned.get(instance) != pid)
+        if foreign:
+            return {"refused": True, "foreign": foreign}
+        for instance, pid in sorted(existing.items()):
+            _terminate(pid, lambda instance=instance, pid=pid: discover_px4_instances(self.root, self.proc_root).get(instance) == pid)
+            owned.pop(instance, None)
+        _save_owned(owned_path, owned)
+        stop_gazebo(self.root, self.proc_root)
+        return {"refused": False, "stopped": sorted(existing)}
+
+    # -- the steps --
+    def run(self) -> dict[str, Any]:
+        progress = self.progress
+        if self.stop_first:
+            progress.mark(phase="stopping")
+            progress.part("stop", "running", "Stopping PX4 and Gazebo.")
+            stopped = self.stop_all()
+            if stopped.get("refused"):
+                names = ", ".join(f"px4-{item + 1}" for item in stopped["foreign"])
+                return self.finish("instance_not_managed", f"{names} was not started by the TRINETRA fleet manager, so it was left running. Stop it in WSL, then try again.")
+            gone = wait_processes_gone(self.root, self.proc_root, sleep=self.sleep, clock=self.clock)
+            if not gone["gone"]:
+                progress.part("stop", "failed", f"Still running after {gone['seconds']:g} s: {gone['left']}")
+                return self.finish("stop_failed", f"PX4 or Gazebo could not be stopped (still running: {gone['left']}); nothing was restarted.")
+            progress.part("stop", "ok", f"PX4 and Gazebo are gone ({gone['seconds']:g} s).")
+            progress.timing("stopped")
+        running = discover_px4_instances(self.root, self.proc_root)
+        for instance in range(self.count):                         # a retry of some aircraft: the ones that are not its targets and already run stay as they are
+            if instance not in self.targets and instance in running:
+                progress.aircraft(instance, "ready", "Already running (kept).")
+        need_start = [i for i in self.targets if i not in running]
+        # 1. Gazebo: server only, no GUI; wait until the world answers
+        if need_start:
+            if not self.ensure_gazebo():
+                return self.finish("gazebo_failed", self.progress.state["gazebo"]["detail"] or "Gazebo did not become ready.")
+        else:
+            progress.part("gazebo", "adopted", "Every requested aircraft is already running.")
+        # 2. bridges first, so telemetry flows the moment an aircraft is up
+        progress.mark(phase="bridges")
+        bridges = self.ensure_bridges()
+        failed = [f"{name} bridge: {item.get('detail', 'failed')}" for name, item in bridges.items() if item.get("status") == "failed"]
+        progress.part("bridges", "failed" if failed else "ok", "; ".join(failed) or "Telemetry and pose bridges are running.")
+        if failed:
+            return self.finish("bridge_start_failed", "; ".join(failed), bridges=bridges)
+        # 3. aircraft, in small batches, each batch waited for until its aircraft are really ready
+        progress.mark(phase="aircraft")
+        for instance in self.targets:
+            if instance in running:
+                progress.aircraft(instance, "ready", "Already running (adopted).")
+        for start in range(0, len(need_start), self.batch):
+            self.run_batch(need_start[start:start + self.batch])
+        return self.finish(None, None, bridges=bridges)
+
+    def ensure_gazebo(self) -> bool:
+        progress = self.progress
+        progress.mark(phase="gazebo")
+        if discover_gazebo_processes(self.root, self.proc_root, any_world=True)["server"] or gazebo_server_running(self.proc_root):
+            progress.part("gazebo", "adopted", "Gazebo is already running; its world is checked.")
+        else:
+            progress.part("gazebo", "starting", "Starting the Gazebo server (no GUI).")
+            try:
+                note = self.start_gazebo()
+            except (OSError, RuntimeError, ValueError) as error:
+                progress.part("gazebo", "failed", str(error))
+                return False
+            if note.get("status") == "failed":
+                progress.part("gazebo", "failed", str(note.get("detail", "failed")))
+                return False
+        started = last = self.clock()
+        while True:
+            if self.gazebo_ready():
+                progress.part("gazebo", "ready", f"The world answers ({self.clock() - started:.0f} s).")
+                progress.timing("gazebo_ready")
+                return True
+            alive = bool(discover_gazebo_processes(self.root, self.proc_root, any_world=True)["server"] or gazebo_server_running(self.proc_root))
+            if not alive:
+                progress.part("gazebo", "failed", "The Gazebo server stopped while loading the world.")
+                return False
+            if self.clock() - started > GAZEBO_MAX_S:
+                progress.part("gazebo", "failed", f"The world did not answer within {GAZEBO_MAX_S:g} s.")
+                return False
+            progress.state["gazebo"]["detail"] = f"Waiting for the world ({self.clock() - started:.0f} s)."
+            progress.write()
+            self.sleep(1.0)
+
+    def run_batch(self, batch: list[int]) -> None:
+        progress = self.progress
+        spawned: dict[int, dict[str, Any]] = {}
+        for instance in batch:
+            offset = self.log_size(instance)
+            try:
+                self.spawn(instance)
+            except (OSError, RuntimeError) as error:
+                progress.aircraft(instance, "failed", f"PX4 instance could not be started: {error}")
+                continue
+            self.record_owner(instance)
+            spawned[instance] = {"offset": offset, "since": self.clock(), "script": False, "probe": None, "last_change": self.clock(), "size": offset, "flags": 0, "heartbeat": False}
+            progress.aircraft(instance, "booting", "PX4 is starting.")
+        while spawned:
+            for instance in list(spawned):
+                item = spawned[instance]
+                now = self.clock()
+                if instance not in discover_px4_instances(self.root, self.proc_root):
+                    if now - item["since"] > 1.0:
+                        progress.aircraft(instance, "failed", "PX4 exited: " + (self._last_line(instance) or "no message in its log"))
+                        self.close(item); spawned.pop(instance); continue
+                size = self.log_size(instance)
+                if size != item["size"]:
+                    item["size"], item["last_change"] = size, now
+                    progress.state["last_progress_at"] = progress.clock()
+                if not item["script"]:
+                    if SCRIPT_DONE in self.read_log(instance, item["offset"]):
+                        item["script"], item["last_change"] = True, now
+                        progress.aircraft(instance, "sensors", "PX4 started; waiting for a valid position.")
+                else:
+                    ready = self.check_ready(instance, item)
+                    if ready:
+                        progress.aircraft(instance, "ready", "Valid global position on the onboard link.")
+                        self.close(item); spawned.pop(instance); continue
+                if now - item["last_change"] > STALL_S:
+                    progress.aircraft(instance, "failed", f"Nothing changed for {STALL_S:g} s while {'waiting for a valid position' if item['script'] else 'PX4 was starting'}.")
+                    self.close(item); spawned.pop(instance); continue
+                if now - item["since"] > PER_AIRCRAFT_MAX_S:
+                    progress.aircraft(instance, "failed", f"Not ready {PER_AIRCRAFT_MAX_S:g} s after it was started.")
+                    self.close(item); spawned.pop(instance); continue
+                waited = int(now - item["since"])
+                progress.aircraft(instance, progress.state["aircraft"][str(instance)]["state"], f"{progress.state['aircraft'][str(instance)]['detail'].split(' (')[0]} ({waited} s)", progress=False)
+            if spawned:
+                self.sleep(0.5)
+
+    def check_ready(self, instance: int, item: dict[str, Any]) -> bool:
+        if item["probe"] is None:
+            try:
+                item["probe"] = self.probe_factory(instance)
+            except (ImportError, OSError):
+                item["probe"] = False                                   # no pymavlink or the port is taken (an executor runs): fall back to the log
+        if item["probe"] is False:
+            return self.clock() - item["last_change"] > 12.0 and self.clock() - item["since"] > 25.0
+        heartbeat, position = item["probe"].poll(self.clock)
+        if heartbeat and not item["heartbeat"]:
+            item["heartbeat"], item["last_change"] = True, self.clock()
+        if getattr(item["probe"], "flags", 0) != item["flags"]:
+            item["flags"], item["last_change"] = item["probe"].flags, self.clock()   # the estimator is aligning: that is progress
+        return position
+
+    def close(self, item: dict[str, Any]) -> None:
+        if item.get("probe"):
+            item["probe"].close()
+
+    def _last_line(self, instance: int) -> str:
+        lines = [line for line in self.read_log(instance, max(0, self.log_size(instance) - 4000)).decode("utf-8", "ignore").splitlines() if line.strip()]
+        return lines[-1][:160] if lines else ""
+
+    def finish(self, code: str | None, message: str | None, bridges: dict[str, Any] | None = None) -> dict[str, Any]:
+        progress = self.progress
+        states = {i: progress.state["aircraft"][str(i)] for i in self.targets}
+        ready = [i for i, item in states.items() if item["state"] == "ready"]
+        missing = [i for i, item in states.items() if item["state"] != "ready"]
+        if code is None and missing:
+            code = "partial" if ready else "no_aircraft_ready"
+            message = (f"{len(ready)} of {len(self.targets)} aircraft are ready; " if ready else "No aircraft became ready; ") + "waiting for " + ", ".join(f"px4-{i + 1}" for i in missing) + " failed or stalled."
+        if ready and self.home is not None and code in (None, "partial"):
+            save_last_home(self.home)
+        result = {"requested_count": self.count, "process_count": len(ready), "instances": [{"instance": i, "system_id": i + 1, "aircraft_id": f"px4-{i + 1}", "gazebo_model": f"x500_{i}", "status": states[i]["state"],
+                                                                                               "detail": states[i]["detail"]} for i in self.targets],
+                  "ready_count": len(ready), "missing": [f"px4-{i + 1}" for i in missing], "failure": message if code and code != "partial" else None, "failure_code": code if code and code != "partial" else None,
+                  "partial": code == "partial", "bridges": bridges or {}, "home_requested": self.home, "last_home": load_last_home(), "timings": dict(progress.state["timings"])}
+        progress.mark(phase="done" if not code else ("partial" if code == "partial" else "failed"), finished=True, result=result,
+                      failure=None if code in (None,) else {"code": code, "message": message})
+        return result
+
+
+def start_fleet(count: int, *, instances: list[int] | None, home: dict[str, float] | None, profile: dict[str, Any] | None, ports: dict[str, int] | None, stop_first: bool,
+                batch: int, request_id: str | None, px4_root: Path = DEFAULT_PX4_ROOT, wait: bool = False) -> dict[str, Any]:
+    """`start`: validate, refuse a second supervisor, write the first progress state and launch the detached supervisor. Returns at once with the progress."""
+    if not 1 <= count <= FLEET_CAPACITY:
+        raise ValueError(f"requested count must be between 1 and {FLEET_CAPACITY}")
+    targets = sorted(set(instances)) if instances else list(range(count))
+    if any(item < 0 or item >= count for item in targets):
+        raise ValueError("instances must lie within the requested count")
+    if home is not None:
+        home = validate_home(home["latitude"], home["longitude"], home["altitude_m"])
+    current = read_start_progress()
+    if current.get("present") and not current.get("finished") and current.get("alive"):
+        return {**current, "failure": "A start is already running.", "failure_code": "start_in_progress"}
+    path = _progress_path()
+    progress = StartProgress(path, request_id, count, targets, stop_first)
+    progress.state["pid"] = 0
+    progress.write()
+    command = [sys.executable, str(Path(__file__).resolve()), "supervise", "--count", str(count), "--batch", str(batch), "--px4-root", str(px4_root)]
+    if instances:
+        command += ["--instances", *[str(item) for item in targets]]
+    if stop_first:
+        command.append("--stop-first")
+    if request_id:
+        command += ["--request-id", request_id]
+    if home is not None:
+        command += [f"--home-lat={home['latitude']}", f"--home-lon={home['longitude']}", f"--home-alt={home['altitude_m']}"]
+    if profile is not None:
+        command += ["--long-range-profile", "on" if profile["enabled"] else "off"]
+        for key, option in (("speed_cap_mps", "--speed-cap"), ("accel_mps2", "--accel-cap"), ("tilt_deg", "--tilt-max"), ("ground_extent_m", "--ground-extent")):
+            if profile.get(key) is not None:
+                command.append(f"{option}={profile[key]}")
+    for key, option in (("telemetry_forward", "--telemetry-forward-port"), ("telemetry_source", "--telemetry-source-port"), ("pose_forward", "--pose-forward-port"), ("pose_source", "--pose-source-port")):
+        if (ports or {}).get(key) is not None:
+            command += [option, str(ports[key])]
+    log = _log_path("start-supervisor")
+    if wait:
+        subprocess.run(command, check=False, stdin=subprocess.DEVNULL)
+    else:
+        with log.open("ab") as handle:
+            subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=handle, stderr=subprocess.STDOUT, start_new_session=True)
+        time.sleep(0.3)
+    return {**read_start_progress(), "started": True, "manager": "px4_wsl_fleet_v1"}
+
+
+def supervise(args: Any, home: dict[str, float] | None, profile: dict[str, Any] | None, ports: dict[str, int]) -> int:
+    """The detached supervisor process: one at a time (a file lock), runs the staged start and leaves the result in the progress file."""
+    import fcntl
+    lock = open(_progress_path().with_suffix(".lock"), "w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return 3
+    targets = sorted(set(args.instances)) if args.instances else list(range(args.count))
+    progress = StartProgress(_progress_path(), args.request_id, args.count, targets, bool(args.stop_first))
+    progress.write()
+    try:
+        StagedStart(args.px4_root.resolve(), args.count, targets, progress, home=home, profile=profile, ports=ports, stop_first=bool(args.stop_first), batch=args.batch or DEFAULT_BATCH).run()
+    except Exception as error:      # a bug must leave a readable failure, never a progress file that stays "running"
+        progress.mark(phase="failed", finished=True, failure={"code": "supervisor_error", "message": f"{type(error).__name__}: {error}"})
+        return 1
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("status", "activate", "stop", "relocate"))
+    parser.add_argument("action", choices=("status", "activate", "stop", "relocate", "start", "progress", "supervise"))
     parser.add_argument("--count", type=int)
     parser.add_argument("--instances", type=int, nargs="*")
     parser.add_argument("--request-id")
+    parser.add_argument("--stop-first", action="store_true", help="start/supervise: stop PX4 and Gazebo first (a restart) and wait until they are gone")
+    parser.add_argument("--batch", type=int, choices=range(1, 17), metavar="N", help="start/supervise: PX4 instances started together (default %d)" % DEFAULT_BATCH)
     for option in ("telemetry-forward-port", "telemetry-source-port", "pose-forward-port", "pose-source-port"):
         parser.add_argument(f"--{option}", type=int, choices=range(1024, 65536), metavar="PORT")
     parser.add_argument("--home-lat", type=float)
@@ -862,16 +1379,26 @@ def main() -> int:
             profile = validate_profile(args.long_range_profile == "on", args.speed_cap, args.accel_cap, args.tilt_max, args.ground_extent)
         elif any(value is not None for value in (args.speed_cap, args.accel_cap, args.tilt_max, args.ground_extent)):
             raise ValueError("--speed-cap, --accel-cap, --tilt-max and --ground-extent need --long-range-profile")
-        if (profile is not None) and args.action not in {"activate", "relocate"}:
+        if (profile is not None) and args.action not in {"activate", "relocate", "start", "supervise"}:
             raise ValueError("a profile is only accepted by activate and relocate")
-        if (home is not None or args.default_home) and args.action not in {"activate", "relocate"}:
+        if (home is not None or args.default_home) and args.action not in {"activate", "relocate", "start", "supervise"}:
             raise ValueError("a home is only accepted by activate and relocate")
         # The backend's own receiver ports (when given): activation starts the bridges on them and status compares against them.
         ports = {key: value for key, value in {
             "telemetry_forward": args.telemetry_forward_port, "telemetry_source": args.telemetry_source_port,
             "pose_forward": args.pose_forward_port, "pose_source": args.pose_source_port,
         }.items() if value is not None}
-        if args.action in {"activate", "relocate"}:
+        if args.action == "progress":
+            result = read_start_progress()
+        elif args.action in {"start", "supervise"}:
+            if args.count is None:
+                raise ValueError(f"{args.action} requires --count")
+            if args.action == "start":
+                result = start_fleet(args.count, instances=args.instances, home=home, profile=profile, ports=ports, stop_first=bool(args.stop_first), batch=args.batch or DEFAULT_BATCH,
+                                     request_id=args.request_id, px4_root=args.px4_root)
+            else:
+                return supervise(args, home, profile, ports)
+        elif args.action in {"activate", "relocate"}:
             if args.count is None:
                 raise ValueError(f"{args.action} requires --count")
             if args.action == "relocate":

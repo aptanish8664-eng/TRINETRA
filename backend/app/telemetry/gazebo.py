@@ -111,6 +111,13 @@ class GazeboPoseStore:
                 del trail[:-_TRAIL_MAX_POINTS]
         return True
 
+    def forget_except(self, keep_names: set[str]) -> list[str]:
+        """Drops every model that is not in `keep_names` (a restarted simulation no longer has them). Returns what was dropped."""
+        dropped = [key for key in self._models if key not in keep_names]
+        if dropped:
+            self._models = {key: value for key, value in self._models.items() if key in keep_names}
+        return dropped
+
     def snapshot(self, *, now_monotonic: float | None = None, include_trails: bool = True) -> dict[str, Any]:
         now = time.monotonic() if now_monotonic is None else now_monotonic
         transport_age = None if self._last_datagram_monotonic is None else max(0.0, now - self._last_datagram_monotonic)

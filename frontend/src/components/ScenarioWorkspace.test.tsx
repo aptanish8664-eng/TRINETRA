@@ -16,15 +16,16 @@ vi.mock('../services/api', () => ({
 
 vi.mock('./PlanMapEditor', () => ({
   PlanMapEditor: ({ scope, aircraft, onAreaChange, onAircraftChange }: {
-    scope: 'area' | 'aircraft'; aircraft?: AircraftPlan
+    scope: 'area' | 'aircraft' | 'both'; aircraft?: AircraftPlan
     onAreaChange: (area: OperatingArea | null) => void; onAircraftChange: (patch: Partial<AircraftPlan>) => void
-  }) => scope === 'area'
-    ? <button type="button" onClick={() => onAreaChange({ kind: 'circle', centre: { latitude: 12.975, longitude: 77.596 }, radius_m: 400, vertices: [] })}>SET TEST AREA</button>
-    : <div>
+  }) => <div>
+    {scope !== 'aircraft' && <button type="button" onClick={() => onAreaChange({ kind: 'circle', centre: { latitude: 12.975, longitude: 77.596 }, radius_m: 400, vertices: [] })}>SET TEST AREA</button>}
+    {aircraft && scope !== 'area' && <div>
       <button type="button" onClick={() => onAircraftChange({ start_location: { latitude: 12.9716, longitude: 77.5946 } })}>SET TEST START</button>
       <button type="button" onClick={() => onAircraftChange({ parameters: { ...aircraft?.parameters, points: [{ latitude: 12.973, longitude: 77.595 }, { latitude: 12.974, longitude: 77.596 }] } })}>SET TEST POINTS</button>
       <button type="button" onClick={() => onAircraftChange({ parameters: { ...aircraft?.parameters, drop_point: { latitude: 12.974, longitude: 77.596 } } })}>SET TEST DROP POINT</button>
-    </div>,
+    </div>}
+  </div>,
 }))
 
 const apiMock = vi.mocked(api)
@@ -108,7 +109,7 @@ const fillWaypointAircraft = () => {
 
 describe('ScenarioWorkspace (schema 2 mission plan)', () => {
   beforeEach(() => {
-    sessionStorage.clear()
+    sessionStorage.clear(); localStorage.clear()
     apiMock.scenarioList.mockResolvedValue([])
     apiMock.myScenarioRequests.mockResolvedValue([])
     apiMock.px4Telemetry.mockResolvedValue(fleet)
@@ -131,7 +132,9 @@ describe('ScenarioWorkspace (schema 2 mission plan)', () => {
     expect(screen.getByRole('checkbox', { name: /Relief Supply Delivery/ })).toBeTruthy()
     for (const gone of ['MISSION AREA', 'OPERATIONAL CONSTRAINTS', 'MISSION DURATION (minutes)']) expect(screen.queryByLabelText(gone)).toBeNull()
     await activateOne()
-    for (const label of [/ROLE/, /PRIORITY/, /TASK TYPE/, 'ALTITUDE (m) *', 'SPEED (m/s) *', /LOITER AT DESTINATION/, /RETURN MODE/]) {
+    // A single aircraft is the only primary, so its priority is not asked (it is 1); with two or more aircraft the field appears.
+    expect(screen.queryByLabelText(/PRIORITY/)).toBeNull()
+    for (const label of [/ROLE/, /TASK TYPE/, 'ALTITUDE (m) *', 'SPEED (m/s) *', /LOITER AT DESTINATION/, /RETURN MODE/]) {
       expect(screen.getByLabelText(label)).toBeTruthy()
     }
     for (const gone of ['INDIVIDUAL OBJECTIVE', 'INDIVIDUAL TASK', 'DATA REQUIREMENTS', 'COMPLETION CONDITION', 'EXPECTED RESULT', 'RETURN COMPLETION CONDITION', 'DESTINATION ACTION']) {

@@ -131,6 +131,7 @@ def test_gazebo_processes_of_this_checkout_are_found_and_others_ignored(tmp_path
 
 def _relocation_world(monkeypatch, tmp_path, *, existing, owned):
     calls = {"terminated": [], "gazebo": 0, "activate": None}
+    monkeypatch.setenv("TRINETRA_STATE_DIR", str(tmp_path / "trinetra-state"))      # the persisted last home never lands in the real profile
     state = {"instances": dict(existing)}
     monkeypatch.setattr(_manager, "discover_px4_instances", lambda root, proc_root=None: dict(state["instances"]))
     monkeypatch.setattr(_manager, "_state_path", lambda: tmp_path / "state.json")
@@ -163,6 +164,19 @@ def test_relocate_stops_managed_instances_and_gazebo_then_starts_at_the_home(tmp
     assert calls["terminated"] == [4242] and calls["gazebo"] == 1 and calls["activate"] == (1, home)
     assert result["relocated"] is True and result["stopped_instances"] == [0] and result["gazebo_stopped"] == [900, 901]
     assert _manager._load_owned(tmp_path / "state.json") == {}  # the stopped pid is no longer claimed
+
+
+def test_a_successful_restart_persists_the_home_as_the_last_known_home_and_a_failed_one_does_not(tmp_path, monkeypatch):
+    calls = _relocation_world(monkeypatch, tmp_path, existing={0: 4242}, owned={0: 4242})
+    assert _manager.load_last_home() is None
+    home = {"latitude": 12.9716, "longitude": 77.5946, "altitude_m": 488.0}
+    result = _manager.relocate_fleet(1, home, px4_root=tmp_path)
+    saved = _manager.load_last_home()
+    assert saved["home"] == home and saved["saved_at"] > 0 and result["last_home"]["home"] == home
+    assert (tmp_path / "trinetra-state" / "last_home.json").exists()
+    monkeypatch.setattr(_manager, "activate_fleet", lambda count, **kwargs: {"requested_count": count, "instances": [], "failure": "PX4 did not start", "failure_code": "sitl_start_failed"})
+    _manager.relocate_fleet(1, {"latitude": 47.0, "longitude": 8.0, "altitude_m": 400.0}, px4_root=tmp_path)
+    assert _manager.load_last_home()["home"] == home                                  # a failed restart keeps the previous value
 
 
 def test_relocate_refuses_an_instance_it_did_not_start_and_touches_nothing(tmp_path, monkeypatch):
@@ -219,7 +233,7 @@ def test_simulation_location_reports_distance_and_the_two_notices(general_client
     # The area distance is the same great circle less the 400 m radius, not the shorter tangent-plane figure.
     assert abs(far["max_distance_to_start_m"] - far["max_distance_to_area_m"]) < 1_000
     assert "about 7378 km from the mission area" in far["message"] or "about 7377 km from the mission area" in far["message"]
-    assert "different location" in far["message"] and "Move simulation to mission start" in far["message"]
+    assert "different location" in far["message"] and "Restart at mission start" in far["message"]
     assert far["thresholds"] == {"relocation_notice_m": RELOCATION_NOTICE_M, "far_from_area_m": FAR_FROM_AREA_M, "home_tolerance_m": HOME_TOLERANCE_M}
     monkeypatch.setattr("app.fleet_routes._fleet_snapshot", lambda: ([_vehicle(**offset(3000, 0))], []))
     near_area = client.get(query).json()
@@ -234,7 +248,9 @@ def test_simulation_location_reports_distance_and_the_two_notices(general_client
     assert client.get("/api/fleet/simulation-location?scenario_id=nope&scenario_version_id=nope").status_code == 404
 
 
-def test_relocate_needs_confirmation_role_csrf_and_disarmed_aircraft(general_client, flight, monkeypatch):
+def test_relocate_needs_confirmation_role_and_csrf_and_is_no_longer_refused_for_an_armed_aircraft(general_client, flight, monkeypatch):
+    """Changed from "...and_disarmed_aircraft": Restart at mission start is available in every aircraft state, so an armed aircraft is not
+    refused any more (the restart ends its flight). Confirmation, login and CSRF are still required, and nothing reaches the manager unconfirmed."""
     from fastapi.testclient import TestClient
     from app.main import app
 
@@ -242,21 +258,57 @@ def test_relocate_needs_confirmation_role_csrf_and_disarmed_aircraft(general_cli
     scenario_id, version_id = _saved(client)
     body = {"scenario_id": scenario_id, "scenario_version_id": version_id}
     called = []
-    monkeypatch.setattr("app.fleet_routes.invoke_fleet_manager", lambda *a, **k: called.append((a, k)) or {})
+    monkeypatch.setattr("app.fleet_routes.invoke_fleet_manager", staged(lambda *a, **k: called.append((a, k)) or {}))
     assert TestClient(app).post("/api/fleet/relocate", json={**body, "confirm": True}).status_code == 401
     unconfirmed = client.post("/api/fleet/relocate", json=body)
     assert unconfirmed.status_code == 422 and unconfirmed.json()["detail"]["code"] == "confirmation_required"
     no_receivers = client.post("/api/fleet/relocate", json={**body, "confirm": True})
     assert no_receivers.status_code == 503 and no_receivers.json()["detail"]["code"] == "receivers_unavailable"
+    assert called == []  # nothing reached the manager in any refused case
     _receivers(monkeypatch)
+    monkeypatch.setattr("app.fleet_routes.RELOCATION_VERIFY_TIMEOUT_S", 0.0)
     monkeypatch.setattr("app.fleet_routes._fleet_snapshot", lambda: ([_vehicle(**ZURICH, armed=True)], []))
     armed = client.post("/api/fleet/relocate", json={**body, "confirm": True})
-    assert armed.status_code == 409 and armed.json()["detail"]["code"] == "aircraft_armed"
-    assert armed.json()["detail"]["simulation_stopped"] is False
-    assert called == []  # nothing reached the manager in any refused case
+    assert armed.json()["detail"].get("code") != "aircraft_armed"
+    assert [args for args, _ in called if args == ("relocate",)] == [("relocate",)]      # it reached the manager (verification then fails: the manager is a stub here)
     csrf = client.headers.pop("X-CSRF-Token")
     assert client.post("/api/fleet/relocate", json={**body, "confirm": True}).status_code == 403
     client.headers["X-CSRF-Token"] = csrf
+
+
+def staged_progress(answer, count, instances=None):
+    """The progress file the staged start would leave for an old-style `relocate` answer (the tests keep describing the outcome the old way)."""
+    failed = bool(answer.get("failure"))
+    code = answer.get("failure_code")
+    stop_failed = code in ("stop_failed", "instance_not_managed")
+    targets = list(instances) if instances else list(range(count))
+    return {"present": True, "finished": True, "alive": False, "phase": "failed" if failed else "done", "targets": targets, "count": count, "request_id": None,
+            "stop": {"state": "failed" if stop_failed else "ok", "detail": answer.get("failure") if stop_failed else "PX4 and Gazebo are gone (0.1 s)."},
+            "gazebo": {"state": "ready", "detail": "The world answers (2 s)."}, "bridges": {"state": "ok", "detail": ""},
+            "aircraft": {str(i): {"aircraft_id": f"px4-{i + 1}", "state": "failed" if failed else "ready", "detail": answer.get("failure") or ""} for i in range(count)},
+            "failure": {"code": code, "message": answer.get("failure")} if failed else None,
+            "result": {"failure": answer.get("failure"), "failure_code": code, "bridges": answer.get("bridges"), "partial": False},
+            "stalled_s": 0.0, "timings": {}, "manager": "px4_wsl_fleet_v1"}
+
+
+def staged(old):
+    """Wraps a fake fleet manager written for `relocate` so it also answers the staged `start` and `progress` (start is forwarded as relocate)."""
+    box = {"progress": None}
+
+    def fake(action, **kwargs):
+        if action == "start":
+            forwarded = {key: value for key, value in kwargs.items() if key in ("count", "request_id", "timeout_seconds", "home")}
+            answer = old("relocate", **forwarded)
+            fake.start_calls.append(kwargs)
+            if answer.get("failure") and not answer.get("failure_code") and "bridges" not in answer:      # the wsl.exe call itself failed
+                return answer
+            box["progress"] = staged_progress(answer, kwargs["count"], kwargs.get("instances"))
+            return {**box["progress"], "started": True}
+        if action == "progress":
+            return dict(box["progress"]) if box["progress"] else {"present": False}
+        return old(action, **kwargs)
+    fake.start_calls = []
+    return fake
 
 
 def _manager_ok(home_ok=True, **overrides):
@@ -277,7 +329,7 @@ def test_relocate_succeeds_only_when_the_reported_position_is_at_the_mission_sta
         seen.update(action=action, **kwargs)
         return _manager_ok()
 
-    monkeypatch.setattr("app.fleet_routes.invoke_fleet_manager", manager)
+    monkeypatch.setattr("app.fleet_routes.invoke_fleet_manager", staged(manager))
     monkeypatch.setattr("app.fleet_routes._fleet_snapshot", lambda: ([_vehicle(**offset(2, 1))], []))
     row = {"aircraft_id": "px4-1", "instance_number": 0, "system_id": 1, "gazebo_model": "x500_0", "px4_status": "connected", "gazebo_status": "connected", "verified": True}
     monkeypatch.setattr("app.fleet_routes._verified_fleet", lambda count: ([row], [row]))
@@ -302,14 +354,14 @@ def test_relocate_reports_structured_failures_and_how_to_recover(general_client,
     monkeypatch.setattr("app.fleet_routes._verified_fleet", lambda count: ([row], [row]))
     monkeypatch.setattr("app.fleet_routes._fleet_snapshot", lambda: ([_vehicle(**ZURICH)], []))
     # 1. the instance is not the manager's: nothing was stopped
-    monkeypatch.setattr("app.fleet_routes.invoke_fleet_manager", lambda *a, **k: _manager_ok(
+    monkeypatch.setattr("app.fleet_routes.invoke_fleet_manager", staged(lambda *a, **k: _manager_ok(
         failure="PX4 instance(s) 0 were not started by the TRINETRA fleet manager, so they were left running. Stop them in WSL, then try again.",
-        failure_code="instance_not_managed", relocated=False, stopped_instances=[], gazebo_stopped=[], instances=[]))
+        failure_code="instance_not_managed", relocated=False, stopped_instances=[], gazebo_stopped=[], instances=[])))
     refused = client.post("/api/fleet/relocate", json=body)
     assert refused.status_code == 409 and refused.json()["detail"]["code"] == "instance_not_managed"
     assert refused.json()["detail"]["simulation_stopped"] is False and "Nothing was stopped" in refused.json()["detail"]["recovery"]
     # 2. restarted, but PX4 still reports the old place: the home was not applied
-    monkeypatch.setattr("app.fleet_routes.invoke_fleet_manager", lambda *a, **k: _manager_ok())
+    monkeypatch.setattr("app.fleet_routes.invoke_fleet_manager", staged(lambda *a, **k: _manager_ok()))
     monkeypatch.setattr("app.fleet_routes.RELOCATION_VERIFY_TIMEOUT_S", 0.0)
     wrong = client.post("/api/fleet/relocate", json=body)
     detail = wrong.json()["detail"]

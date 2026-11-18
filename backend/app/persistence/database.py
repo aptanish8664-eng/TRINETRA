@@ -660,13 +660,14 @@ def create_scenario(owner_user_id: str, title: str, config: dict, intent: dict |
 
 
 def save_scenario_version(
-    scenario_id: str, owner_user_id: str, title: str, config: dict, intent: dict | None = None,
+    scenario_id: str, owner_user_id: str, title: str, config: dict, intent: dict | None = None, *, allow_any_owner: bool = False,
 ) -> dict | None:
+    """Saves a new immutable version. Only the owner may, except that a GENERAL (`allow_any_owner`) may open and save any user's scenario."""
     config_json = json.dumps(config, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     with SessionLocal() as session:
         begin_write_transaction(session)
         scenario = session.get(ScenarioRecord, scenario_id)
-        if scenario is None or scenario.owner_user_id != owner_user_id:
+        if scenario is None or (scenario.owner_user_id != owner_user_id and not allow_any_owner):
             return None
         latest = session.scalar(
             select(ScenarioVersionRecord)
@@ -700,7 +701,7 @@ def save_scenario_version(
                     intent_json=json.dumps(effective_intent, sort_keys=True, separators=(",", ":"), ensure_ascii=False),
                 ))
         session.commit()
-    return get_scenario(scenario_id, owner_user_id)
+    return get_scenario(scenario_id, owner_user_id, include_all=allow_any_owner)
 
 
 def get_scenario(scenario_id: str, user_id: str, include_all: bool = False) -> dict | None:
@@ -761,6 +762,12 @@ def save_mission_deployment(
             # Deploying the same immutable version again keeps one record (same id) but makes it the current
             # deployment: Mission Control reads the most recently deployed mission, not the first one ever made.
             existing.created_at = now
+            # What can differ between two deployments of the same immutable version is refreshed: whether it is a plan only and which aircraft were verified.
+            current = json.loads(existing.payload_json)
+            for key in ("plan_only", "execution_status", "activated_uav_count", "fleet", "requested_uav_count"):
+                if key in payload:
+                    current[key] = payload[key]
+            existing.payload_json = json.dumps(current, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
             session.commit()
             session.refresh(existing)
             return _deployment_view(existing)
@@ -1388,6 +1395,22 @@ def experiment_results_available() -> bool:
     return _results_table["present"]
 
 
+def update_experiment_result_payload(result_id: str, updates: dict) -> bool:
+    """Merges keys into a stored result's payload (used to add a mission-continuity outcome that is only known after the run record was written)."""
+    if not experiment_results_available():
+        return False
+    with SessionLocal() as session:
+        begin_write_transaction(session)
+        record = session.get(ExperimentResultRecord, result_id)
+        if record is None:
+            return False
+        payload = json.loads(record.payload_json)
+        payload.update(updates)
+        record.payload_json = json.dumps(payload, sort_keys=True, allow_nan=False)
+        session.commit()
+        return True
+
+
 def _result_view(record: ExperimentResultRecord) -> dict:
     return {"id": record.id, "experiment_id": record.experiment_id, "experiment_name": record.experiment_name, "scenario_id": record.scenario_id,
             "scenario_version_id": record.scenario_version_id, "config_hash": record.config_hash, "config": json.loads(record.config_json),
@@ -1439,7 +1462,7 @@ def _decision_view(record: ResearchDecisionRecord) -> dict:
         "id": record.id, "user_id": record.user_id, "username": record.username, "aircraft_id": record.aircraft_id,
         "action": record.action, "handover_candidate": record.handover_candidate, "source": record.source,
         "source_name": record.source_name, "tier": record.tier, "threat_score": record.threat_score,
-        "created_at": record.created_at.isoformat() + "Z", "executed": False,
+        "created_at": record.created_at.isoformat() + "Z", "executed": str(record.source_name or "").startswith("executed:"),
     }
 
 
@@ -1515,6 +1538,17 @@ def latest_mission_execution(user_id: str, *, include_all: bool = False) -> dict
         return _execution_view(record) if record else None
 
 
+def deployment_mission_executions(deployment_id: str) -> list[dict]:
+    """The newest run of every aircraft of one deployment (a multi-aircraft start creates one run per flying aircraft)."""
+    with SessionLocal() as session:
+        rows = session.scalars(select(MissionExecutionRecord).where(MissionExecutionRecord.deployment_id == deployment_id)
+                               .order_by(MissionExecutionRecord.created_at.desc())).all()
+        newest: dict[str, MissionExecutionRecord] = {}
+        for row in rows:
+            newest.setdefault(row.aircraft_id, row)
+        return [_execution_view(row) for row in sorted(newest.values(), key=lambda item: item.aircraft_id)]
+
+
 def active_mission_execution(aircraft_id: str) -> dict | None:
     with SessionLocal() as session:
         record = session.scalar(select(MissionExecutionRecord).where(
@@ -1578,3 +1612,169 @@ def list_mission_execution_events(execution_id: str, *, after_id: int = 0, limit
         return [{"id": record.id, "execution_id": record.execution_id, "source": record.source, "type": record.type,
                  "message": record.message, "data": json.loads(record.data_json or "{}"), "actor_name": record.actor_name,
                  "occurred_at": record.occurred_at.isoformat() + "Z"} for record in records]
+
+
+# --- General: all saved scenarios, export, and the cascade delete -----------------------------------------------------------------
+
+def _scenario_admin_rows(session) -> list[dict]:
+    """One row per scenario of every user (GENERAL's view). Read-only."""
+    users = {user.id: user for user in session.scalars(select(UserRecord)).all()}
+    rows = []
+    for scenario in session.scalars(select(ScenarioRecord).order_by(ScenarioRecord.updated_at.desc())).all():
+        versions = session.scalars(select(ScenarioVersionRecord).where(ScenarioVersionRecord.scenario_id == scenario.id)
+                                   .order_by(ScenarioVersionRecord.version_number.desc())).all()
+        if not versions:
+            continue
+        latest = versions[0]
+        approvals = {item.scenario_version_id: item for item in session.scalars(select(ScenarioApprovalRequestRecord).where(
+            ScenarioApprovalRequestRecord.scenario_version_id.in_([v.id for v in versions]))).all()}
+        deployments = session.scalars(select(MissionDeploymentRecord).where(MissionDeploymentRecord.scenario_id == scenario.id)).all()
+        executions = session.scalars(select(MissionExecutionRecord).where(MissionExecutionRecord.scenario_id == scenario.id)).all()
+        deployed_versions = {item.scenario_version_id for item in deployments}
+        latest_approval = approvals.get(latest.id)
+        status = "deployed" if latest.id in deployed_versions else "approved" if latest_approval and latest_approval.status == "APPROVED" \
+            else "submitted" if latest_approval else "draft"
+        intents = {v.id: session.get(ScenarioIntentRecord, v.id) for v in versions}
+
+        def source_of(version):
+            record = intents.get(version.id)
+            if record is None:
+                return "legacy"
+            data = json.loads(record.intent_json)
+            return "quick" if data.get("quick_source") else "manual" if data.get("schema_version") == 2 else "legacy"
+        owner = users.get(scenario.owner_user_id)
+        rows.append({
+            "id": scenario.id, "title": scenario.title, "owner_user_id": scenario.owner_user_id,
+            "owner_username": owner.username if owner else None, "owner_name": owner.full_name if owner else None, "owner_role": owner.role if owner else None,
+            "latest_version_number": latest.version_number, "status": status, "approval_status": latest_approval.status if latest_approval else None,
+            "created_at": scenario.created_at.isoformat() + "Z", "updated_at": scenario.updated_at.isoformat() + "Z",
+            "source": source_of(latest), "deployments": len(deployments), "executions": len(executions),
+            "active_execution": any(item.finished_at is None for item in executions),
+            "versions": [{"id": v.id, "number": v.version_number, "hash": v.config_hash, "source": source_of(v),
+                          "approval_status": approvals[v.id].status if v.id in approvals else None, "deployed": v.id in deployed_versions,
+                          "created_at": v.created_at.isoformat() + "Z"} for v in versions],
+        })
+    return rows
+
+
+def list_scenarios_admin() -> list[dict]:
+    with SessionLocal() as session:
+        return _scenario_admin_rows(session)
+
+
+def _scenario_children(session, scenario_id: str) -> dict:
+    versions = session.scalars(select(ScenarioVersionRecord).where(ScenarioVersionRecord.scenario_id == scenario_id)).all()
+    version_ids = [v.id for v in versions]
+    executions = session.scalars(select(MissionExecutionRecord).where(MissionExecutionRecord.scenario_id == scenario_id)).all()
+    experiments = session.scalars(select(AttackExperimentRecord).where(AttackExperimentRecord.scenario_id == scenario_id)).all()
+    experiment_ids = [e.id for e in experiments]
+    return {
+        "versions": versions, "executions": executions, "experiments": experiments,
+        "approvals": session.scalars(select(ScenarioApprovalRequestRecord).where(ScenarioApprovalRequestRecord.scenario_version_id.in_(version_ids))).all() if version_ids else [],
+        "deployments": session.scalars(select(MissionDeploymentRecord).where(MissionDeploymentRecord.scenario_id == scenario_id)).all(),
+        "events": session.scalars(select(MissionExecutionEventRecord).where(MissionExecutionEventRecord.execution_id.in_([e.id for e in executions]))).all() if executions else [],
+        "results": session.scalars(select(ExperimentResultRecord).where(
+            (ExperimentResultRecord.experiment_id.in_(experiment_ids)) | (ExperimentResultRecord.scenario_id == scenario_id))).all(),
+    }
+
+
+def scenario_delete_preview(scenario_id: str) -> dict | None:
+    """Exactly what a General delete would remove, and what blocks it. None when the scenario does not exist."""
+    with SessionLocal() as session:
+        scenario = session.get(ScenarioRecord, scenario_id)
+        if scenario is None:
+            return None
+        children = _scenario_children(session, scenario_id)
+        blockers = []
+        active = [e for e in children["executions"] if e.finished_at is None]
+        if active:
+            blockers.append({"code": "execution_active", "message": f"A flight of this scenario is still active ({active[0].state} on {active[0].aircraft_id}). Abort it and wait until it is final first."})
+        for owner_scope, label in ((None, "Mission Control shows it"), (scenario.owner_user_id, "Mission Control shows it for its owner")):
+            query = select(MissionDeploymentRecord).join(ScenarioRecord, MissionDeploymentRecord.scenario_id == ScenarioRecord.id)
+            if owner_scope:
+                query = query.where(ScenarioRecord.owner_user_id == owner_scope)
+            newest = session.scalar(query.order_by(MissionDeploymentRecord.created_at.desc()).limit(1))
+            if newest is not None and newest.scenario_id == scenario_id and not any(b["code"] == "pinned_in_mission_control" for b in blockers):
+                blockers.append({"code": "pinned_in_mission_control", "message": f"{label}: its deployment is the newest one. Deploy another mission (or switch Mission Control to one) first."})
+        return {
+            "scenario_id": scenario_id, "title": scenario.title,
+            "counts": {"versions": len(children["versions"]), "approvals": len(children["approvals"]), "deployments": len(children["deployments"]),
+                       "executions": len(children["executions"]), "execution_events": len(children["events"]), "run_records": 0,
+                       "experiments": len(children["experiments"]), "experiment_results": len(children["results"])},
+            "blockers": blockers,
+        }
+
+
+def scenario_export(scenario_id: str) -> dict | None:
+    """The full record of one scenario as plain JSON: versions with hashes and intents, approvals, deployments, executions with events, experiments and results."""
+    with SessionLocal() as session:
+        scenario = session.get(ScenarioRecord, scenario_id)
+        if scenario is None:
+            return None
+        children = _scenario_children(session, scenario_id)
+        owner = session.get(UserRecord, scenario.owner_user_id)
+        versions = []
+        for version in sorted(children["versions"], key=lambda item: item.version_number):
+            view = _scenario_version_view(session, version)
+            versions.append(view)
+        return {
+            "exported_format": "trinetra-scenario-record-1", "scenario": {"id": scenario.id, "title": scenario.title, "owner_user_id": scenario.owner_user_id,
+                                                                          "owner_username": owner.username if owner else None, "owner_role": owner.role if owner else None,
+                                                                          "created_at": scenario.created_at.isoformat() + "Z", "updated_at": scenario.updated_at.isoformat() + "Z"},
+            "versions": versions,
+            "approvals": [{"id": a.id, "scenario_version_id": a.scenario_version_id, "status": a.status, "reason": a.reason, "submitted_by": a.submitted_by,
+                           "reviewed_by": a.reviewed_by, "submitted_at": a.submitted_at.isoformat() + "Z", "reviewed_at": a.reviewed_at.isoformat() + "Z" if a.reviewed_at else None}
+                          for a in children["approvals"]],
+            "deployments": [_deployment_view(d) for d in children["deployments"]],
+            "executions": [{**_execution_view(e), "events": [{"id": ev.id, "source": ev.source, "type": ev.type, "message": ev.message, "actor_name": ev.actor_name,
+                                                              "data": json.loads(ev.data_json or "{}"), "occurred_at": ev.occurred_at.isoformat() + "Z"}
+                                                             for ev in children["events"] if ev.execution_id == e.id]} for e in children["executions"]],
+            "experiments": [{"id": x.id, "name": x.name, "scenario_version_id": x.scenario_version_id, "preset_id": x.preset_id, "seed": x.seed, "status": x.status,
+                             "config": json.loads(x.config_json), "config_hash": x.config_hash} for x in children["experiments"]],
+            "experiment_results": [{"id": r.id, "experiment_id": r.experiment_id, "experiment_name": r.experiment_name, "config_hash": r.config_hash,
+                                    "payload": json.loads(r.payload_json), "experiment_deleted_at": r.experiment_deleted_at.isoformat() + "Z" if r.experiment_deleted_at else None}
+                                   for r in children["results"]],
+            "run_records": [],
+        }
+
+
+def delete_scenario_cascade(scenario_id: str, *, delete_results: bool) -> dict:
+    """GENERAL delete of a whole scenario in ONE transaction. Raises ValueError (with the blocker text) while it is active or pinned.
+
+    Deletes events, executions, deployments, experiments, approvals, intents, versions and the scenario. Experiment results are kept and marked as coming
+    from a deleted experiment unless `delete_results`. Returns what was deleted, with counts and a hash of the exported content.
+    """
+    export = scenario_export(scenario_id)
+    preview = scenario_delete_preview(scenario_id)
+    if export is None or preview is None:
+        raise LookupError("Scenario not found.")
+    if preview["blockers"]:
+        raise ValueError(preview["blockers"][0]["message"])
+    content_hash = hashlib.sha256(json.dumps(export, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")).hexdigest()
+    with SessionLocal() as session:
+        begin_write_transaction(session)
+        children = _scenario_children(session, scenario_id)
+        now = utcnow_naive()
+        execution_ids = [e.id for e in children["executions"]]
+        version_ids = [v.id for v in children["versions"]]
+        if execution_ids:
+            session.execute(delete(MissionExecutionEventRecord).where(MissionExecutionEventRecord.execution_id.in_(execution_ids)))
+        session.execute(delete(MissionExecutionRecord).where(MissionExecutionRecord.scenario_id == scenario_id))
+        session.execute(delete(MissionDeploymentRecord).where(MissionDeploymentRecord.scenario_id == scenario_id))
+        result_ids = [r.id for r in children["results"]]
+        if result_ids and delete_results:
+            session.execute(delete(ExperimentResultRecord).where(ExperimentResultRecord.id.in_(result_ids)))
+        elif result_ids:
+            session.execute(update(ExperimentResultRecord).where(ExperimentResultRecord.id.in_(result_ids), ExperimentResultRecord.experiment_deleted_at.is_(None))
+                            .values(experiment_deleted_at=now))
+        session.execute(delete(AttackExperimentRecord).where(AttackExperimentRecord.scenario_id == scenario_id))
+        if version_ids:
+            session.execute(delete(ScenarioApprovalRequestRecord).where(ScenarioApprovalRequestRecord.scenario_version_id.in_(version_ids)))
+            session.execute(delete(ScenarioIntentRecord).where(ScenarioIntentRecord.version_id.in_(version_ids)))
+        session.execute(delete(ScenarioVersionRecord).where(ScenarioVersionRecord.scenario_id == scenario_id))
+        session.execute(delete(ScenarioRecord).where(ScenarioRecord.id == scenario_id))
+        session.commit()
+    counts = dict(preview["counts"])
+    counts["experiment_results_deleted"] = counts["experiment_results"] if delete_results else 0
+    counts["experiment_results_kept"] = 0 if delete_results else counts["experiment_results"]
+    return {"scenario_id": scenario_id, "title": preview["title"], "counts": counts, "content_hash": content_hash}

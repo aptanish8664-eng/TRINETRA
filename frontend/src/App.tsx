@@ -14,19 +14,31 @@ import { ScenarioWorkspace } from './components/ScenarioWorkspace'
 import { AttackLab } from './components/AttackLab'
 import { ThreatReplayPanel } from './components/ThreatReplayPanel'
 import { api } from './services/api'
+import { CommandPalette } from './components/CommandPalette'
+import { ToastHost } from './components/Toasts'
+import { ScrubVideo } from './visuals/VideoBackdrop'
+import { VisualsControls } from './visuals/VisualsControls'
+import { FleetStrip } from './visuals/FleetStrip'
+import { useDescent } from './visuals/useDescent'
+import { useVisuals } from './visuals/useVisuals'
+import './design-tokens.css'
+import './design-fixes.css'
+import './visuals/visuals.css'
+import './visuals/overview-descent.css'
 import type { MissionDeployment, UserSession } from './services/auth'
 import type { MissionState, RunRecord, UAV } from './types'
 
 gsap.registerPlugin(ScrollTrigger)
 const ThreeEnvironment = lazy(() => import('./components/ThreeEnvironment').then(module => ({ default: module.ThreeEnvironment })))
 
-type Tab = 'Overview' | 'Mission Control' | 'Scenario Lab' | 'Attack Lab' | 'Fleet' | 'Analytics' | 'History' | 'Research'
+type Tab = 'Overview' | 'Mission Control' | 'Quick Mission' | 'Scenario Lab' | 'Attack Lab' | 'Fleet' | 'Analytics' | 'History' | 'Research'
 type Config = { uav_count: number; task_count: number; seed: number; duration: number; spoofing_type: string; target_uav: string; spoof_start: number; spoof_duration: number; spoof_magnitude: number; response_policy: string; detector_threshold: number | null }
 const initialConfig: Config = { uav_count: 4, task_count: 10, seed: 21, duration: 180, spoofing_type: 'sudden', target_uav: 'UAV-02', spoof_start: 15, spoof_duration: 35, spoof_magnitude: 3, response_policy: 'adaptive', detector_threshold: null }
-const tabs: Tab[] = ['Overview', 'Mission Control', 'Scenario Lab', 'Attack Lab', 'Fleet', 'Analytics', 'History', 'Research']
+const tabs: Tab[] = ['Overview', 'Mission Control', 'Quick Mission', 'Scenario Lab', 'Attack Lab', 'Fleet', 'Analytics', 'History', 'Research']
 const tabRoutes: Record<Tab, string> = {
   Overview: '/',
   'Mission Control': '/mission-control',
+  'Quick Mission': '/quick-mission',
   'Scenario Lab': '/scenario-lab',
   'Attack Lab': '/attack-lab',
   Fleet: '/fleet',
@@ -64,18 +76,23 @@ function TelemetryChart({ values, threshold, title = 'Trajectory residual' }: { 
 
 function Overview({ onNavigate, onCreate }: { onNavigate: (tab: Tab) => void; onCreate: () => void }) {
   const story = useRef<HTMLDivElement>(null)
+  const readout = useRef<HTMLSpanElement>(null)
+  const visuals = useVisuals()
+  const progress = useRef(0)
+  useDescent(story, readout, progress)
   useEffect(() => {
     if (window.matchMedia('(prefers-reduced-motion: reduce)').matches || !story.current) return
     const ctx = gsap.context(() => {
-      gsap.utils.toArray<HTMLElement>('.story-beat').forEach((beat) => gsap.fromTo(beat, { y: 44, opacity: .25 }, { y: 0, opacity: 1, duration: .8, ease: 'power2.out', scrollTrigger: { trigger: beat, start: 'top 78%', end: 'top 40%', scrub: .7 } }))
+      gsap.utils.toArray<HTMLElement>('.story-beat').forEach((beat) => gsap.fromTo(beat, { y: 44, opacity: .85 }, { y: 0, opacity: 1, duration: .8, ease: 'power2.out', scrollTrigger: { trigger: beat, start: 'top 78%', end: 'top 40%', scrub: .7 } }))
       gsap.to('.hero-orbit', { rotation: 15, duration: 24, ease: 'none', repeat: -1, yoyo: true })
     }, story)
     return () => ctx.revert()
   }, [])
-  return <div className="overview-page" ref={story}>
+  return <div className={`overview-page ${visuals.animate ? '' : 'visuals-static'}`} ref={story}>
+    <ScrubVideo progressRef={progress}/>
+    {visuals.animate && <><div className="flight-path" aria-hidden="true"/><div className="altitude-readout" role="img" aria-label="Altitude of the descent, from about 120 metres at the top of the page to 0 metres at the bottom"><small>ALT</small><span ref={readout}>120 m</span></div></>}
     <section className="hero">
-      <div className="hero-image" aria-hidden="true"><picture><source srcSet="/images/qilian-aerial.webp" type="image/webp"/><img src="/images/terrain-horizon.svg" alt="" /></picture></div>
-      <div className="hero-shade" />
+      <div className="hero-visuals"><VisualsControls/></div>
       <motion.div className="hero-content" initial={{ opacity: 0, y: 18 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: .8, ease: 'easeOut' }}>
         <div className="hero-kicker"><span className="live-dot" /> CYBER-RESILIENT MULTI-UAV RESEARCH PLATFORM</div>
         <h1>See the signal.<br /><em>Keep the mission.</em></h1>
@@ -88,13 +105,15 @@ function Overview({ onNavigate, onCreate }: { onNavigate: (tab: Tab) => void; on
       <button className="scroll-cue" onClick={() => document.getElementById('story')?.scrollIntoView({ behavior: 'smooth' })}><span>SCROLL TO EXPLORE</span><ArrowDown size={14} /></button>
       <div className="hero-orbit" aria-hidden="true"><span /><span /><span /><i /></div>
     </section>
-    <section className="story-intro" id="story"><div className="eyebrow">THE RESILIENCE LOOP <span>— 01 / 04</span></div><h2>One altered coordinate<br />can change the whole picture.</h2><p>TRINETRA is a software-only research demonstrator. It makes position deception visible, evaluates telemetry, and measures what happens when a fleet adapts.</p></section>
-    <section className="story-grid">
+    <section className="overview-fleet ov-waypoint" aria-label="Fleet summary"><div className="eyebrow">FLEET NOW <span>— LIVE FROM THE BACKEND</span></div><FleetStrip/></section>
+    <section className="story-intro ov-waypoint" id="story"><div className="eyebrow">THE RESILIENCE LOOP <span>— 01 / 04</span></div><h2>One altered coordinate<br />can change the whole picture.</h2><p>TRINETRA is a software-only research demonstrator. It makes position deception visible, evaluates telemetry, and measures what happens when a fleet adapts.</p></section>
+    <section className="story-grid ov-waypoint">
       <article className="story-beat"><div className="story-index">01 <span>DEPLOY</span></div><div className="story-graphic fleet-graphic"><img className="story-photo" src="/images/drone-flight.webp" alt="A small camera drone in flight beneath a sunset sky" loading="lazy"/><div className="graphic-grid"/><span className="mini-uav u1">◢</span><span className="mini-uav u2">◢</span><span className="mini-uav u3">◢</span><i className="graphic-route r1"/><i className="graphic-route r2"/><b>FLEET INITIALISED</b><small>WAYPOINTS ASSIGNED · TELEMETRY STREAM</small></div><div className="story-copy"><h3>Mission geometry,<br />made legible.</h3><p>Seeded starts and task locations create repeatable runs on a clearly labeled abstract coordinate plane.</p></div></article>
       <article className="story-beat"><div className="story-index">02 <span>DETECT</span></div><div className="story-graphic spoof-graphic"><div className="graphic-grid"/><i className="expected-path"/><i className="reported-path"/><span className="spoof-aircraft">◢</span><span className="spoof-pulse"/><b>POSITION DIVERGENCE</b><small>REPORTED GPS / GROUND-TRUTH VIEW</small></div><div className="story-copy"><h3>Deception, shown<br />as evidence.</h3><p>The simulator separates the hidden truth state from reported GPS. Detection consumes reported trajectory and mission telemetry only.</p></div></article>
       <article className="story-beat"><div className="story-index">03 <span>ADAPT</span></div><div className="story-graphic adapt-graphic"><div className="graphic-grid"/><span className="fleet-node n1">01</span><span className="fleet-node n2">02</span><span className="fleet-node n3">03</span><i className="handoff-line"/><b>CAPACITY-AWARE RESPONSE</b><small>ASSESS · ISOLATE · REASSIGN</small></div><div className="story-copy"><h3>Continuity,<br />measured honestly.</h3><p>Compare baseline and adaptive policies on matched seeds. Results reflect each run; improvement is not assumed.</p></div></article>
     </section>
-    <section className="overview-cta"><div><span className="eyebrow">ENTER THE SYSTEM</span><h2>A real simulation.<br /><em>A live operational view.</em></h2></div><div><p>Deploy a deterministic fleet, configure a GPS anomaly, inspect its response in 2D or 3D, and replay the recorded run.</p><button className="button-primary" onClick={onCreate}>OPEN MISSION CONTROL <ArrowRight size={15} /></button></div><div className="cta-glow" /></section>
+    <section className="overview-cta ov-waypoint"><div><span className="eyebrow">ENTER THE SYSTEM</span><h2>A real simulation.<br /><em>A live operational view.</em></h2></div><div><p>Deploy a deterministic fleet, configure a GPS anomaly, inspect its response in 2D or 3D, and replay the recorded run.</p><button className="button-primary" onClick={onCreate}>OPEN MISSION CONTROL <ArrowRight size={15} /></button></div><div className="cta-glow" /></section>
+    <section className="landing-pad ov-waypoint" aria-label="Landing pad"><div className="pad" aria-hidden="true"><i/><b>H</b></div><p>Touchdown. Every run in this simulator ends on the ground, and every number on these pages comes from the backend.</p></section>
   </div>
 }
 
@@ -105,8 +124,16 @@ function App() {
     accessPageForPath(window.location.pathname, false),
   )
   const [operatorSession, setOperatorSession] = useState<UserSession | null>(null)
+  // "Session ended" notice on the sign-in page: only when a signed-in session was ended by the server (expiry), never after a normal sign-out.
+  const [sessionEnded, setSessionEnded] = useState(false)
+  const sessionRef = useRef<UserSession | null>(null)
+  sessionRef.current = operatorSession
   const [config, setConfig] = useState<Config>(initialConfig)
-  const [sharedScenarioId, setSharedScenarioId] = useState<string | null>(null)
+  // Deep links: /scenario-lab?scenario=ID&version=N opens a version as a new draft; /quick-mission?scenario=ID opens a quick-made scenario with its stored values.
+  const initialLink = new URLSearchParams(window.location.search)
+  const [sharedScenarioId, setSharedScenarioId] = useState<string | null>(() => (window.location.pathname === '/scenario-lab' ? initialLink.get('scenario') : null))
+  const [sharedVersion, setSharedVersion] = useState<number | null>(() => (window.location.pathname === '/scenario-lab' && initialLink.get('version') ? Number(initialLink.get('version')) : null))
+  const [quickScenarioId, setQuickScenarioId] = useState<string | null>(() => (window.location.pathname === '/quick-mission' ? initialLink.get('scenario') : null))
   const [deployNotice, setDeployNotice] = useState('')
   const [runId, setRunId] = useState<string | null>(null)
   const [state, setState] = useState<MissionState | null>(null)
@@ -189,6 +216,7 @@ function App() {
   }, [operatorSession])
   useEffect(() => {
     const handleUnauthorized = () => {
+      if (sessionRef.current) setSessionEnded(true)
       setOperatorSession(null); setRunId(null); setState(null); setTrajectory([]); setHistory([])
       setReplayId(null); setReplayFrames([]); setExperiment(null); setAccessPage('login')
       window.history.replaceState({}, '', '/login')
@@ -253,12 +281,23 @@ function App() {
     setTab(next)
     window.scrollTo({ top: next === 'Overview' ? 0 : 110, behavior: 'smooth' })
   }
+  const openScenario = (scenarioId: string, version?: number) => {
+    setSharedScenarioId(scenarioId); setSharedVersion(version ?? null)
+    changeTab('Scenario Lab')
+    window.history.replaceState({}, '', `/scenario-lab?scenario=${encodeURIComponent(scenarioId)}${version ? `&version=${version}` : ''}`)
+  }
+  const openQuickScenario = (scenarioId: string) => {
+    setQuickScenarioId(scenarioId)
+    changeTab('Quick Mission')
+    window.history.replaceState({}, '', `/quick-mission?scenario=${encodeURIComponent(scenarioId)}`)
+  }
   const navigateAccess = (page: AccessPage) => {
     window.history.pushState({}, '', page === 'general' ? '/general' : page === 'register' ? '/register' : '/login')
     setAccessPage(page)
   }
   const openAccess = () => { navigateAccess('login'); window.scrollTo({ top: 0, behavior: 'smooth' }) }
   const handleAuthenticated = (session: UserSession) => {
+    setSessionEnded(false)
     setOperatorSession(session)
     const route = window.location.pathname
     setTab(routeTabs[route] ?? 'Overview')
@@ -337,7 +376,7 @@ function App() {
     : series[selectedUav?.id ?? ''] ?? [], [replayId, replayFrames, replayIndex, series, selectedUav?.id])
 
   return <div className={`app-shell ${!canExportAnalytics ? 'no-analytics-export' : ''}`}>
-    <header className="topbar">
+    {(!accessPage || accessPage === 'general') && <header className="topbar">
       <button className="brand-button" onClick={() => operatorSession && accessPage !== 'general' ? changeTab('Overview') : navigateAccess(operatorSession?.user.role === 'GENERAL' ? 'general' : 'login')}><BrandMark /></button>
       {operatorSession && accessPage !== 'general' && <nav className="main-nav" aria-label="Main navigation">{tabs.map(item => <button key={item} className={tab === item && !accessPage ? 'active' : ''} onClick={() => changeTab(item)}>{item}</button>)}</nav>}
       <div className="topbar-right">
@@ -348,17 +387,40 @@ function App() {
         {operatorSession && <button className={`access-nav-button ${accessPage ? 'active' : ''}`} onClick={() => void signOut()}><Shield size={14}/> SIGN OUT</button>}
         {operatorSession && accessPage !== 'general' && <button className="icon-button" title="Go to mission control" onClick={() => changeTab('Mission Control')}><Focus size={17}/></button>}
       </div>
-    </header>
+    </header>}
     {error && <div className="error-banner"><AlertTriangle size={16}/><span>{error}</span><button onClick={() => setError('')}>DISMISS</button></div>}
 
-    {accessPage && <AccessPortal page={accessPage} onPageChange={navigateAccess} onExit={() => operatorSession ? changeTab('Overview') : navigateAccess('login')} onAuthenticated={handleAuthenticated} userSession={operatorSession} apiReady={apiReady} streamConnected={connected} hasActiveRun={Boolean(runId)}/>}
+    <ToastHost/>
+    {operatorSession && !accessPage && <CommandPalette pages={tabs} onNavigate={page => changeTab(page as Tab)} onOpenMission={openQuickScenario}/>}
+    {accessPage && <AccessPortal page={accessPage} onPageChange={navigateAccess} onExit={() => operatorSession ? changeTab('Overview') : navigateAccess('login')} onAuthenticated={handleAuthenticated} userSession={operatorSession} apiReady={apiReady} streamConnected={connected} hasActiveRun={Boolean(runId)} sessionEnded={sessionEnded} onOpenScenario={openScenario} onOpenQuickMission={openQuickScenario}/>}
     {!accessPage && tab === 'Overview' && <Overview onNavigate={changeTab} onCreate={() => changeTab('Scenario Lab')} />}
 
     {!accessPage && tab !== 'Overview' && <main className="workspace" ref={storyTopRef}>
-      <div className="workspace-head"><div><div className="breadcrumb"><span>TRINETRA</span><span>/</span><b>{tab.toUpperCase()}</b></div><SectionTitle eyebrow={tab === 'Mission Control' ? 'LIVE OPERATIONS' : tab === 'Scenario Lab' ? 'UNIFIED MISSION WORKSPACE' : tab === 'Attack Lab' ? 'SIMULATED ATTACK EXPERIMENTS' : 'RESEARCH WORKSPACE'} title={tab === 'Mission Control' ? 'Mission Control' : tab} note={tab === 'Mission Control' ? 'Authenticated PX4 telemetry · live geographic view' : tab === 'Research' ? 'Research methods and the offline abstract simulation' : undefined}/></div><div className="workspace-head-right">{currentState && tab !== 'Mission Control' && <span className={`mission-state ${currentState.status}`}><i/>{currentState.status.toUpperCase()}</span>}<span className="mono tiny">TRN / LAB / 01</span></div></div>
+      <div className="workspace-head"><div><div className="breadcrumb"><span>TRINETRA</span><span>/</span><b>{tab.toUpperCase()}</b></div><SectionTitle eyebrow={tab === 'Mission Control' ? 'LIVE OPERATIONS' : tab === 'Quick Mission' ? 'FAST MISSION SETUP' : tab === 'Scenario Lab' ? 'UNIFIED MISSION WORKSPACE' : tab === 'Attack Lab' ? 'SIMULATED ATTACK EXPERIMENTS' : 'RESEARCH WORKSPACE'} title={tab === 'Mission Control' ? 'Mission Control' : tab} note={tab === 'Mission Control' ? 'Authenticated PX4 telemetry · live geographic view' : tab === 'Research' ? 'Research methods and the offline abstract simulation' : undefined}/></div><div className="workspace-head-right">{currentState && tab !== 'Mission Control' && <span className={`mission-state ${currentState.status}`}><i/>{currentState.status.toUpperCase()}</span>}<span className="mono tiny">TRN / LAB / 01</span></div></div>
 
       {tab === 'Mission Control' && <Px4MissionControl notice={deployNotice} onDismissNotice={() => setDeployNotice('')} onOpenScenarioLab={() => changeTab('Scenario Lab')}
         canManageFleet={operatorSession?.permissions.includes('scenario.create') ?? false}/>}
+
+      {!accessPage && <div hidden={tab !== 'Quick Mission'}>
+      <ScenarioWorkspace
+        key={`quick:${operatorSession?.user.id ?? 'anonymous'}:${operatorSession?.user.role ?? 'none'}`}
+        mode="quick"
+        userId={`${operatorSession?.user.id ?? ''}:quick`}
+        config={config}
+        onLoadConfig={setConfig}
+        quickScenarioId={quickScenarioId}
+        canManage={operatorSession?.permissions.includes('scenario.create') ?? false}
+        isOperator={operatorSession?.user.role === 'OPERATOR'}
+        active={tab === 'Quick Mission'}
+        onOpenInLab={scenarioId => openScenario(scenarioId)}
+        onMissionDeployed={(deployment: MissionDeployment, note?: string) => {
+          setSharedScenarioId(deployment.scenario_id)
+          const version = typeof deployment.scenario_version_number === 'number' ? ` version ${deployment.scenario_version_number}` : ''
+          setDeployNotice(`Deployed ${deployment.scenario_title ?? 'the mission'}${version} to Mission Control. Nothing was armed, flown or uploaded to PX4. Use Start in simulation in the Deployed mission panel to fly it.${note ? ` ${note}` : ''}`)
+          changeTab('Mission Control')
+        }}
+      />
+      </div>}
 
       {!accessPage && <div hidden={tab !== 'Scenario Lab'}>
       <ScenarioWorkspace
@@ -367,7 +429,9 @@ function App() {
         config={config}
         onLoadConfig={setConfig}
         sharedScenarioId={sharedScenarioId}
-        onScenarioSelected={setSharedScenarioId}
+        sharedVersion={sharedVersion}
+        onOpenQuickMission={() => changeTab('Quick Mission')}
+        onScenarioSelected={id => { if (id !== sharedScenarioId) setSharedVersion(null); setSharedScenarioId(id) }}
         canManage={operatorSession?.permissions.includes('scenario.create') ?? false}
         isOperator={operatorSession?.user.role === 'OPERATOR'}
         active={tab === 'Scenario Lab'}
@@ -443,7 +507,7 @@ function App() {
         </section>
       </>}
     </main>}
-    {accessPage !== 'general' && <footer className="footer"><BrandMark compact/><span>TRINETRA · SOFTWARE-ONLY RESEARCH DEMONSTRATOR</span><span>MISSION CONTINUITY. ENGINEERED.</span><span>LOCAL SIMULATION BUILD 0.1</span></footer>}
+    {!accessPage && <footer className="footer"><BrandMark compact/><span>TRINETRA · SOFTWARE-ONLY RESEARCH DEMONSTRATOR</span><span>MISSION CONTINUITY. ENGINEERED.</span><span className="footage-credit">Footage: “Mountain Landscape With Snow”, Free HD videos · docs/MEDIA_CREDITS.md</span><span>LOCAL SIMULATION BUILD 0.1</span></footer>}
   </div>
 }
 

@@ -208,7 +208,7 @@ def _user_points(aircraft: AircraftPlan) -> list[GeoPoint]:
     if aircraft.task_type == "point_inspection":
         return list(p.points)
     if aircraft.task_type == "payload_dropoff":
-        return [p.drop_point] if p.drop_point else []
+        return list(p.points) if p.points else ([p.drop_point] if p.drop_point else [])
     if aircraft.task_type == "loiter_hold":
         return [p.hold_point] if p.hold_point else []
     return []
@@ -247,7 +247,15 @@ def build_geodesic_pattern(aircraft: AircraftPlan, origin: tuple[float, float], 
         hover = _require(p.hover_duration_s, "hover_duration_s")
         _require(p.drop_altitude_m, "drop_altitude_m")
         _require(p.payload_category, "payload_category")
-        steps = [at(drop), at(drop, altitude=p.drop_altitude_m, hover=hover, action="payload_release_point")]
+        if p.points:
+            index = p.drop_index if p.drop_index is not None else len(p.points) - 1
+            steps = []
+            for position, point in enumerate(p.points):
+                steps.append(at(point))
+                if position == index:
+                    steps.append(at(point, altitude=p.drop_altitude_m, hover=hover, action="payload_release_point"))
+        else:
+            steps = [at(drop), at(drop, altitude=p.drop_altitude_m, hover=hover, action="payload_release_point")]
     _guard(steps, cap)
     return steps
 
@@ -317,6 +325,16 @@ def build_pattern(aircraft: AircraftPlan, plan: MissionPlan, origin: tuple[float
         drop_alt = _require(p.drop_altitude_m, "drop_altitude_m")
         hover = _require(p.hover_duration_s, "hover_duration_s")
         _require(p.payload_category, "payload_category")
+        if p.points:
+            index = p.drop_index if p.drop_index is not None else len(p.points) - 1
+            out: list[_Step] = []
+            for position, point in enumerate(p.points):
+                east, north = _enu(origin, point)
+                out.append(_Step(east, north, cruise_alt))
+                if position == index:
+                    out.append(_Step(east, north, drop_alt, hover, "payload_release_point"))
+            _guard(out, cap)
+            return out
         return [_Step(drop[0], drop[1], cruise_alt),
                 _Step(drop[0], drop[1], drop_alt, hover, "payload_release_point")]
     raise RouteError("missing_parameter", "Choose a task type before generating a route.", "task_type")
@@ -331,6 +349,12 @@ def generate_route(aircraft: AircraftPlan, plan: MissionPlan, limits: PlanningLi
         raise RouteError("missing_parameter", "altitude_m and speed_mps are required.", "altitude_m")
     origin = (aircraft.start_location.latitude, aircraft.start_location.longitude)
     cruise, speed = float(aircraft.altitude_m), float(aircraft.speed_mps)
+    if aircraft.task_type == "ground_standby":
+        # A standby aircraft stays where it is: a two-point record (never armed or flown), so every aircraft of a plan has a stored route.
+        waypoints = [RouteWaypoint(seq=0, latitude=round(origin[0], 7), longitude=round(origin[1], 7), altitude_m=0.0, speed_mps=speed, hover_s=0.0, action="takeoff"),
+                     RouteWaypoint(seq=1, latitude=round(origin[0], 7), longitude=round(origin[1], 7), altitude_m=0.0, speed_mps=speed, hover_s=0.0, action="land")]
+        return GeneratedRoute(generator="ground_standby", generator_version=GENERATOR_VERSION, waypoints=waypoints, events=[], length_m=0.0, duration_s=0.0,
+                              assumptions="This aircraft stays on the ground at its start. It is not armed or flown.")
     # Long point-to-point routes: use each point's own WGS84 coordinates and geodesic lengths. Short routes keep the
     # local-plane method (identical to earlier versions, so stored routes still verify).
     geodesic = aircraft.task_type in POINT_TASKS and geodesic_reach_m(aircraft, origin) > limits.geodesic_above_m

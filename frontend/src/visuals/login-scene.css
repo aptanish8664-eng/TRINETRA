@@ -1,0 +1,15 @@
+/* Sign-in page: full-screen real video, one centred card. Nothing here depends on scroll. */
+.access-portal-page.is-login { height: 100vh; overflow: hidden; position: relative; display: flex; flex-direction: column; transition: opacity .6s ease-in, transform .6s ease-in; }
+.access-portal-page.is-login.leaving { opacity: 0; transform: scale(1.04); }
+.is-login .access-topline { position: relative; z-index: 4; }
+.is-login .access-layout { position: relative; z-index: 3; flex: 1; display: grid; grid-template-columns: min(520px, 100%); justify-content: center; align-items: center; padding: 0 var(--sp-4, 16px); min-height: 0; }
+.is-login .access-card { width: 100%; padding: var(--sp-6); max-height: calc(100vh - 150px); overflow: auto; background: rgba(5, 12, 22, .9); border: 1px solid rgba(140, 200, 245, .4); box-shadow: 0 24px 60px rgba(0, 10, 25, .55); }
+.is-login .access-form-heading h1 { font-size: clamp(30px, 3.6vw, 40px); margin-bottom: var(--sp-2, 8px); }
+.access-card.shake-card { animation: card-shake .5s ease-in-out; }
+@keyframes card-shake { 20% { transform: translateX(-10px); } 40% { transform: translateX(9px); } 60% { transform: translateX(-6px); } 80% { transform: translateX(4px); } }
+.access-form-message.is-error { color: #ffb4b8; border-left: 3px solid var(--status-bad, #ff6b72); padding-left: 10px; font-size: 13px; }
+.access-diagnostics { position: absolute; z-index: 4; left: var(--sp-4, 16px); bottom: 44px; max-width: 360px; background: rgba(5, 12, 22, .92); border: 1px solid rgba(140, 200, 245, .35); border-radius: 4px; padding: 6px 10px; }
+.access-diagnostics summary { cursor: pointer; font: 10px var(--mono, monospace); letter-spacing: .1em; color: #cfe3f2; }
+.is-login .access-footer { position: relative; z-index: 4; }
+@media (prefers-reduced-motion: reduce) { .access-card.shake-card { animation: none; } .access-portal-page.is-login { transition: none; } }
+@media (max-width: 900px) { .access-diagnostics { position: static; margin: var(--sp-2, 8px) var(--sp-4, 16px); } .is-login .access-topline { flex-wrap: wrap; gap: 8px; } }

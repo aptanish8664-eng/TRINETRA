@@ -1,0 +1,20 @@
+/* Real-footage backdrops (Login and Overview) and the Lite visuals control. Opacity and transforms only; nothing here runs in Mission Control. */
+.video-backdrop { position: absolute; inset: 0; overflow: hidden; pointer-events: none; background: #06101a; z-index: 0; }
+.video-backdrop.video-fixed { position: fixed; }
+.video-poster, .video-layer { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.video-layer { opacity: 0; transition: opacity 1.2s ease-in-out; }
+.video-layer.front { opacity: 1; z-index: 1; }
+.video-fixed .video-layer { opacity: 0; transition: opacity .4s ease; }
+.video-fixed .video-layer.ready { opacity: 1; }
+.video-shade { position: absolute; inset: 0; z-index: 2; background: linear-gradient(180deg, rgba(3, 9, 18, .55) 0%, rgba(3, 9, 18, .35) 40%, rgba(3, 9, 18, .72) 100%); }
+.video-shade.overview { background: linear-gradient(180deg, rgba(3, 9, 18, .62) 0%, rgba(3, 9, 18, .74) 100%); }
+.video-backdrop.leaving { animation: backdrop-leave .6s ease-in forwards; }
+@keyframes backdrop-leave { to { opacity: 0; transform: scale(1.06); } }
+@media (prefers-reduced-motion: reduce) { .video-backdrop.leaving { animation: none; } .video-layer { transition: none; } }
+
+.visuals-controls { display: inline-flex; gap: 8px; align-items: center; }
+.visuals-controls button { min-height: 32px; padding: 0 12px; border: 1px solid rgba(160, 210, 255, .5); background: rgba(6, 18, 29, .78); color: #dbe9f6; border-radius: 4px; font: 600 11px var(--mono, monospace); letter-spacing: .08em; cursor: pointer; }
+.visuals-controls button[aria-pressed="true"] { background: #1c7bb0; border-color: #6cc6f2; color: #fff; }
+.visuals-controls button:focus-visible { outline: 2px solid #8fdcff; outline-offset: 2px; }
+.footage-credit { font: 9px var(--mono, monospace); letter-spacing: .06em; color: #8ea6b8; }
+.footage-credit a { color: inherit; text-decoration: underline; }

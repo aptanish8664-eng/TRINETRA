@@ -17,6 +17,7 @@ import math
 from typing import Any
 
 from ..mission_planning.schemas import AircraftPlan
+from ..telemetry.fleet_manager import FLEET_CAPACITY
 
 MAV_CMD_NAV_WAYPOINT = 16
 MAV_CMD_NAV_LAND = 21
@@ -31,7 +32,7 @@ class MissionItemsError(ValueError):
 
 def instance_for_aircraft(uav_id: str) -> int:
     """px4-N is PX4 SITL instance N-1 (MAVLink system id N, Gazebo model x500_(N-1))."""
-    if not uav_id.startswith("px4-") or not uav_id[4:].isdigit() or not 1 <= int(uav_id[4:]) <= 5:
+    if not uav_id.startswith("px4-") or not uav_id[4:].isdigit() or not 1 <= int(uav_id[4:]) <= FLEET_CAPACITY:
         raise MissionItemsError(f"{uav_id} is not a managed SITL aircraft identity")
     return int(uav_id[4:]) - 1
 

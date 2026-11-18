@@ -13,7 +13,7 @@ from app.mission_planning.geometry import distance_m, from_enu, to_enu
 from app.mission_planning.schemas import (
     OBJECTIVE_DEFAULT_TASK, PAYLOAD_CATEGORIES, TASK_TYPES, AircraftPlan, MissionPlan,
 )
-from app.mission_planning.validation import validate_aircraft, validate_plan
+from app.mission_planning.validation import plan_warnings, validate_aircraft, validate_plan
 
 ORIGIN = (12.9716, 77.5946)
 LIMITS = PlanningLimits(max_waypoints=200, max_start_to_area_m=20000, min_speed_mps=1, max_speed_mps=20,
@@ -387,11 +387,13 @@ def test_a_long_coverage_plan_is_rejected_with_the_structured_endurance_error():
         f"Route takes about {minutes:.0f} min; the aircraft limit is 20 min. Reduce the area, widen track spacing, or raise speed.")
     assert by_code["endurance_time_exceeded"].field == "duration_s" and by_code["endurance_time_exceeded"].uav_id == "px4-1"
     assert "the aircraft limit is 15 km" in by_code["endurance_distance_exceeded"].message
-    # applies with an empty max duration, and also when a longer max duration is set (the aircraft limit still wins)
+    # applies with an empty max duration; when the user explicitly RAISES the maximum duration above the aircraft default the
+    # same route becomes a visible warning instead of a block (the user took the responsibility; the executor still enforces the limits)
     assert long.max_duration_minutes is None
     generous = _coverage(1000, 25, max_duration_minutes=1440)
-    assert "endurance_time_exceeded" in [i.code for i in validate_aircraft(generous.aircraft[0], generous, SHORT, require_route=False)[0]]
-    assert "duration_over_limit" not in [i.code for i in validate_aircraft(generous.aircraft[0], generous, SHORT, require_route=False)[0]]
+    generous_issues, generous_route = validate_aircraft(generous.aircraft[0], generous, SHORT, require_route=False)
+    assert not [i.code for i in generous_issues if i.code.startswith("endurance")] and "duration_over_limit" not in [i.code for i in generous_issues]
+    assert "endurance_time_raised" in [w.code for w in plan_warnings(generous.aircraft[0], generous, SHORT, generous_route)]
     assert "endurance_time_exceeded" in [item.code for item in validate_plan(long.model_copy(update={"workflow_stage": "review"}), SHORT, complete=True)]
 
 

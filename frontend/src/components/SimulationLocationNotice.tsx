@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { AlertTriangle, CheckCircle2, MapPin } from 'lucide-react'
 import { api, type FleetCheck, type RelocationResult, type SimulationLocation } from '../services/api'
+import { ConfirmDialog } from './ConfirmDialog'
 import './simulation-location.css'
 
 type Props = {
@@ -10,9 +11,13 @@ type Props = {
   canRelocate: boolean
   /** Polling stops while the page that hosts the notice is not shown. */
   active?: boolean
+  /** While a flight is running the plain "N m from the mission start" line is hidden (it only matters before a start); warnings stay. */
+  inFlight?: boolean
   pollMs?: number
   /** Called after a successful, verified restart so the host can refresh fleet state. */
   onRelocated?: () => void
+  /** When the host owns the restart dialog (Mission Control), the button opens that one instead of this notice's own confirmation. */
+  onRestart?: () => void
 }
 
 type Failure = { message: string; code?: string; status?: number; recovery?: string; checks: [string, FleetCheck][] }
@@ -32,10 +37,10 @@ function CheckList({ rows, label }: { rows: [string, FleetCheck][]; label: strin
 
 /**
  * Where the simulated aircraft is relative to the mission start of one saved version, with the explicit
- * "Move simulation to mission start" action. The distance, thresholds and wording come from the backend.
+ * "Restart at mission start" action. The distance, thresholds and wording come from the backend.
  * Nothing here restarts the simulation on its own: it needs a press and an in-page confirmation.
  */
-export function SimulationLocationNotice({ scenarioId, versionId, canRelocate, active = true, pollMs = 20000, onRelocated }: Props) {
+export function SimulationLocationNotice({ scenarioId, versionId, canRelocate, active = true, inFlight = false, pollMs = 20000, onRelocated, onRestart }: Props) {
   const [location, setLocation] = useState<SimulationLocation | null>(null)
   const [loadError, setLoadError] = useState('')
   const [confirming, setConfirming] = useState(false)
@@ -88,7 +93,7 @@ export function SimulationLocationNotice({ scenarioId, versionId, canRelocate, a
   if (!location && !loadError) return null
   return <div className={`sim-location ${needsMove ? 'warn' : ''}`} aria-label="Simulation location">
     {loadError && <p className="sim-location-line" role="status"><AlertTriangle size={13}/> Simulation location unknown: {loadError}</p>}
-    {location && !needsMove && !result && <p className="sim-location-line ok" role="status">
+    {location && !needsMove && !result && !inFlight && <p className="sim-location-line ok" role="status">
       {location.position_known ? <CheckCircle2 size={13}/> : <MapPin size={13}/>} {location.message}</p>}
     {location && needsMove && <div className="sim-location-notice" role="alert">
       <AlertTriangle size={15}/>
@@ -99,11 +104,10 @@ export function SimulationLocationNotice({ scenarioId, versionId, canRelocate, a
           {location.max_distance_to_start_m !== null ? ` · aircraft is ${km(location.max_distance_to_start_m)} away` : ''}. This does not block deployment.</small>}
       </div>
       {canRelocate
-        ? <button type="button" className="button-secondary" disabled={busy || confirming} onClick={() => { setConfirming(true); setFailure(null); setResult(null) }}><MapPin size={13}/> MOVE SIMULATION TO MISSION START</button>
+        ? <button type="button" className="button-secondary" disabled={busy || confirming} onClick={() => { if (onRestart) { onRestart(); return } setConfirming(true); setFailure(null); setResult(null) }}><MapPin size={13}/> RESTART AT MISSION START</button>
         : <small className="permission-note">Your account cannot restart the simulation.</small>}
     </div>}
-    {confirming && start && <div className="sim-location-confirm" role="dialog" aria-modal="false" aria-label="Confirm moving the simulation">
-      <b>Restart the simulation at the mission start?</b>
+    {confirming && start && <ConfirmDialog label="Confirm moving the simulation" title="Restart the simulation at the mission start?" onCancel={() => { if (!busy) setConfirming(false) }}>
       <p>This stops and restarts the PX4 and Gazebo simulation at the mission start point ({start.latitude.toFixed(5)}, {start.longitude.toFixed(5)}).
         It commands no flight: nothing is armed, and no take-off or mission is sent. Telemetry stops for up to a minute while the simulation restarts, and anything in progress in the simulator is lost.</p>
       <div className="sim-location-actions">
@@ -111,7 +115,7 @@ export function SimulationLocationNotice({ scenarioId, versionId, canRelocate, a
         <button type="button" className="button-quiet" disabled={busy} onClick={() => setConfirming(false)}>CANCEL</button>
       </div>
       {busy && <small role="status">Stopping PX4 and Gazebo, starting them at the mission start, then waiting for telemetry and the Gazebo pose…</small>}
-    </div>}
+    </ConfirmDialog>}
     {result && <div className="sim-location-result" role="status">
       <b><CheckCircle2 size={14}/> Simulation moved to the mission start{result.max_distance_to_start_m !== null ? ` (aircraft ${result.max_distance_to_start_m.toFixed(1)} m from it)` : ''}.</b>
       <span>{result.note}</span>

@@ -6,10 +6,14 @@ import { formatCoordinate } from './missionPlanning'
 import { areaPreviewVertices, taskSpec, type AircraftPlan, type GeoPoint, type MissionPlan, type OperatingArea, type ParamSpec, type TaskParameters } from './missionPlan'
 
 type Props = {
-  scope: 'area' | 'aircraft'
+  /** `both`: one map (one Cesium viewer) edits the operating area and the active aircraft's points. */
+  scope: 'area' | 'aircraft' | 'both'
   plan: MissionPlan
   aircraft?: AircraftPlan
   disabled?: boolean
+  /** The assistant is waiting for the user to click a place: the next map click answers it instead of editing the area. */
+  picking?: boolean
+  onPickPlace?: (point: GeographicPoint) => void
   onAreaChange: (area: OperatingArea | null) => void
   onAircraftChange: (patch: Partial<AircraftPlan>) => void
 }
@@ -19,11 +23,13 @@ type Target = { kind: 'start' } | { kind: 'param'; spec: ParamSpec }
 const asPoint = (point: GeoPoint): GeographicPoint => ({ latitude: point.latitude, longitude: point.longitude })
 
 /** Map editing for the structured operating area (Section A) and an aircraft's start/target points plus route preview (Section B). */
-export function PlanMapEditor({ scope, plan, aircraft, disabled = false, onAreaChange, onAircraftChange }: Props) {
+export function PlanMapEditor({ scope, plan, aircraft, disabled = false, picking = false, onPickPlace, onAreaChange, onAircraftChange }: Props) {
   const [mode, setMode] = useState<PlannerMapMode>('navigate')
   const [target, setTarget] = useState<Target | null>(null)
   const [draft, setDraft] = useState<GeographicPoint[]>([])
   const area = plan.operating_area
+  const showArea = scope !== 'aircraft'
+  const showAircraft = scope !== 'area' && Boolean(aircraft)
   const zones: GeographicZone[] = area ? [{ id: 'operating-area', name: 'Operating area', vertices: areaPreviewVertices(area) }] : []
   const spec = taskSpec(aircraft?.task_type)
   const pointParams = (spec?.params ?? []).filter(item => item.kind === 'point' || item.kind === 'points')
@@ -44,7 +50,7 @@ export function PlanMapEditor({ scope, plan, aircraft, disabled = false, onAreaC
   }
 
   let assignments: GeographicUavAssignment[] = []
-  if (scope === 'aircraft' && aircraft) {
+  if (showAircraft && aircraft) {
     const route = aircraft.route?.waypoints ?? []
     const single = pointParams.filter(item => item.kind === 'point').map(item => aircraft.parameters[item.key] as GeoPoint | null | undefined).find(Boolean) ?? null
     const lists = pointParams.filter(item => item.kind === 'points').flatMap(item => (aircraft.parameters[item.key] as GeoPoint[] | undefined) ?? [])
@@ -58,8 +64,9 @@ export function PlanMapEditor({ scope, plan, aircraft, disabled = false, onAreaC
   }
 
   return <div className="uav-geography-editor plan-map-editor">
-    <div className="mission-map-toolbar" aria-label={scope === 'area' ? 'Operating area controls' : `${aircraft?.uav_id ?? ''} map controls`}>
-      {scope === 'area' && <>
+    <div className="mission-map-toolbar" aria-label={scope === 'area' ? 'Operating area controls' : scope === 'both' ? 'Planning map controls' : `${aircraft?.uav_id ?? ''} map controls`}>
+      {picking && <span role="status">Click the place on the map for the assistant.</span>}
+      {showArea && <>
         <button type="button" className={`button-secondary ${area?.kind === 'circle' || mode === 'set_start' ? 'selected' : ''}`} disabled={disabled}
           onClick={() => { setDraft([]); setMode(mode === 'set_start' ? 'navigate' : 'set_start') }}>CIRCLE: PICK CENTRE</button>
         <button type="button" className={`button-secondary ${mode === 'draw_zone' ? 'selected' : ''}`} disabled={disabled}
@@ -72,25 +79,26 @@ export function PlanMapEditor({ scope, plan, aircraft, disabled = false, onAreaC
         {mode === 'set_start' && <span>Click the map to set the circle centre.</span>}
         {mode === 'draw_zone' && <span>Click at least three map points, then finish.</span>}
       </>}
-      {scope === 'aircraft' && aircraft && <>
+      {showAircraft && aircraft && <>
         <button type="button" className={`button-secondary ${target?.kind === 'start' ? 'selected' : ''}`} disabled={disabled}
           onClick={() => choose(target?.kind === 'start' ? null : { kind: 'start' })}>SET START</button>
         {pointParams.map(item => <button key={item.key} type="button" className={`button-secondary ${target?.kind === 'param' && target.spec.key === item.key ? 'selected' : ''}`}
           disabled={disabled} onClick={() => choose(target?.kind === 'param' && target.spec.key === item.key ? null : { kind: 'param', spec: item })}>
           {item.kind === 'points' ? 'ADD' : 'SET'} {item.label.toUpperCase()}</button>)}
-        {target && <span>Click the map to {target.kind === 'start' ? 'set the start' : target.spec.kind === 'points' ? `add to “${target.spec.label}”` : `set “${target.spec.label}”`}.</span>}
+        {target && (target.kind === 'start' ? !aircraft.start_location : target.spec.kind === 'points' || !aircraft.parameters[target.spec.key]) && <span>Click the map to {target.kind === 'start' ? 'set the start' : target.spec.kind === 'points' ? `add to “${target.spec.label}”` : `set “${target.spec.label}”`}.</span>}
       </>}
     </div>
     <MapErrorBoundary label="The planning map"><MissionPlannerMap
-      start={scope === 'area' && area?.kind === 'circle' ? (area.centre ? asPoint(area.centre) : null) : null}
+      start={showArea && area?.kind === 'circle' ? (area.centre ? asPoint(area.centre) : null) : null}
       destination={null}
       zones={zones}
       draftVertices={draft}
       assignments={assignments}
       activeAssignmentId={aircraft?.uav_id ?? ''}
-      mode={mode}
+      mode={picking ? 'set_start' : mode}
       onStartChange={point => {
-        if (scope !== 'area') return
+        if (picking) { onPickPlace?.(point); return }
+        if (!showArea) return
         onAreaChange({ kind: 'circle', centre: asPoint(point), radius_m: area?.kind === 'circle' && area.radius_m ? area.radius_m : 300, vertices: [] })
         setMode('navigate')
       }}
@@ -110,8 +118,8 @@ export function PlanMapEditor({ scope, plan, aircraft, disabled = false, onAreaC
       }}
     /></MapErrorBoundary>
     <div className="mission-location-summary">
-      {scope === 'area' && <span>AREA <b>{!area ? 'not selected' : area.kind === 'circle' ? `circle · ${formatCoordinate(area.centre ? asPoint(area.centre) : null)} · ${area.radius_m ?? 0} m` : `polygon · ${area.vertices.length} vertices`}</b></span>}
-      {scope === 'aircraft' && aircraft && <>
+      {showArea && <span>AREA <b>{!area ? 'not selected' : area.kind === 'circle' ? `circle · ${formatCoordinate(area.centre ? asPoint(area.centre) : null)} · ${area.radius_m ?? 0} m` : `polygon · ${area.vertices.length} vertices`}</b></span>}
+      {showAircraft && aircraft && <>
         <span>START <b>{formatCoordinate(aircraft.start_location ? asPoint(aircraft.start_location) : null)}</b></span>
         {pointParams.map(item => {
           const value = aircraft.parameters[item.key]
@@ -121,7 +129,7 @@ export function PlanMapEditor({ scope, plan, aircraft, disabled = false, onAreaC
         })}
       </>}
     </div>
-    <p className="geographic-planner-note">{scope === 'aircraft' && aircraft?.route
+    <p className="geographic-planner-note">{showAircraft && aircraft?.route
       ? 'The drawn route is the backend-generated, validated waypoint list. It is not uploaded to PX4.'
       : 'Map selections are advisory planning inputs. A route exists only after the backend generates and validates it.'}</p>
   </div>

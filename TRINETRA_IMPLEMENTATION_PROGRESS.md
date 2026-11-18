@@ -1273,3 +1273,119 @@ Status: implemented and unit/API tested; static screenshots taken in headless Ed
 **Tests.** Backend 450 passed, 1 skipped; frontend 25 files, 213 passed; `tsc` clean; production build succeeded. New: `tests/test_disarm.py` (18), additions in `test_mission_planning.py`, frontend Disarm, review-form, sign-in, map-click, loading-header, stale-reason and defaults tests.
 
 **Not verified.** An Operator flight (start/abort as Operator); Attack Lab copy and re-pin in the UI (unit-tested only); Disarm refusal by PX4 and Disarm in the air on the real aircraft; the UI during the 2-3 s a backend restart takes; the account-management and registration-rejection dialogs; anything at widths other than 1440 and 1100 px.
+
+## 2026-11-15 - Quick mission, assistant front door, draft safety, approval refresh, activate-and-verify rule, mission switching, walkthrough leftovers (implemented, tested; click-tested in headless Edge against a throwaway backend/database and the real PX4 SITL aircraft; no commits, `backend/.env` not opened, no migration applied)
+
+**Implemented and tested.**
+- Quick mission: `backend/app/mission_planning/quick.py` (every derived value and the offline parser in one module), `POST /api/mission-plans/quick`, `POST /api/mission-plans/quick/parse`, `quick` block in `GET /api/mission-plans/limits`, `MissionPlan.auto_limits`, derived limits in `preview-route`, config `TRINETRA_QUICK_SPEED_MPS` / `TRINETRA_QUICK_ALTITUDE_M`. Frontend: `QuickMissionPanel.tsx`, `quickMission.ts` (types and the one request builder), Sections A and B behind an Advanced expander, "auto (value)" tags with USE AUTO, Save and deploy (never starts a flight). Rules and golden numbers: `docs/AI_MISSION_ASSISTANT.md`.
+- Relaxed convenience-only blocks: start outside the area (warning); endurance becomes a warning when the user raised the maximum duration above the aircraft default (the existing test that expected an error in that case was changed on purpose). Invalid/unexecutable rules unchanged.
+- Assistant front door: the existing Scenario Lab assistant calls the offline parser after the older deterministic commands, asks one question at a time with buttons, waits for a map click, shows a summary and fills the same draft on CONFIRM. It calls only the parse and quick endpoints (tested), refuses save/deploy/start requests, answers unsupported requests with "Not supported" and the closest type.
+- Draft safety: unsaved draft kept in `localStorage` per user and scenario ("Restored your unsaved draft", Discard, removed on save and sign-out, `beforeunload` warning). Priority of the only primary aircraft now starts at 1 and is not shown for one aircraft.
+- Operator approval: a pending review is re-read every 12 s (paused in a hidden tab, stops when decided).
+- Activate and verify is a repair: the Scenario Lab reads the verified fleet itself (shared 4 s read of `/api/fleet/status`), adopts it into the plan when every selected aircraft is already verified, re-checks every 5 s while not verified (20 s while verified), and a refused deploy (`fleet_not_verified`) offers "VERIFY THE FLEET AND DEPLOY" inline. The backend still checks the live fleet at deploy. Disabled-reason texts say the button is only needed when the aircraft are not already running.
+- Mission switching: `GET /api/mission-control/deployments/latest` also returns the newest execution and its deployment. Mission Control keeps showing that deployment while the flight is active, with the banner "A newer deployment (<name> vN) is ready. Finish or abort the current flight to switch."; when the flight is final the banner offers "Switch to new mission" (armed on the ground: "Disarm and switch" with an in-page confirmation that calls the Disarm endpoint; armed in the air: says Abort comes first). Scenario Lab shows "A mission is running (<name> vN). Saving or deploying here will not affect it." Starting a second execution on the same aircraft stays refused.
+- Small items: "Session ended" notice on the sign-in page after a server-ended session; the remaining native `window.prompt/confirm` (registration rejection, role change, account activate/deactivate, command rejection) are in-page forms; the "Click the map to set the start" hint goes away once the start is set; "N m from the mission start" is hidden while a flight runs (and the empty location panel with it); Cesium "Map rendering paused (Expected width ...)" now appears only when the error repeats after the automatic recovery and clears after 3 s of clean rendering.
+
+**Commands and results.** Backend (from `backend`): `..\.venv\Scripts\python.exe -m pytest -q tests` -> 525 passed, 1 skipped (was 450 passed, 1 skipped; `tests/test_quick_mission.py` adds 73, `test_mission_execution_api.py` 2, one endurance test changed). Frontend (from `frontend`, PowerShell): `npm.cmd test` -> 28 files, 265 tests; two full runs: the first had two load-related failures (`CesiumLiveMap.render` first-import timing and a `MissionExecutionPanel` test), the second had the first one again; both files pass when run alone and the first now has a longer timeout (run alone: 8 passed); `npx.cmd tsc --noEmit` clean; `npm.cmd run build` succeeded. New frontend tests: `quickMission.test.ts`, `ScenarioWorkspace.quick.test.tsx` (25), `NativeDialogs.test.tsx` (9), 10 switching tests in `Px4MissionControl.test.tsx`, guard tests.
+
+**Click-tested (headless Edge via Playwright, scratch folder outside the repo, throwaway backend :8003 and own SQLite database, throwaway GENERAL and OPERATOR, 1440x900 and 1100 px, screenshots viewed).** (a) one typed sentence ("search 300 m with one drone"), answered by clicking "Click the place on the map" and the map, CONFIRM, route on the map, Save, Deploy: 1 field typed (the sentence). (b) Quick panel: type + one map click: 0 fields typed. (c) refresh mid-draft restored the draft with the note, Discard cleared it (also after another refresh). (d) Operator submitted for review; a General approved in another browser; the Operator's open page showed the approval after 12 s without reopening. (e) flight started, second mission deployed during the flight from the Quick panel: Mission Control kept the first mission with the banner, Abort, then "Switch to new mission" showed the second mission. Measured: Quick fill + route about 1-2 s; flight Executing 18 s after Start; Abort to final about 50 s.
+
+**Not verified / limits.** "Disarm and switch" and the far-from-start relocation notice after a switch were not provoked live (the aircraft disarmed itself after landing and was 425 m from the new start): unit-tested only. The inline "VERIFY THE FLEET AND DEPLOY" button was seen after a transient `fleet_not_verified` (a slow WSL fleet-manager answer) but its click was not exercised live: unit-tested. The `beforeunload` warning, the "Session ended" notice and the in-page dialogs replacing the native ones (registration rejection, role change, account activate/deactivate, command rejection) are unit-tested, not click-tested. The zero-width map message and the "Loaded ... version N" with "No route generated yet" case could not be reproduced in the current layout (probes at 1440 and 1100 px, hide/show, resize, full-page screenshots showed no notice); the guard was changed so it cannot flash, and a version saved without a route (a draft saved before its route was generated, by design) is now explained when it is opened. An Operator flight and the assistant's behaviour with two or more aircraft were not run live. The "about 5.3 km, 11 min" spiral example is not what the generator produces (5.86 km, 12.2 min for the whole route).
+
+**Next exact step.** Start the frontend (`npm.cmd run dev` in `frontend`) against the backend on :8000 (restarted with the new code). Optional: click-test "Disarm and switch" with an aircraft armed on the ground, and the inline verify button with the fleet manager stopped.
+
+## 2026-11-15 - Quick Mission tab, quick source, General saved scenarios (implemented, tested; click-tested in headless Edge at 1440x900, 1100 and 940 px against a throwaway backend/database)
+
+**Existed before (checked first).** No Quick Mission tab or route (the panel lived inside Scenario Lab; a Quick Mission page was only parked in `frontend/pending/quick-mission-page`, unfinished). No saved-scenarios section on the General page (only user requests, scenario reviews and the audit log); only `delete_draft_scenario` (own, never-submitted drafts).
+
+**Added.** Quick Mission tab and route `/quick-mission`: the same `ScenarioWorkspace` in `mode="quick"` (quick panel + the Scenario Assistant + Save / Save and deploy / Fine-tune in Scenario Lab; no Sections A-C), one map per page (the map exists only while its page is shown). Scenario Lab keeps Sections A-C always visible (the Advanced collapse is gone), one planning map, the assistant, and a "Create a quick mission" link; while the assistant waits for a place the planning map takes the click. Quick source stored with the version and dropped when the plan is fine-tuned (rule in `TRINETRA_API_CONTRACT.md`). General control center is tabbed (Users and requests, Scenario reviews, Saved scenarios, Audit log): Saved scenarios lists every user's scenarios with filters, version picker, Open/Edit, Edit in Quick Mission, Export (JSON download) and a counted, name-confirmed Delete. A GENERAL can save new versions of other users' scenarios.
+
+**Tests.** Backend: `tests/test_general_scenarios.py` (8: quick source kept/dropped and immutability, list/filters/permissions, export, active and pinned refusals with cascade counts, results kept or deleted, audit record, submitted/other-user deletes, cross-owner save). Frontend: `SavedScenarios.test.tsx` (6), additions in `ScenarioWorkspace.quick.test.tsx` (quick source, fine-tune hand-off, deep link restore, hand-made scenario message, Scenario Lab without Advanced, older version as a new draft, one map per page) and `AccessPortal.test.tsx` (tabs).
+
+**Click-tested.** OPERATOR saved a manual scenario (assistant fill, altitude edited by hand: stored without a quick source) and a quick scenario (stored with one); GENERAL saw all in Saved scenarios (owner, role, status, source, counts), opened the manual one in Scenario Lab (title, altitude 45, route preview), opened the quick one in Quick Mission with its values (name, type, place, size 300), exported the manual one (download captured), was refused deleting the pinned deployed quick scenario with the reason, deleted the manual one by typing its name (audit event written). No horizontal overflow on any General tab at 940, 1100 and 1440 px (measured). Screenshots viewed.
+
+**Not verified.** A deep link to an older version in the browser (unit-tested); the experiment-results checkbox and the cascade of a scenario with executions in the browser (API-tested); an Operator opening the General page (refused by the API, tested); restoring roles of a quick mission (the panel has no role inputs; stored as the defaults).
+
+**Left unfinished from earlier tasks (not touched here).** The Quick Mission page parked in `frontend/pending/quick-mission-page` (several clicks, new type UI, explanation list, roles) and the earlier run's parts 2-6; Run 13 (Disarm fix, Mission Control layout, experiment toggle and live runner, detector accuracy) was started (a live Disarm reproduction) and is NOT done.
+
+**Suites (each run once at the end).** Backend 543 passed, 1 skipped (was 525). Frontend 29 files, 279 tests: the full run had two load-related failures (`MissionExecutionPanel` first-test timing, and `missionPlan.test` which expected 8 task types and now expects 9 with `ground_standby`); both files pass when run alone after the fix (the same MissionExecutionPanel timing flake was seen in earlier runs). `tsc` clean, production build succeeded.
+
+## Mission Control first-screen layout (Run 15) - implemented, tested
+- Layout: wide map, then Deployed mission (left) + GPS Threat Assessment (right), rest in a grid below; notices in one slim bar. Frame height is fitted to the window (floor 520 px); below 1180 px it stacks.
+- Verified with Playwright on a throwaway stack at 1440x900, 1920x1080, 1366x768, 2560x1440, ~90% and ~80% zoom (emulated): all three elements inside the viewport at scroll 0 in idle, deployed, executing, paused, returning and 1/3/5-aircraft threat fixtures. Screenshots: docs/screenshots/mc-*.png.
+- Frontend: 29 files, 284 tests passed; tsc clean; build ok. Backend not re-run (no backend change).
+- Known limits: with 5 aircraft at 1366x768 the map is only 220 px tall; real browser zoom and other browsers not tested.
+- Next exact step: finish the parked Quick Mission page extras (p82 tests unapplied), then assistant extensions, Zurich home, Disarm state, Run 13 items.
+
+## Run 16 - Mission Control layout restored, Land here, Restart at mission start, one-click switch
+- Layout (implemented, tested in a browser): the Run 15 first-screen frame was removed; Mission Control is the three-column page of the last commit again (aircraft/system/battery | map | alerts/Deployed mission, then GPS Threat Assessment, then log and Gazebo). One change: rails minmax(240px,270px), map canvas min 620 px / max 720 px (was 260 px min), about 810x650 at 1914x826 and 755x650 at 1440x900 with a mission deployed. Quick Mission page: its new CSS classes had no styles; styled as one scrolling column with the number explanation collapsed at the bottom; the parked page folder was already superseded and was removed; the unapplied page tests (p82) were applied.
+- Land here / Restart / switch (implemented; backend and frontend tested; live SITL checked, timings in the run log): executor `land`, `land-run`, `cleanup`; routes in `execution_routes.py` and `restart_routes.py`; `mission_execution/restart.py`; frontend `ConfirmDialog`, `RestartDialog`, `landState`; assistant help. Not tested live: Land here in the air with an OPERATOR account, a restart with a PX4 instance TRINETRA did not start (unit-tested only), the frontend against more than one aircraft.
+- Known limits: executing a plan with more than one aircraft is still not available; the descent from 50 m takes about 48 s so no descent parameter was changed.
+
+## Run 17 - Part 0 export, Part 1 saved missions in Quick Mission (Parts 2-9 NOT started)
+- Part 0 (implemented, verified): `backend/tools/export_dataset.py` -> `D:\TRINETRA\exports\trinetra_dataset_2026-11-16.xlsx` (181.3 MB, 248 s). 9 sheets; Windows 518,609 x 56; the 41 model inputs equal metrics.json `feature_columns`; four rows spot-checked against the source CSVs. Live assessments are not stored in the repo, so only the documented live baseline is in the workbook. `exports/` is git-ignored.
+- Part 1 (implemented, tested, browser-checked at 1914x826 and 1440x900): see the run log RESUME note. Files: `frontend/src/components/SavedMissionPicker.tsx` (new), `QuickMissionForm.tsx`, `ScenarioWorkspace.tsx`, `quick-mission.css`, `ScenarioWorkspace.quick.test.tsx`. No backend or API change (the stored `quick_source.speed_mps/altitude_m` fields were already optional).
+- Not done: Parts 2-9 and the final suites. Next exact step: Part 2.
+
+## Run 17 - PAUSED inside Part 2 (2026-11-17)
+- Stopping point: Part 2 backend implemented and tested (backend suite 612 passed, 1 skipped); Part 2 frontend, browser check and docs not started; Parts 2B, F, 3-9 not started. Exact list of what is done, what is next and the environment state: the last RESUME note in docs/OVERNIGHT_RUN_LOG.md.
+- Last successful action: full backend suite in three foreground groups (194 + 294 + 124 passed, 1 skipped). Frontend not changed since the Part 1 run (310 of 311, the one failure is the known MissionExecutionPanel timing flake, 30 of 30 alone).
+- Risks: the user's backend on :8000 runs the OLD code until restarted; after a restart the current frontend still works (compatibility kept). WSL was moved to D: and restarted: no simulator process is running.
+- Continuation prompt: "Resume from the last RESUME note in docs/OVERNIGHT_RUN_LOG.md and finish the remaining parts in order, running every command in the foreground."
+
+
+## Run 17 - Part F (reliable multi-aircraft start-up), 2026-11-17
+- Status: implemented and tested (backend 635 passed / 1 skipped; frontend 326 passed; tsc and build clean). Live: measured with 1-7 aircraft (3 runs each), browser dialog checked at 1914x826 and 1440x900.
+- Files: backend/tools/wsl_fleet_manager.py, px4_wsl_udp_bridge.py, app/mission_execution/restart.py, app/restart_routes.py, app/fleet_routes.py, app/telemetry/fleet_manager.py, app/config.py, frontend RestartDialog.tsx, docs/FLEET_CAPACITY.md, TRINETRA_API_CONTRACT.md, vite.config.ts (test timeouts).
+- Defects / blockers: backend/UI throughput with Mission Control open (2 MB polls) not fixed; one intermittent "0 of 3 telemetry" in a browser run (cause not proven); 8+ aircraft not tested.
+- Next exact step: Part 3 (Experiments Implement toggle, live runner, stored live assessments, run records and export).
+
+
+## Run 17 - Part 3 (Attack Lab Implement switch and live runner), 2026-11-17
+- Status: implemented; tested (see the RESUME note in docs/OVERNIGHT_RUN_LOG.md); live-checked with one and two experiments in real SITL flights.
+- Files: backend/app/research/live_experiments.py, run_export.py, attack_lab_routes.py, research_routes.py, execution_routes.py, research/attacks.py (help text), requirements.txt, tests/test_live_experiments.py; frontend RunRecords.tsx, AttackLab.tsx, MissionExecutionPanel.tsx, attackLabTypes.ts, services/api.ts, attack-lab.css and tests.
+- Defects found: monitor shows Medium-tier false alarms in baseline SITL flights (Part 7 input); run timeline stops at about 300 s of flight time (not investigated).
+- Next exact step: Part 4 (GPS Threat Assessment response options audit and real single-aircraft actions).
+
+
+## Run 17 - Part 4 (threat responses), 2026-11-17
+- Status: implemented, tested, live-verified (see the RESUME note in docs/OVERNIGHT_RUN_LOG.md and docs/THREAT_RESPONSES.md).
+- Files: backend/app/response_routes.py, main.py, execution_routes.py, fleet_routes.py, persistence/database.py, tests/test_threat_responses.py, tests/test_disarm.py; frontend ThreatCard.tsx, ThreatMonitor.tsx, Px4MissionControl.tsx, attackLabTypes.ts, services/api.ts, threat-panel.css, ThreatMonitor.test.tsx.
+- Next exact step: Part 5 (multi-aircraft execution: audit what exists first, then build in order and verify live).
+
+
+## Run 17 - Part 5 (multi-aircraft execution), 2026-11-17
+- Status: implemented, tested, verified live (docs/MULTI_AIRCRAFT.md; RESUME note in docs/OVERNIGHT_RUN_LOG.md).
+- Files: backend execution_routes.py, response_routes.py, research_routes.py, persistence/database.py, mission_execution/restart.py, telemetry/px4.py, telemetry/gazebo.py, tests; frontend FleetRuns.tsx, MissionExecutionPanel.tsx, ThreatCard.tsx, ThreatMonitor.tsx, services/api.ts, CSS, tests.
+- Next exact step: Part 6 (verified reconfiguration/continuity).
+
+
+## Run 17 - Part 6 (mission continuity), 2026-11-17
+- Status: implemented, unit-tested, verified live for a completed handover (docs/MULTI_AIRCRAFT.md section 5).
+- Next exact step: Part 7 (detector accuracy and loopholes: loophole table first, then data/feature fixes with honest before/after).
+
+
+## Run 17 - Part 7 (detector loopholes), 2026-11-17
+- Status: PARTLY done. Step 1 (table + plan) done in docs/DETECTOR_LOOPHOLES.md; steps 2-4 (data, retraining, before/after) not done; detector unchanged.
+- Next exact step: Part 8 (reliability items); later, Part 7 steps 2-4 as its own run.
+
+
+## Run 17 - Part 8 (reliability), 2026-11-17
+- Status: implemented/verified: far-home restart and persisted home (live), OPERATOR Land here (live), trinetra_doctor.py + docs/HOW_TO_START_A_RUN.md + assistant topic (tested, run live), flaky frontend tests (timeouts).
+- Next exact step: Part 9 (docs/FUTURE_REALISM.md study), then the final checks and the final report.
+
+
+## Run 17 - Part 9 (future realism study), 2026-11-17
+- Status: study written (docs/FUTURE_REALISM.md); nothing implemented. Next exact step: final checks and the final report.
+
+
+## Run 18 - Job 1 (backend slowdown), 2026-11-18
+- Done with gaps: docs/BACKEND_SLOWDOWN.md. Next: Job 2.
+
+
+## Run 18 - Job 2 (detector), 2026-11-18
+- Done: causes, 55 clean live flights, retraining, held-out live and synthetic validation, live attacks; budget NOT demonstrated. See docs/DETECTOR_LOOPHOLES.md. Next: Job 3.
+
+
+## Run 18 - Jobs 1-3 complete, 2026-11-18
+- Backend slowdown, detector retraining, frontend design done with the gaps in docs/FINAL_REPORT_RUN18.md. Tests: backend 689 passed/1 skipped; frontend 351 passed; build OK.

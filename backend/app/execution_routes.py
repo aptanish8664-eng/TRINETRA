@@ -30,13 +30,16 @@ from .mission_execution.ground import IN_THE_AIR, ground_state
 from .mission_execution.items import MissionItemsError, build_mission, instance_for_aircraft
 from .mission_planning.generators import PlanningLimits
 from .mission_planning.schemas import MissionPlan
+from .mission_planning.quick import capacity_message, capacity_options
 from .mission_planning.start import HOME_TOLERANCE_M
 from .persistence.database import (
     active_mission_execution, add_audit_event, add_mission_execution_events, create_mission_execution, get_mission_deployment,
-    get_mission_execution, get_scenario, latest_mission_execution, list_mission_execution_events, update_mission_execution,
+    deployment_mission_executions, get_mission_execution, get_scenario, latest_mission_execution, list_mission_execution_events, update_mission_execution,
 )
 import re
+import threading
 from .security import AuthContext
+from .telemetry.fleet_manager import FLEET_CAPACITY
 from .telemetry.mission_executor import invoke_mission_executor
 
 router = APIRouter()
@@ -47,7 +50,9 @@ EXECUTOR_STALE_S = 10.0
 SYNC_MIN_INTERVAL_S = 0.7
 START_CONFIRMATION = "This runs your route in the PX4/Gazebo simulation. The aircraft will arm, take off and fly the plan."
 FINAL_STATES = frozenset({"completed", "aborted", "failed"})
-FLYING_STATES = frozenset({"executing", "pausing", "paused", "resuming", "returning", "failsafe"})
+FLYING_STATES = frozenset({"executing", "pausing", "paused", "resuming", "returning", "failsafe", "landing"})
+LAND_CONFIRMATION = "This lands the aircraft where it is now and disarms it. It does not return to launch."
+LAND_ANSWER_WAIT_S = 6.0
 _last_sync: dict[str, float] = {}
 
 
@@ -111,8 +116,20 @@ def _check(key: str, label: str, ok: bool, detail: str, **extra: Any) -> dict[st
     return {"key": key, "label": label, "ok": bool(ok), "detail": detail, **extra}
 
 
-def run_preflight(context: AuthContext, deployment: dict, scenario: dict, plan: Optional[MissionPlan]) -> dict[str, Any]:
-    """Every pre-start check with pass/fail and a plain sentence. Reads state only; commands nothing."""
+FLYING_ROLES = ("primary", "decoy")      # these fly their own route together; a standby aircraft stays on the ground until a handover
+
+
+def flying_aircraft(plan: MissionPlan) -> list:
+    """The aircraft that fly when the mission starts: the primary first, then the decoys in plan order. Standby aircraft are not started."""
+    flying = [item for item in plan.aircraft if item.role in FLYING_ROLES]
+    return sorted(flying, key=lambda item: (item.role != "primary", 0)) if flying else list(plan.aircraft[:1])
+
+
+def run_preflight(context: AuthContext, deployment: dict, scenario: dict, plan: Optional[MissionPlan], *, aircraft_id: Optional[str] = None,
+                  process_state: Optional[dict[str, Any]] = None, start_tolerance_m: float = HOME_TOLERANCE_M) -> dict[str, Any]:
+    """Every pre-start check with pass/fail and a plain sentence. Reads state only; commands nothing.
+
+    `aircraft_id` selects which aircraft of a multi-aircraft plan is checked (default: the primary)."""
     from .fleet_routes import _fleet_snapshot, _verified_fleet, simulation_location
     from .scenario_routes import _plan_readiness
     from .telemetry.fleet_manager import invoke_fleet_manager
@@ -132,14 +149,28 @@ def run_preflight(context: AuthContext, deployment: dict, scenario: dict, plan: 
         rule["message"] if superseded else (f"The plan no longer passes validation: {issues[0].message}" if issues
                                             else f"Version {deployment.get('scenario_version_number') or ''} is the latest version and passes validation.".replace("  ", " "))))
     checks.append(_check("role", "Role rule", rule["allowed"] or superseded, rule["message"] if not superseded else "Checked once the latest version is deployed.", code=rule["code"]))
-    aircraft = next((item for item in plan.aircraft if item.role == "primary"), plan.aircraft[0] if plan.aircraft else None)
-    checks.append(_check("single_aircraft", "One aircraft", len(plan.aircraft) == 1,
-                         "The plan has one aircraft." if len(plan.aircraft) == 1 else
-                         f"The plan has {len(plan.aircraft)} aircraft. Starting more than one aircraft is not built yet; deploy a one-aircraft plan."))
+    aircraft = (next((item for item in plan.aircraft if item.uav_id == aircraft_id), None) if aircraft_id
+                else next((item for item in plan.aircraft if item.role == "primary"), plan.aircraft[0] if plan.aircraft else None))
     uav_id = aircraft.uav_id if aircraft else "px4-1"
     system_id = int(uav_id[4:]) if uav_id[4:].isdigit() else 1
-    process_state = invoke_fleet_manager("status", timeout_seconds=12)
+    process_state = process_state if process_state is not None else invoke_fleet_manager("status", timeout_seconds=12)
     instances = {int(item.get("system_id", -1)): item for item in process_state.get("instances", []) if isinstance(item, dict)} if not process_state.get("failure") else {}
+    count = len(plan.aircraft)
+    running_count = len(instances)
+    if count > FLEET_CAPACITY:
+        # More aircraft than this machine runs reliably: the plain sentence and the three ways forward (the page shows them as buttons).
+        checks.append(_check("aircraft_count", "Aircraft count", False, capacity_message(count, FLEET_CAPACITY),
+                             code="capacity_exceeded", capacity=FLEET_CAPACITY, required=count, options=capacity_options(count, FLEET_CAPACITY)))
+    elif count > 1:
+        flying = len(flying_aircraft(plan))
+        enough = running_count >= count
+        checks.append(_check("aircraft_count", "Aircraft count", enough,
+                             (f"The plan has {count} aircraft: {flying} fly together (primary and decoys), {count - flying} stay on the ground (standby)."
+                              if enough else f"Needs {count} verified aircraft and {running_count} are running. Use Activate and verify or Restart at mission start."),
+                             code="multi_aircraft" if enough else "aircraft_not_running", required=count, running=running_count,
+                             offer_activation=count if running_count < count else None))
+    else:
+        checks.append(_check("aircraft_count", "Aircraft count", True, "The plan has one aircraft."))
     verified, _rows = _verified_fleet(max(system_id, 1))
     is_verified = system_id in instances and any(item["aircraft_id"] == uav_id for item in verified)
     checks.append(_check("fleet_verified", "Fleet verified", is_verified,
@@ -149,7 +180,7 @@ def run_preflight(context: AuthContext, deployment: dict, scenario: dict, plan: 
     managed = bool(instances.get(system_id, {}).get("managed"))
     checks.append(_check("managed_instance", "Managed SITL instance", managed,
                          f"{uav_id} is the x500 SITL instance started by the TRINETRA fleet manager." if managed else
-                         f"{uav_id} was not started by the TRINETRA fleet manager, so it is not commanded. Use Activate and verify or Move simulation to mission start."))
+                         f"{uav_id} was not started by the TRINETRA fleet manager, so it is not commanded. Use Activate and verify or Restart at mission start."))
     vehicles, _models = _fleet_snapshot()
     vehicle = next((item for item in vehicles if item.get("id") == uav_id), None)
     age = (vehicle or {}).get("telemetry_age_seconds")
@@ -172,10 +203,10 @@ def run_preflight(context: AuthContext, deployment: dict, scenario: dict, plan: 
                           f"{relative if relative is not None else '?'} m).")))
     location = simulation_location(plan, vehicles)
     distance = location["max_distance_to_start_m"]
-    at_start = distance is not None and distance <= HOME_TOLERANCE_M
+    at_start = distance is not None and distance <= start_tolerance_m
     checks.append(_check("at_mission_start", "At the mission start", at_start,
-                         f"The aircraft is {distance:.0f} m from the mission start (limit {HOME_TOLERANCE_M:g} m)." if at_start else
-                         (f"The aircraft is {distance / 1000:.1f} km from the mission start (limit {HOME_TOLERANCE_M:g} m). Use Move simulation to mission start."
+                         f"The aircraft is {distance:.0f} m from the mission start (limit {start_tolerance_m:g} m)." if at_start else
+                         (f"The aircraft is {distance / 1000:.1f} km from the mission start (limit {start_tolerance_m:g} m). Use Restart at mission start."
                           if distance is not None else "The aircraft position is unknown, so its distance from the mission start cannot be checked."),
                          offer_relocation=not at_start and distance is not None))
     battery = ((vehicle or {}).get("battery") or {}).get("remaining_percent")
@@ -247,7 +278,7 @@ def sync_execution(execution: dict, *, force: bool = False) -> dict:
             "data": item.get("data") if isinstance(item.get("data"), dict) else {}, "executor_index": item["index"],
             "occurred_at": _event_time(item.get("t"))} for item in events])
     for key in ("uploaded", "armed", "px4_mode", "current_item", "items", "route_total", "route_reached", "route_current", "percent",
-                "px4_heartbeat_age_s", "gcs_heartbeats_sent", "armed_at", "px4_messages"):
+                "px4_heartbeat_age_s", "gcs_heartbeats_sent", "armed_at", "px4_messages", "land_result", "on_ground", "on_ground_source", "landed_state_name", "rel_alt_m"):
         if key in status:
             progress[key] = status[key]
     progress["last_contact"] = wall
@@ -278,12 +309,13 @@ def _controls(context: AuthContext, execution: dict, rule: Optional[dict]) -> di
     role_block = None if (rule is None or rule["allowed"] or rule["code"] == "version_superseded") else rule["message"]
     if not may_execute:
         blocked = entry(False, "This account role cannot control missions.")
-        return {"pause": blocked, "resume": blocked, "abort": blocked}
+        return {"pause": blocked, "resume": blocked, "abort": blocked, "land": blocked}
     finished = f"The run is already {state}."
     return {
         "pause": entry(active and state == "executing" and not role_block, role_block or (finished if not active else f"Pause is possible while executing; the run is {state}.")),
         "resume": entry(active and state == "paused" and not role_block, role_block or (finished if not active else f"Resume is possible while paused; the run is {state}.")),
-        "abort": entry(active, finished),
+        "abort": entry(active and state != "landing", "The aircraft is landing at its current position; Abort (return to launch) is not available now." if active else finished),
+        "land": entry(active and state != "landing", "The aircraft is already landing." if active else finished),
     }
 
 
@@ -305,6 +337,8 @@ def _view(context: AuthContext, execution: dict, *, rule: Optional[dict] = None,
         "route_total": progress.get("route_total"), "route_reached": progress.get("route_reached"), "route_current": progress.get("route_current"),
         "percent": progress.get("percent"), "elapsed_s": round(elapsed, 1) if elapsed is not None else None, "estimated_s": estimated_s,
         "px4_heartbeat_age_s": progress.get("px4_heartbeat_age_s"), "px4_messages": progress.get("px4_messages") or [],
+        "landed_state": progress.get("landed_state_name"), "on_ground": progress.get("on_ground"), "on_ground_source": progress.get("on_ground_source"),
+        "relative_altitude_m": progress.get("rel_alt_m"),
         "controls": _controls(context, execution, rule), "simulation_only": True,
     }
 
@@ -336,11 +370,43 @@ def _audit(request: Request, context: AuthContext, action: str, execution_id: st
 
 # --- routes -----------------------------------------------------------------------------------------------------------
 
+def fleet_preflight(context: AuthContext, deployment: dict, scenario: dict, plan: Optional[MissionPlan]) -> dict[str, Any]:
+    """The primary's pre-start result (unchanged shape) plus `fleet`: one entry per aircraft saying whether it can start. A multi-aircraft plan can
+    start only when every flying aircraft (primary and decoys) can; standby aircraft are listed as staying on the ground."""
+    from .telemetry.fleet_manager import invoke_fleet_manager
+
+    state = invoke_fleet_manager("status", timeout_seconds=12) if plan is not None and len(plan.aircraft) > 1 else None
+    base = run_preflight(context, deployment, scenario, plan, process_state=state)
+    if plan is None or len(plan.aircraft) <= 1:
+        base["fleet"] = [{"aircraft_id": base.get("aircraft_id"), "role": "primary", "flies": True, "can_start": base["can_start"], "blocking": base["blocking"]}] if plan is not None else []
+        return base
+    fleet, blocking = [], list(base["blocking"])
+    for item in plan.aircraft:
+        if item.role not in FLYING_ROLES and item.uav_id != base.get("aircraft_id"):
+            fleet.append({"aircraft_id": item.uav_id, "role": item.role, "flies": False, "can_start": True, "blocking": [],
+                          "note": "Standby: stays on the ground until it is needed."})
+            continue
+        result = base if item.uav_id == base.get("aircraft_id") else run_preflight(context, deployment, scenario, plan, aircraft_id=item.uav_id, process_state=state)
+        fleet.append({"aircraft_id": item.uav_id, "role": item.role, "flies": True, "can_start": result["can_start"], "blocking": result["blocking"],
+                      "estimated_duration_s": result.get("estimated_duration_s")})
+        if item.uav_id != base.get("aircraft_id"):
+            blocking += [f"{item.uav_id}: {text}" for text in result["blocking"] if text not in blocking]
+    base = {**base, "fleet": fleet, "blocking": blocking, "can_start": all(entry["can_start"] for entry in fleet if entry["flies"])}
+    return base
+
+
 @router.get("/api/mission-control/executions/preflight")
 def execution_preflight(deployment_id: str = Query(min_length=1, max_length=64),
                         context: AuthContext = Depends(require_permission(Permission.MISSION_READ_OWN))) -> dict:
     deployment, scenario, plan = _load_deployment(context, deployment_id)
-    return run_preflight(context, deployment, scenario, plan)
+    return fleet_preflight(context, deployment, scenario, plan)
+
+
+@router.get("/api/mission-control/deployments/{deployment_id}/role-rule")
+def deployment_role_rule(deployment_id: str, context: AuthContext = Depends(require_permission(Permission.MISSION_READ_OWN))) -> dict:
+    """Who may start this deployment: the role rule alone (cheap; the UI uses it to enable or disable "Switch and restart at the new start")."""
+    deployment, scenario, _plan = _load_deployment(context, deployment_id)
+    return {"deployment_id": deployment["id"], "role_rule": role_rule(context, scenario, deployment)}
 
 
 @router.get("/api/mission-control/executions/latest")
@@ -348,7 +414,30 @@ def latest_execution(context: AuthContext = Depends(require_permission(Permissio
     execution = latest_mission_execution(context.user.id, include_all=_include_all(context))
     if execution is None:
         return {"execution": None}
+    # A multi-aircraft start creates one run per flying aircraft; the page's main run is the primary's (the others are listed by /executions/fleet).
+    siblings = deployment_mission_executions(execution["deployment_id"])
+    if len(siblings) > 1:
+        deployment = get_mission_deployment(execution["deployment_id"])
+        plan_aircraft = (((deployment or {}).get("intent") or {}).get("mission_plan") or {}).get("aircraft", [])
+        primary_id = next((item.get("uav_id") for item in plan_aircraft if item.get("role") == "primary"), None)
+        primary = next((item for item in siblings if item["aircraft_id"] == primary_id), None)
+        if primary is not None:
+            execution = primary
     return {"execution": _full_view(context, sync_execution(execution))}
+
+
+@router.get("/api/mission-control/executions/fleet")
+def fleet_executions(deployment_id: str = Query(min_length=1, max_length=64),
+                     context: AuthContext = Depends(require_permission(Permission.MISSION_READ_OWN))) -> dict:
+    """The newest run of every aircraft that was started from this deployment, each with its own controls (one aircraft's pause never touches another)."""
+    deployment, scenario, plan = _load_deployment(context, deployment_id)
+    roles = {item.uav_id: item.role for item in plan.aircraft} if plan is not None else {}
+    rows = []
+    for execution in deployment_mission_executions(deployment["id"]):
+        view = _full_view(context, sync_execution(execution))
+        rows.append({**view, "role": roles.get(execution["aircraft_id"])})
+    standby = [{"aircraft_id": uav, "role": role} for uav, role in roles.items() if role not in FLYING_ROLES and uav not in {row["aircraft_id"] for row in rows}]
+    return {"deployment_id": deployment["id"], "executions": rows, "on_the_ground": standby, "simulation_only": True}
 
 
 @router.post("/api/mission-control/executions", status_code=201)
@@ -361,17 +450,47 @@ def start_execution(payload: StartRequest, request: Request,
         raise _error(rule["status"], rule["code"], rule["message"])
     if not payload.confirm:
         raise _error(422, "confirmation_required", f"Confirm the start first. {START_CONFIRMATION}", confirmation=START_CONFIRMATION)
-    preflight = run_preflight(context, deployment, scenario, plan)
+    preflight = fleet_preflight(context, deployment, scenario, plan)
     if not preflight["can_start"]:
         raise _error(409, "preflight_failed", preflight["blocking"][0] if preflight["blocking"] else "A pre-start check failed.",
-                     checks=preflight["checks"], blocking=preflight["blocking"])
+                     checks=preflight["checks"], blocking=preflight["blocking"], fleet=preflight.get("fleet"))
     assert plan is not None
-    aircraft = next(item for item in plan.aircraft if item.uav_id == preflight["aircraft_id"])
+    flying = [item for item in plan.aircraft if item.uav_id in {entry["aircraft_id"] for entry in preflight["fleet"] if entry["flies"]}]
+    flying.sort(key=lambda item: item.uav_id != preflight["aircraft_id"])      # the primary first: its failure stops everything
+    started, failed = [], []
+    for position, aircraft in enumerate(flying):
+        try:
+            started.append(_start_one(request, context, deployment, aircraft))
+        except HTTPException as error:
+            if position == 0:
+                raise
+            failed.append({"aircraft_id": aircraft.uav_id, "reason": error.detail.get("message") if isinstance(error.detail, dict) else str(error.detail),
+                           "code": error.detail.get("code") if isinstance(error.detail, dict) else None})
+    primary = started[0]
+    armed = 0
+    try:   # implemented Attack Lab experiments of this exact version are armed for this flight (software-only, hidden schedule)
+        from .research import live_experiments
+        from .research_routes import _deployment_roles
+        armed = live_experiments.arm_run(primary, context, _deployment_roles(context))
+    except Exception:
+        armed = 0
+    _audit(request, context, "mission_execution_started", primary["id"],
+           "Mission started on the managed PX4 SITL instance (software simulation)." if len(started) == 1 else f"Mission started on {len(started)} managed PX4 SITL instances (software simulation).",
+           {"deployment_id": deployment["id"], "scenario_version_id": deployment["scenario_version_id"], "aircraft_id": primary["aircraft_id"],
+            "aircraft_started": [item["aircraft_id"] for item in started], "aircraft_failed": failed, "armed_experiments": armed})
+    view = _full_view(context, sync_execution(primary, force=True))
+    if len(started) > 1 or failed:
+        view = {**view, "executions": [_full_view(context, sync_execution(item, force=True)) for item in started], "not_started": failed}
+    return view
+
+
+def _start_one(request: Request, context: AuthContext, deployment: dict, aircraft: Any) -> dict:
+    """Creates and starts the run of ONE aircraft through the managed executor. Raises HTTPException when it could not be started."""
     execution_id = uuid.uuid4().hex
     try:
         mission = build_mission(aircraft, execution_id)
     except MissionItemsError as error:
-        raise _error(409, "route_not_flyable", f"The stored route cannot be flown: {error}.") from error
+        raise _error(409, "route_not_flyable", f"The stored route of {aircraft.uav_id} cannot be flown: {error}.") from error
     try:
         execution = create_mission_execution(
             execution_id=execution_id, deployment_id=deployment["id"], scenario_id=deployment["scenario_id"],
@@ -384,15 +503,12 @@ def start_execution(payload: StartRequest, request: Request,
     result = invoke_mission_executor("start", instance=mission["instance"], mission=mission, timeout_seconds=25)
     if result.get("failure"):
         code = str(result.get("failure_code") or "executor_error")
-        message = f"The simulation did not start: {result['failure']}"
+        message = f"The simulation did not start on {aircraft.uav_id}: {result['failure']}"
         _backend_event(execution_id, "failed", message, data={"code": code})
         update_mission_execution(execution_id, state="failed", reason=message, finished=True)
         status = 409 if code in {"instance_not_managed", "instance_not_running", "execution_running"} else 503 if code in {"pymavlink_missing", "executor_unreachable"} else 502
         raise _error(status, code, message, execution_id=execution_id)
-    _audit(request, context, "mission_execution_started", execution_id,
-           "Mission started on the managed PX4 SITL instance (software simulation).",
-           {"deployment_id": deployment["id"], "scenario_version_id": deployment["scenario_version_id"], "aircraft_id": aircraft.uav_id})
-    return _full_view(context, sync_execution(execution, force=True))
+    return execution
 
 
 @router.get("/api/mission-control/executions/{execution_id}")
@@ -416,7 +532,8 @@ def _control(command: str, execution_id: str, request: Request, context: AuthCon
     if not allowed["allowed"]:
         if command != "abort" and rule is not None and not rule["allowed"] and rule["code"] != "version_superseded":
             raise _error(403, rule["code"], rule["message"])
-        raise _error(409, "already_finished" if not execution["active"] else f"not_{'executing' if command == 'pause' else 'paused'}", allowed["reason"], state=execution["state"])
+        raise _error(409, "already_finished" if not execution["active"] else ("landing" if execution["state"] == "landing" else f"not_{'executing' if command == 'pause' else 'paused'}"),
+                     allowed["reason"], state=execution["state"])
     labels = {"pause": "paused the mission (Hold)", "resume": "resumed the mission", "abort": "aborted the mission (Return to launch)"}
     _backend_event(execution_id, f"{command}_requested_by_user", f"{context.user.full_name} ({context.user.role}) {labels[command]}.", context)
     result = invoke_mission_executor(command, instance=execution["instance_number"], execution_id=execution_id, timeout_seconds=20)
@@ -448,7 +565,7 @@ def abort_execution(execution_id: str, request: Request, context: AuthContext = 
 
 # --- disarm (a normal MAVLink disarm, never forced) --------------------------------------------------------------------
 
-_AIRCRAFT_ID = re.compile(r"^px4-[1-5]$")
+_AIRCRAFT_ID = re.compile(r"^px4-[1-9][0-9]{0,2}$")
 
 
 def disarm_decision(vehicle: Optional[dict[str, Any]], execution: Optional[dict]) -> Optional[tuple[int, str, str]]:
@@ -510,3 +627,129 @@ def disarm_aircraft(aircraft_id: str, request: Request, context: AuthContext = D
                     request_id=getattr(request.state, "request_id", "request-unavailable"), actor_id=context.user.id, actor_name=context.user.full_name,
                     target_type="aircraft", target_id=aircraft_id, metadata={"forced": False})
     return {"aircraft_id": aircraft_id, "disarmed": True, "armed": False, "forced": False, "px4_messages": messages, "simulation_only": True}
+
+
+# --- Land here (land at the current position and disarm; not a motor kill, not return to launch) -----------------------
+
+class LandRequest(BaseModel):
+    confirm: bool = False
+
+
+_land_locks: dict[str, threading.Lock] = {}
+
+
+def _aircraft_before(vehicle: Optional[dict[str, Any]], ground: dict[str, Any], execution: Optional[dict]) -> dict[str, Any]:
+    position = (vehicle or {}).get("position") or {}
+    return {"armed": ground.get("armed"), "relative_altitude_m": position.get("relative_altitude_m"), "ground_speed_m_s": ((vehicle or {}).get("velocity") or {}).get("ground_speed_m_s"),
+            "on_ground": ground.get("on_ground"), "landed_state": ground.get("landed_state"), "on_ground_source": ground.get("source"),
+            "flight_mode": ((vehicle or {}).get("heartbeat") or {}).get("flight_mode"), "execution_state": execution["state"] if execution else None}
+
+
+def land_decision(vehicle: Optional[dict[str, Any]]) -> Optional[tuple[int, str, str]]:
+    """None when Land here may be sent, else (HTTP status, code, reason). The same sentences are shown beside the disabled button."""
+    state = ground_state(vehicle)
+    if not state["connected"]:
+        return 409, "no_telemetry", "No telemetry from this aircraft, so its armed state is unknown."
+    if state["armed"] is False:
+        return 409, "already_disarmed", "Already disarmed"
+    if state["armed"] is not True:
+        return 409, "armed_state_unknown", "PX4 has not reported whether the aircraft is armed."
+    return None
+
+
+def _land_audit(request: Request, context: AuthContext, aircraft_id: str, outcome: str, reason: str, metadata: dict[str, Any]) -> None:
+    add_audit_event(action="aircraft_land_here", outcome=outcome, reason=reason, request_id=getattr(request.state, "request_id", "request-unavailable"),
+                    actor_id=context.user.id, actor_name=context.user.full_name, target_type="aircraft", target_id=aircraft_id, metadata=metadata)
+
+
+def _failure_status(code: str) -> int:
+    return 409 if code in {"instance_not_managed", "instance_not_running", "execution_running"} else 503 if code in {"pymavlink_missing", "executor_unreachable"} else 502
+
+
+@router.post("/api/mission-control/aircraft/{aircraft_id}/land")
+def land_aircraft(aircraft_id: str, payload: LandRequest, request: Request, context: AuthContext = Depends(require_permission(Permission.SCENARIO_EXECUTE)),
+                  _csrf: AuthContext = Depends(require_csrf)) -> dict:
+    """Land the managed SITL aircraft at its current position and disarm it, in the air or on the ground, with or without a run.
+
+    Commanded through the onboard executor link (never the GCS telemetry port). Like Abort it needs no approval. Idempotent: a second press
+    while landing sends nothing. PX4 disarms itself after touchdown; a still-armed aircraft on the ground gets one NORMAL disarm, never the force flag.
+    """
+    from .fleet_routes import _fleet_snapshot
+
+    if not _AIRCRAFT_ID.fullmatch(aircraft_id):
+        raise _error(422, "aircraft_invalid", "The aircraft id must look like px4-1.")
+    if not payload.confirm:
+        raise _error(422, "confirmation_required", f"Confirm first. {LAND_CONFIRMATION}", confirmation=LAND_CONFIRMATION)
+    vehicle = next((item for item in _fleet_snapshot()[0] if item.get("id") == aircraft_id), None)
+    refusal = land_decision(vehicle)
+    if refusal is not None:
+        raise _error(*refusal)
+    lock = _land_locks.setdefault(aircraft_id, threading.Lock())
+    if not lock.acquire(blocking=False):
+        return {"aircraft_id": aircraft_id, "already_landing": True, "mode": None, "state": "landing", "simulation_only": True}
+    try:
+        running = active_mission_execution(aircraft_id)
+        if running is not None:
+            running = sync_execution(running, force=True)
+        if running is not None and not running["active"]:
+            running = None
+        ground = ground_state(vehicle)
+        before = _aircraft_before(vehicle, ground, running)
+        mode = "ground" if ground["on_ground"] is True else "air"
+        who = f"{context.user.full_name} ({context.user.role})"
+        if running is not None and running["state"] == "landing":
+            return {"aircraft_id": aircraft_id, "already_landing": True, "mode": mode, "state": "landing", "execution_id": running["id"], "simulation_only": True}
+        last = latest_mission_execution(context.user.id, include_all=_include_all(context))
+        attach = running["id"] if running is not None else (last["id"] if last is not None and last["aircraft_id"] == aircraft_id else None)
+        step = {"mode": mode, "before": before}
+        if attach:
+            _backend_event(attach, "land_requested_by_user", f"{who} pressed Land here for {aircraft_id} ({'armed on the ground: normal disarm' if mode == 'ground' else 'land at the current position'}).", context, step)
+        if running is not None:
+            result = invoke_mission_executor("land", instance=running["instance_number"], execution_id=running["id"], timeout_seconds=20)
+        elif mode == "ground":
+            result = invoke_mission_executor("disarm", instance=instance_for_aircraft(aircraft_id), timeout_seconds=25)
+        else:
+            result = invoke_mission_executor("land", instance=instance_for_aircraft(aircraft_id), timeout_seconds=25)
+        if result.get("failure"):
+            code = str(result.get("failure_code") or "executor_error")
+            message = f"The land request did not reach PX4: {result['failure']}"
+            if attach:
+                _backend_event(attach, "land_failed", f"{who} asked {aircraft_id} to land; {message}", context, {"code": code, **step})
+            _land_audit(request, context, aircraft_id, "refused", message, {"code": code, **step})
+            raise _error(_failure_status(code), code, message)
+        messages = [str(item) for item in result.get("px4_messages", [])]
+        if result.get("already_disarmed"):
+            raise _error(409, "already_disarmed", "Already disarmed")
+        if result.get("already_landing"):
+            return {"aircraft_id": aircraft_id, "already_landing": True, "mode": mode, "state": "landing", "simulation_only": True}
+        refused_reason = None
+        if mode == "ground" and running is None and not result.get("accepted"):
+            refused_reason = f"PX4 refused to disarm ({result.get('ack') or 'no answer'})." + (f" PX4 said: {'; '.join(messages)}" if messages else "")
+        elif result.get("refused") or (result.get("accepted") is False and running is None):
+            refused_reason = str(result.get("reason") or "PX4 refused to land.")
+        elif running is not None:   # the executor answers asynchronously: wait briefly for PX4's answer
+            deadline = time.monotonic() + LAND_ANSWER_WAIT_S
+            while True:
+                current = sync_execution(get_mission_execution(running["id"]) or running, force=True)
+                answer = (current["progress"] or {}).get("land_result")
+                if isinstance(answer, str) and answer.startswith("refused"):
+                    refused_reason = answer[len("refused: "):] if answer.startswith("refused: ") else answer
+                    break
+                if answer == "accepted" or not current["active"] or time.monotonic() >= deadline:
+                    break
+                time.sleep(0.4)
+        if refused_reason:
+            if attach:
+                _backend_event(attach, "land_refused", f"{who} asked {aircraft_id} to land: {refused_reason}", context, {"px4_messages": messages, **step})
+            _land_audit(request, context, aircraft_id, "refused", refused_reason, {"px4_messages": messages, **step})
+            raise _error(409, "land_refused", refused_reason, px4_messages=messages, values=before)
+        reason = ("Normal disarm sent to the aircraft armed on the ground." if mode == "ground" else "Land at the current position commanded through the onboard executor link; PX4 disarms after touchdown.")
+        if attach and running is None:
+            _backend_event(attach, "landing" if mode == "air" else "disarmed", f"{who} {'started landing' if mode == 'air' else 'disarmed'} {aircraft_id} at its current position (normal disarm, no force).", context, step)
+        _land_audit(request, context, aircraft_id, "success", reason, {"forced": False, **step})
+        view = _full_view(context, sync_execution(get_mission_execution(running["id"]), force=True)) if running is not None else None
+        return {"aircraft_id": aircraft_id, "already_landing": False, "mode": mode, "state": "disarmed" if mode == "ground" else "landing", "forced": False,
+                "execution": view, "execution_id": running["id"] if running is not None else None, "before": before, "started_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "px4_messages": messages, "simulation_only": True}
+    finally:
+        lock.release()

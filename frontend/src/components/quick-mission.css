@@ -1,0 +1,93 @@
+.quick-mission .quick-types{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:8px;margin:0 0 12px}
+.quick-type{display:grid;gap:4px;padding:10px;border:1px solid #243b4f;background:#091521;color:#d6e5ec;text-align:left;cursor:pointer;font:inherit}
+.quick-type b{font:500 11px var(--sans)}.quick-type small{color:#8da2b1;font-size:9px;line-height:1.5}
+.quick-type.selected{border-color:#64bfd0;background:#0d2230;box-shadow:inset 3px 0 0 #64bfd0}
+.quick-type:disabled{opacity:.55;cursor:not-allowed}
+.quick-fields{display:grid;grid-template-columns:minmax(220px,2fr) repeat(auto-fit,minmax(140px,1fr));gap:10px;align-items:start;margin-bottom:10px}
+.quick-fields>label{display:grid;gap:6px;color:#8ea3b2;font:8px var(--mono);letter-spacing:.08em}
+.quick-fields input,.quick-fields select{width:100%;min-height:36px;padding:8px;border:1px solid #30465a;border-radius:2px;background:#091521;color:#e2edf4;font:10px var(--sans);letter-spacing:normal}
+.quick-fields small{color:#8da2b1;font:9px var(--sans);letter-spacing:normal}
+.quick-where{display:grid;gap:6px;color:#8ea3b2;font:8px var(--mono);letter-spacing:.08em}
+.quick-where span{color:#d6e5ec;font:10px var(--sans);letter-spacing:normal;line-height:1.5}
+.quick-map{position:relative;min-height:320px;border:1px solid #203448}
+.quick-map.picking{outline:1px dashed #64bfd0;outline-offset:2px}
+.quick-note,.quick-warning{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:8px 0;padding:8px 10px;border-left:2px solid #c9a24a;background:#1a1a12;color:#e3d7b0;font-size:10px}
+.quick-warning{margin:4px 0}
+.quick-summary{display:grid;gap:6px;margin-top:12px;padding:12px;border-left:2px solid #4f9c7a;background:#0a1a18;color:#d6e5ec;font-size:10px}
+.quick-summary b{display:flex;gap:6px;align-items:center;font:9px var(--mono);letter-spacing:.08em;color:#7fd3a8}
+.quick-summary ul{margin:0;padding-left:18px;line-height:1.7}
+.quick-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:6px}
+.quick-reason,.quick-summary small{color:#8da2b1;font-size:9px;line-height:1.5}
+.quick-rules{margin-top:10px;color:#8da2b1;font-size:9px;line-height:1.6}.quick-rules summary{cursor:pointer;display:flex;gap:6px;align-items:center}
+.advanced-draft{border:1px solid #203448;background:#08131d}.advanced-draft>summary{cursor:pointer;padding:12px 16px;color:#d9e7ee;font:9px var(--mono);letter-spacing:.08em}
+.advanced-draft[open]>summary{border-bottom:1px solid #203448}
+.advanced-draft>.scenario-lab-section{border:0}
+.draft-restored{display:flex;flex-wrap:wrap;gap:10px;align-items:center;padding:9px 12px;border-left:2px solid #64bfd0;background:#0a1f2b;color:#d6e5ec;font-size:10px}
+.auto-limit{display:inline-flex;gap:6px;align-items:center;margin-left:6px;color:#7fd3a8;font:8px var(--mono);letter-spacing:.06em;text-transform:none}
+.auto-limit button{padding:0 4px;border:1px solid #30465a;background:none;color:#8da2b1;font:8px var(--mono);cursor:pointer}
+.mission-switch-banner{display:flex;flex-wrap:wrap;gap:10px;align-items:center;padding:10px 12px;border-left:2px solid #64bfd0;background:#0a1f2b;color:#d6e5ec;font-size:10px;line-height:1.5}
+.running-note{padding:8px 12px;border-left:2px solid #4f859c;background:#0a1622;color:#b9ccd8;font-size:10px}
+.assistant-summary{display:grid;gap:4px;margin:6px 0;padding:8px;border-left:2px solid #4f9c7a;background:#0a1a18;font-size:10px}
+.assistant-summary ul{margin:0;padding-left:16px}
+.assistant-choices{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0}
+.assistant-choices button{padding:6px 9px;border:1px solid #30465a;background:#0d2230;color:#d6e5ec;font:10px var(--sans);cursor:pointer}
+
+/* Quick Mission page: one clean, scrolling column. Form first, the map under it, the explanation of the numbers collapsed at the bottom. */
+.quick-page{display:grid;gap:16px;min-width:0}
+.quick-layout{display:grid;grid-template-columns:minmax(0,1fr);gap:16px;min-width:0}
+.quick-controls{display:grid;gap:16px;padding:20px 22px;min-width:0;align-content:start}
+.quick-controls>header{display:grid;gap:4px}.quick-controls>header h3{margin:0;font-size:18px;color:var(--text)}
+.quick-field{display:grid;gap:7px;min-width:0;color:#8ea3b2;font:9px var(--mono);letter-spacing:.08em}
+.quick-field select,.quick-field input{width:100%;min-height:38px;padding:8px 10px;border:1px solid #30465a;border-radius:2px;background:#091521;color:#e2edf4;font:12px var(--sans);letter-spacing:normal}
+.quick-field small{color:#8da2b1;font:10px var(--sans);letter-spacing:normal;line-height:1.5}
+.quick-marker{display:inline-block;justify-self:start;margin-left:6px;padding:1px 7px;border:1px solid #30465a;border-radius:9px;color:#8da2b1;font:8px var(--mono);letter-spacing:.06em;text-transform:none}
+.quick-marker.typed{border-color:#64bfd0;color:#64bfd0}
+.quick-explain,.quick-where{display:grid;gap:8px;padding:12px 14px;border:1px solid #203448;background:#08131d;min-width:0}
+.quick-explain>b,.quick-where>b{color:#8ea3b2;font:9px var(--mono);letter-spacing:.1em}
+.quick-explain ol{margin:0;padding-left:20px;color:#d6e5ec;font-size:12px;line-height:1.7}
+.quick-explain-aircraft{display:grid;gap:4px}.quick-explain-aircraft>b{color:#d6e5ec;font:10px var(--mono)}
+.quick-explain .planner-empty,.quick-limits{margin:0;color:#8da2b1;font-size:11px;line-height:1.6}
+.quick-where>span{color:#d6e5ec;font-size:12px;line-height:1.5}
+.quick-where-actions{display:flex;flex-wrap:wrap;gap:8px}.quick-where-actions:empty{display:none}
+.quick-settings{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:16px;align-items:start}
+.quick-settings .quick-name{grid-column:1/-1}
+.quick-speed-actions{display:flex;flex-wrap:wrap;gap:6px}
+.quick-badge{display:flex;gap:6px;align-items:center;padding:6px 9px;border-left:2px solid #c9a24a;background:#1a1a12;color:#e3d7b0;font:10px var(--sans);letter-spacing:normal}
+.quick-controls .quick-note{margin:0}.quick-controls .quick-warning{margin:0}
+.quick-actions{margin-top:0}
+.quick-right{min-width:0}
+.quick-map{position:relative;height:clamp(440px,62vh,680px);min-height:0;overflow:hidden}
+.quick-map .mission-planner-map{height:100%;min-height:0}
+.quick-layout>.quick-rules{margin:0;padding:12px 16px;border:1px solid #203448;background:#08131d}
+
+/* Quick Mission: "Open a saved mission" (compact, scrolls inside itself) and the saved-mission bar. */
+.saved-picker{display:grid;gap:8px;padding:12px;border:1px solid #203448;background:#08131d;min-width:0}
+.saved-picker-head{display:flex;justify-content:space-between;align-items:baseline;color:#8ea3b2;font:9px var(--mono);letter-spacing:.08em}
+.saved-picker-filters{display:grid;grid-template-columns:minmax(0,1fr) minmax(120px,170px);gap:8px}
+.saved-picker-search{display:flex;gap:6px;align-items:center;padding:0 8px;border:1px solid #30465a;background:#091521;color:#8da2b1}
+.saved-picker-search input{flex:1;min-width:0;min-height:32px;border:0;background:none;color:#e2edf4;font:10px var(--sans)}
+.saved-picker-filters select{min-height:32px;border:1px solid #30465a;background:#091521;color:#e2edf4;font:10px var(--sans)}
+.saved-picker-list{list-style:none;margin:0;padding:0;display:grid;gap:4px;max-height:190px;overflow-y:auto}
+.saved-picker-list button{display:grid;gap:2px;width:100%;padding:7px 9px;border:1px solid #243b4f;background:#091521;color:#d6e5ec;text-align:left;cursor:pointer;font:inherit}
+.saved-picker-list button b{font:500 11px var(--sans)}.saved-picker-list button span{font-size:10px;color:#b9ccd8}.saved-picker-list button small{font-size:9px;color:#8da2b1}
+.saved-picker-list button.selected{border-color:#64bfd0;background:#0d2230;box-shadow:inset 3px 0 0 #64bfd0}
+.saved-picker-list button:disabled{opacity:.55;cursor:not-allowed}
+.saved-mission-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:9px 12px;border-left:2px solid #64bfd0;background:#0a1f2b;color:#d6e5ec;font-size:11px}
+.saved-mission-bar b{font-weight:600}
+.saved-lab-notice{display:grid;gap:10px;padding:14px 16px;border-left:2px solid #c9a24a;background:#1a1a12;color:#e3d7b0;font-size:11px;line-height:1.6}
+.saved-unsaved-warning{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:9px 12px;border-left:2px solid #c9a24a;background:#1a1a12;color:#e3d7b0;font-size:11px}
+
+/* Quick Mission: the aircraft box. One compact row per aircraft; it scrolls inside itself, so 12, 30 or 100 rows never push or cover the form. */
+.quick-aircraft{display:grid;gap:8px;padding:12px;border:1px solid #203448;background:#08131d;min-width:0}
+.quick-aircraft-head{display:flex;flex-wrap:wrap;gap:4px 12px;align-items:baseline;color:#8ea3b2;font:9px var(--mono);letter-spacing:.08em}
+.quick-aircraft-head small{font:9px var(--sans);letter-spacing:normal;color:#8da2b1}
+.quick-aircraft-list{list-style:none;margin:0;padding:0 4px 0 0;display:grid;gap:4px;max-height:300px;overflow-y:auto}
+.quick-aircraft-row{display:grid;gap:4px;padding:6px 8px;border:1px solid #243b4f;background:#091521;min-width:0}
+.quick-aircraft-main{display:grid;grid-template-columns:28px minmax(90px,1fr) minmax(150px,1.2fr) auto;gap:8px;align-items:center;min-width:0}
+.quick-aircraft-number{color:#8da2b1;font:10px var(--mono);text-align:right}
+.quick-aircraft-main input,.quick-aircraft-main select,.quick-aircraft-advanced input{min-width:0;width:100%;min-height:30px;padding:4px 8px;border:1px solid #30465a;border-radius:2px;background:#0b1a27;color:#e2edf4;font:10px var(--sans)}
+.quick-aircraft-advanced{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;padding-left:36px}
+.quick-aircraft-advanced label{display:grid;gap:4px;color:#8ea3b2;font:8px var(--mono);letter-spacing:.08em}
+.quick-aircraft-line{padding-left:36px;color:#b9ccd8;font-size:10px;line-height:1.5}
+.quick-invalid{color:#e3b0b0}
+@media(max-width:640px){.quick-aircraft-main{grid-template-columns:24px minmax(0,1fr)}.quick-aircraft-main select,.quick-aircraft-main button{grid-column:2}.quick-aircraft-advanced{grid-template-columns:1fr;padding-left:0}.quick-aircraft-line{padding-left:0}}

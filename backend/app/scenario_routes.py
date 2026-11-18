@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timezone
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from pydantic import BaseModel
 
 from .auth_routes import require_permission, require_csrf
 from .authorization import Permission, has_permission
@@ -13,7 +15,9 @@ from .persistence.database import (
     attach_scenario_sandbox_run,
     create_scenario,
     delete_draft_scenario,
+    get_mission_deployment,
     get_scenario,
+    latest_mission_execution,
     list_my_scenario_approval_requests,
     list_scenario_approval_requests,
     list_scenarios,
@@ -31,7 +35,8 @@ from .schemas import ScenarioCreateRequest, ScenarioExecutionRequest, ScenarioIn
 from .security import AuthContext
 from .simulation.engine import SimulationConfig
 from .telemetry.planning import current_planning_aircraft
-from .telemetry.fleet_manager import invoke_fleet_manager
+from .mission_planning.quick import capacity_message, capacity_options
+from .telemetry.fleet_manager import FLEET_CAPACITY, invoke_fleet_manager
 
 
 router = APIRouter()
@@ -69,6 +74,13 @@ def _validated_intent(
     if intent is None:
         return None
     content = intent.model_dump(mode="json")
+    # A manual version carries no quick source (so its content and hash are exactly what they were before). A quick source is kept only while the
+    # quick-controlled fields of the plan still produce its fingerprint; a fine-tuned plan no longer claims it.
+    source = content.pop("quick_source", None)
+    if source and content.get("mission_plan"):
+        from .mission_planning.quick import plan_fingerprint
+        if source.get("fingerprint") and source["fingerprint"] == plan_fingerprint(content["mission_plan"]):
+            content["quick_source"] = source
     if len(content["proposed_tasks"]) > config.task_count:
         raise ValueError("Mission intent has more proposed tasks than the simulator task count")
     if sum(item["count"] for item in content["uav_role_suggestions"]) > config.uav_count:
@@ -109,11 +121,8 @@ def _validated_intent(
         issues = validate_plan(plan, PlanningLimits.from_config(), complete=plan.workflow_stage in {"faults", "review"})
         if issues:
             raise PlanValidationError(issues)
-        if plan.selected_uav_ids or plan.aircraft:
-            if available_aircraft_ids is None:
-                raise RuntimeError("PX4 telemetry is unavailable for mission assignment validation")
-            if any(uav_id not in available_aircraft_ids for uav_id in plan.selected_uav_ids):
-                raise ValueError("Selected aircraft must be connected PX4 aircraft with valid position telemetry")
+        # Saving a schema-2 plan never depends on the live fleet: the plan carries its own coordinates, and a plan may use more aircraft than are
+        # running (or than this machine can run). Deploy and Start verify the running aircraft (fleet_not_verified / capacity_exceeded).
         if plan.workflow_stage in {"general", "aircraft"} and content["uav_fault_assignments"]:
             raise ValueError("Configure experimental faults only after completing all individual aircraft missions")
         text_values += [plan.description, plan.notes]
@@ -261,7 +270,8 @@ def create_scenario_route(
 ) -> dict:
     try:
         config = _simulation_config(payload.config.model_dump())
-        available_aircraft = _planning_aircraft_ids() if payload.intent and (payload.intent.geographic_mission or payload.intent.mission_plan) else None
+        # Only a legacy (schema 1) geographic mission is checked against live telemetry; a schema-2 plan is saved whatever the fleet is doing.
+        available_aircraft = _planning_aircraft_ids() if payload.intent and payload.intent.geographic_mission else None
         intent = _validated_intent(payload.intent, config, available_aircraft)
         scenario = create_scenario(context.user.id, payload.title, config.__dict__, intent)
     except PlanValidationError as exc:
@@ -305,14 +315,11 @@ def update_scenario(
 ) -> dict:
     try:
         config = _simulation_config(payload.config.model_dump())
-        available_aircraft = (
-            _planning_aircraft_ids()
-            if payload.intent and (payload.intent.geographic_mission or payload.intent.mission_plan)
-            else None
-        )
+        available_aircraft = _planning_aircraft_ids() if payload.intent and payload.intent.geographic_mission else None
         intent = _validated_intent(payload.intent, config, available_aircraft) if "intent" in payload.model_fields_set else None
         scenario = save_scenario_version(
             scenario_id, context.user.id, payload.title, config.__dict__, intent,
+            allow_any_owner=has_permission(context.user.role, Permission.MISSION_READ_ALL),
         )
     except PlanValidationError as exc:
         raise HTTPException(status_code=422, detail=_plan_error_detail(exc)) from exc
@@ -400,14 +407,22 @@ def submit_scenario(
     return result
 
 
+class DeployRequest(BaseModel):
+    """`fleet` (default): every aircraft of the mission must be running and verified. `plan_only`: the mission is handed to Mission Control without
+    checking or starting any aircraft (it can be viewed and compared, but Start stays blocked until enough aircraft run)."""
+    mode: Literal["fleet", "plan_only"] = "fleet"
+
+
 @router.post("/api/scenarios/{scenario_id}/versions/{version_id}/deploy")
 def deploy_scenario(
     scenario_id: str,
     version_id: str,
     request: Request,
+    payload: Optional[DeployRequest] = None,
     context: AuthContext = Depends(require_permission(Permission.SCENARIO_CREATE)),
     _csrf: AuthContext = Depends(require_csrf),
 ) -> dict:
+    plan_only = bool(payload and payload.mode == "plan_only")
     include_all = has_permission(context.user.role, Permission.MISSION_READ_ALL)
     scenario = get_scenario(scenario_id, context.user.id, include_all=include_all)
     if scenario is None:
@@ -441,14 +456,22 @@ def deploy_scenario(
         issues = _mission_readiness_errors(mission)
         if issues:
             raise HTTPException(status_code=422, detail={"message": "Mission validation is incomplete.", "issues": issues})
-    process_state = invoke_fleet_manager("status", timeout_seconds=12)
-    running = {int(item.get("system_id", -1)) for item in process_state.get("instances", [])
-               if isinstance(item, dict) and not process_state.get("failure")}
-    from .fleet_routes import _verified_fleet
-    verified, _states = _verified_fleet(count)
-    verified_ids = {item["aircraft_id"] for item in verified}
-    required_system_ids = {int(item[len("px4-"):]) for item in selected}
-    if process_state.get("failure") or not required_system_ids.issubset(running) or not set(selected).issubset(verified_ids):
+    if count and count > FLEET_CAPACITY and not plan_only:
+        # More aircraft than this machine runs reliably: say so plainly and offer the three ways forward. Nothing is dropped and nothing is started.
+        raise HTTPException(status_code=409, detail={
+            "code": "capacity_exceeded", "message": capacity_message(count, FLEET_CAPACITY), "capacity": FLEET_CAPACITY, "required_uav_count": count,
+            "options": capacity_options(count, FLEET_CAPACITY)})
+    if plan_only:
+        process_state, running, verified, verified_ids, required_system_ids = {}, set(), [], set(), set()
+    else:
+        process_state = invoke_fleet_manager("status", timeout_seconds=12)
+        running = {int(item.get("system_id", -1)) for item in process_state.get("instances", [])
+                   if isinstance(item, dict) and not process_state.get("failure")}
+        from .fleet_routes import _verified_fleet
+        verified, _states = _verified_fleet(count)
+        verified_ids = {item["aircraft_id"] for item in verified}
+        required_system_ids = {int(item[len("px4-"):]) for item in selected}
+    if not plan_only and (process_state.get("failure") or not required_system_ids.issubset(running) or not set(selected).issubset(verified_ids)):
         raise HTTPException(status_code=503, detail={
             "code": "fleet_not_verified",
             "message": "Deployment is blocked until every selected PX4 process, telemetry source and matching Gazebo pose are verified. Run Activate and verify.",
@@ -465,7 +488,8 @@ def deploy_scenario(
         "requested_uav_count": count, "activated_uav_count": len(verified),
         "assigned_uav_count": len(assignments), "fleet": verified,
         "config": version.get("config"), "intent": intent.model_dump(mode="json"),
-        "execution_status": "DEPLOYED_TO_MISSION_CONTROL_NOT_UPLOADED_TO_PX4",
+        "execution_status": "DEPLOYED_PLAN_ONLY" if plan_only else "DEPLOYED_TO_MISSION_CONTROL_NOT_UPLOADED_TO_PX4",
+        "plan_only": plan_only,
     }
     try:
         result = save_mission_deployment(scenario_id, version_id, context.user.id, context.user.role, payload)
@@ -508,12 +532,29 @@ def _deployment_details(deployment: dict, scenario: dict | None) -> dict:
 def get_latest_deployment(
     context: AuthContext = Depends(require_permission(Permission.MISSION_READ_OWN)),
 ) -> dict:
+    """The latest deployment (`deployment`, unchanged) together with the deployment the newest execution belongs to.
+
+    Mission Control keeps showing `execution_deployment` while that execution is active (a newer deployment never disturbs a flight)
+    and offers to switch once `execution.active` is false. Reads only; the execution state is the stored one (the execution panel syncs it).
+    """
     include_all = has_permission(context.user.role, Permission.MISSION_READ_ALL)
     deployment = latest_mission_deployment(context.user.id, include_all=include_all)
+    execution = latest_mission_execution(context.user.id, include_all=include_all)
+    summary = None
+    execution_deployment = None
+    if execution is not None:
+        summary = {key: execution.get(key) for key in ("id", "deployment_id", "aircraft_id", "state", "reason", "active", "finished_at")}
+        if deployment is not None and execution["deployment_id"] == deployment["id"]:
+            execution_deployment_source: dict | None = deployment
+        else:
+            execution_deployment_source = get_mission_deployment(execution["deployment_id"])
+        if execution_deployment_source is not None:
+            execution_deployment = _deployment_details(
+                execution_deployment_source, get_scenario(execution_deployment_source["scenario_id"], context.user.id, include_all=include_all))
     if deployment is None:
-        return {"deployment": None}
+        return {"deployment": None, "execution": summary, "execution_deployment": execution_deployment}
     scenario = get_scenario(deployment["scenario_id"], context.user.id, include_all=include_all)
-    return {"deployment": _deployment_details(deployment, scenario)}
+    return {"deployment": _deployment_details(deployment, scenario), "execution": summary, "execution_deployment": execution_deployment}
 
 
 @router.get("/api/general/scenario-approvals")

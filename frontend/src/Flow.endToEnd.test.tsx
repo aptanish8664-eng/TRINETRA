@@ -118,6 +118,10 @@ vi.mock('./services/api', () => ({
       const latest = [...backend.deployments].sort((a, b) => b.at - a.at)[0]
       return latest ? deploymentView(latest) : null
     }),
+    missionDeployments: vi.fn(async () => {
+      const latest = [...backend.deployments].sort((a, b) => b.at - a.at)[0]
+      return { deployment: latest ? deploymentView(latest) : null, execution: null, execution_deployment: null }
+    }),
     simulationLocation: vi.fn(async (id: string, versionId: string) => {
       const primary = planOf(scenario(id)!.versions.find(item => item.id === versionId)!).aircraft.find(item => item.role === 'primary')!
       const distance = metres(backend.aircraftAt, primary.start_location!)
@@ -126,7 +130,7 @@ vi.mock('./services/api', () => ({
         scenario_id: id, scenario_version_id: versionId, max_distance_to_start_m: distance, max_distance_to_area_m: distance, position_known: true,
         mission_start: { ...primary.start_location!, altitude_m: 488, uav_id: primary.uav_id, role: 'primary', definition: 'Take-off point of the primary aircraft.' },
         aircraft: [], relocation_recommended: distance > 1000, far_from_mission_area: far,
-        message: far ? `The aircraft is about ${(distance / 1000).toFixed(0)} km from the mission area. The simulation is running at a different location than this mission. Use Move simulation to mission start.`
+        message: far ? `The aircraft is about ${(distance / 1000).toFixed(0)} km from the mission area. The simulation is running at a different location than this mission. Use Restart at mission start.`
           : `The aircraft is ${distance.toFixed(0)} m from the mission start.`,
         thresholds: { relocation_notice_m: 1000, far_from_area_m: 50_000, home_tolerance_m: 50 },
       }
@@ -139,6 +143,21 @@ vi.mock('./services/api', () => ({
         note: 'The PX4 and Gazebo simulation was restarted at the mission start. No arm, take-off or mission command was sent.',
         checks: { px4: { status: 'ok', detail: '1 of 1 PX4 SITL process(es) present.' }, verification: { status: 'ok', detail: '1 of 1 UAV(s) have PX4 telemetry and a Gazebo pose.' }, simulation_home: { status: 'ok', detail: 'Every aircraft reports a position within 50 m of the mission start.' } } }
     }),
+    // --- Restart at mission start (the page's shared restart dialog): the fake backend moves the aircraft to the deployment's mission start ---
+    startRestart: vi.fn(async (deploymentId: string, purpose: 'restart' | 'switch') => {
+      const record = backend.deployments.find(item => item.id === deploymentId)!
+      const owner = scenario(record.scenario_id)!
+      const primary = planOf(owner.versions.find(item => item.id === record.scenario_version_id)!).aircraft.find(item => item.role === 'primary')!
+      backend.aircraftAt = { ...primary.start_location! }
+      backend.relocations += 1
+      return { id: 'job-1', status: 'succeeded', purpose, deployment_id: deploymentId, reason: 'simulation restarted', failure: null, can_retry: false, elapsed_s: 19.5,
+        steps: ['managed', 'executor', 'stop_sim', 'start_sim', 'bridges', 'telemetry', 'gazebo_pose', 'position', 'orphans'].map(key => ({ key, label: key, status: 'ok', detail: '' })),
+        started_at: 't', finished_at: 't', started_by_name: 'Test', simulation_only: true,
+        result: { mission_start: primary.start_location, max_distance_to_start_m: 0.4, armed: false, ended_executions: [], killed_processes: [] } }
+    }),
+    restartJob: vi.fn(),
+    latestRestart: vi.fn(async () => null),
+    deploymentRoleRule: vi.fn(async () => ({ allowed: true, code: 'general', message: 'General accounts deploy and start directly.' })),
     // --- Start in simulation: a fake executor with the backend's rules (role, approval, one run at a time) ---
     executionPreflight: vi.fn(async (deploymentId: string) => {
       const record = backend.deployments.find(item => item.id === deploymentId)!
@@ -151,9 +170,9 @@ vi.mock('./services/api', () => ({
       const failing: [string, string][] = []
       if (superseded) failing.push(['plan_valid', `Version ${version.version_number} was superseded by version ${owner.versions[0].version_number}. Deploy the latest version before starting.`])
       if (!approved) failing.push(['role', `Operators need a General's approval of this exact version. Submit version ${version.version_number} for review in Scenario Lab.`])
-      if (distance > 50) failing.push(['at_mission_start', `The aircraft is ${(distance / 1000).toFixed(1)} km from the mission start (limit 50 m). Use Move simulation to mission start.`])
+      if (distance > 50) failing.push(['at_mission_start', `The aircraft is ${(distance / 1000).toFixed(1)} km from the mission start (limit 50 m). Use Restart at mission start.`])
       if (backend.execution?.active) failing.push(['no_execution_running', `An execution is already ${backend.execution.state} on px4-1.`])
-      const keys = ['plan_valid', 'role', 'single_aircraft', 'fleet_verified', 'managed_instance', 'telemetry_fresh', 'gps_fix', 'disarmed_landed', 'at_mission_start', 'battery', 'no_execution_running', 'endurance']
+      const keys = ['plan_valid', 'role', 'aircraft_count', 'fleet_verified', 'managed_instance', 'telemetry_fresh', 'gps_fix', 'disarmed_landed', 'at_mission_start', 'battery', 'no_execution_running', 'endurance']
       return { deployment_id: deploymentId, aircraft_id: 'px4-1', can_start: failing.length === 0, blocking: failing.map(item => item[1]),
         confirmation: 'This runs your route in the PX4/Gazebo simulation. The aircraft will arm, take off and fly the plan.',
         role_rule: approved ? { allowed: true, code: backend.role === 'GENERAL' ? 'general' : 'approved', message: backend.role === 'GENERAL' ? 'General accounts deploy and start directly.' : `A General approved version ${version.version_number}.` }
@@ -189,6 +208,10 @@ vi.mock('./services/api', () => ({
       })) }
     }),
     attackExperiments: vi.fn(async () => backend.experiments.map(experimentView)),
+    attackLabResults: vi.fn(async () => []),
+    attackLabLive: vi.fn(async () => ({ armed: 0, run_active: false, experiments_in_run: 0, note: '' })),
+    implementExperiment: vi.fn(),
+    exportRunRecords: vi.fn(),
     applyAttackPreset: vi.fn(async (presetId: string) => ({ preset_id: presetId, seed: 1, config: {
       attacks: presetId === 'baseline' ? [] : [{ target_aircraft: 'px4-1', type: 'drift', start_s: 72, duration_s: 96, magnitude: 0.5, direction_deg: null }],
       response_policy: 'operator_decides', allow_overlap: false, handover: { min_battery_pct: 40, candidate_roles: ['standby', 'decoy'] },
@@ -217,14 +240,15 @@ vi.mock('./components/CesiumLiveMap', () => ({
 }))
 vi.mock('./components/PlanMapEditor', () => ({
   PlanMapEditor: ({ scope, aircraft, onAreaChange, onAircraftChange }: {
-    scope: 'area' | 'aircraft'; aircraft?: AircraftPlan
+    scope: 'area' | 'aircraft' | 'both'; aircraft?: AircraftPlan
     onAreaChange: (area: OperatingArea | null) => void; onAircraftChange: (patch: Partial<AircraftPlan>) => void
-  }) => scope === 'area'
-    ? <button type="button" onClick={() => onAreaChange({ kind: 'circle', centre: { latitude: 12.975, longitude: 77.596 }, radius_m: 400, vertices: [] })}>SET TEST AREA</button>
-    : <div>
+  }) => <div>
+    {scope !== 'aircraft' && <button type="button" onClick={() => onAreaChange({ kind: 'circle', centre: { latitude: 12.975, longitude: 77.596 }, radius_m: 400, vertices: [] })}>SET TEST AREA</button>}
+    {aircraft && scope !== 'area' && <div>
       <button type="button" onClick={() => onAircraftChange({ start_location: { latitude: 12.9716, longitude: 77.5946 } })}>SET TEST START</button>
       <button type="button" onClick={() => onAircraftChange({ parameters: { ...aircraft?.parameters, points: [{ latitude: 12.973, longitude: 77.595 }] } })}>SET TEST POINTS</button>
-    </div>,
+    </div>}
+  </div>,
 }))
 
 vi.setConfig({ testTimeout: 60000 })
@@ -304,7 +328,7 @@ describe('end-to-end flow through the real App', () => {
   beforeEach(() => {
     vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: true, addListener: vi.fn(), removeListener: vi.fn(), addEventListener: vi.fn(), removeEventListener: vi.fn() })))
     window.scrollTo = vi.fn() as never
-    sessionStorage.clear(); window.localStorage.clear()
+    sessionStorage.clear(); localStorage.clear(); window.localStorage.clear()
     Object.assign(backend, { role: 'GENERAL', scenarios: [], deployments: [], experiments: [], aircraftAt: { ...ZURICH }, mapOverlay: null, relocations: 0, clock: 0, execution: null, executionEvents: [] })
     window.history.replaceState({}, '', '/scenario-lab')
   })
@@ -353,22 +377,21 @@ describe('end-to-end flow through the real App', () => {
     const mission = await screen.findByRole('region', { name: 'Mission status' })
     const control = (name: RegExp) => within(mission).getByRole('button', { name }) as HTMLButtonElement
     const controlReasons = () => Object.fromEntries(Array.from(mission.querySelectorAll('[aria-label="Why controls are unavailable"] li')).map(item => [item.querySelector('b')!.textContent, item.textContent!.slice(item.querySelector('b')!.textContent!.length)]))
-    await waitFor(() => expect(controlReasons().Start).toMatch(/km from the mission start \(limit 50 m\)\. Use Move simulation to mission start\./))
+    await waitFor(() => expect(controlReasons().Start).toMatch(/km from the mission start \(limit 50 m\)\. Use Restart at mission start\./))
     expect(control(/START IN SIMULATION/).disabled).toBe(true)
     expect(within(mission).getByLabelText('Role rule').textContent).toBe('Role rule: General accounts deploy and start directly.')
 
     // Mission Control: the simulation is far away. Moving it needs a press and an in-page confirmation, and commands no flight.
     const missionLocation = await screen.findByRole('region', { name: 'Mission location' })
     expect((await within(missionLocation).findByRole('alert')).textContent).toMatch(/about \d+ km from the mission area/)
-    fireEvent.click(within(missionLocation).getByRole('button', { name: /MOVE SIMULATION TO MISSION START/ }))
-    expect(apiMock.relocateSimulation).not.toHaveBeenCalled()
-    const dialog = within(missionLocation).getByRole('dialog', { name: 'Confirm moving the simulation' })
-    expect(dialog.textContent).toMatch(/stops and restarts the PX4 and Gazebo simulation at the mission start point \(12\.97160, 77\.59460\)/)
-    expect(dialog.textContent).toMatch(/It commands no flight: nothing is armed, and no take-off or mission is sent/)
-    fireEvent.click(within(dialog).getByRole('button', { name: 'RESTART SIMULATION AT MISSION START' }))
-    await waitFor(() => expect(apiMock.relocateSimulation).toHaveBeenCalledWith('scenario-1', 'scenario-1-v1'))
-    expect(await within(missionLocation).findByText(/Simulation moved to the mission start \(aircraft 0\.4 m from it\)/)).toBeTruthy()
-    expect(within(within(missionLocation).getByRole('list', { name: 'Relocation checks' })).getAllByRole('listitem')).toHaveLength(3)
+    fireEvent.click(within(missionLocation).getByRole('button', { name: /RESTART AT MISSION START/ }))
+    expect(apiMock.startRestart).not.toHaveBeenCalled()
+    const dialog = await screen.findByRole('dialog', { name: 'Confirm restart at mission start' })
+    expect(dialog.textContent).toMatch(/This restarts PX4 and Gazebo at the mission start \(about 20 s\)\. A flight in progress ends\./)
+    fireEvent.click(within(dialog).getByRole('button', { name: 'RESTART NOW' }))
+    await waitFor(() => expect(apiMock.startRestart).toHaveBeenCalledWith('deployment-1', 'restart'))
+    expect((await screen.findByRole('dialog', { name: 'Restart progress' })).textContent).toMatch(/0\.4 m from the mission start · disarmed · ready/)
+    fireEvent.click(within(screen.getByRole('dialog', { name: 'Restart progress' })).getByRole('button', { name: 'CLOSE' }))
     await waitFor(() => expect(within(missionLocation).queryByRole('alert')).toBeNull())
 
     // Start in simulation: enabled once the aircraft is at the mission start; it needs the in-page confirmation with the checklist.
@@ -504,7 +527,7 @@ describe('end-to-end flow through the real App', () => {
     await waitFor(() => expect(within(header).getByRole('heading', { name: 'Operator mission' })).toBeTruthy())
     expect(within(header).getByText(/Version 1 · schema 2/)).toBeTruthy()
     expect(await within(screen.getByRole('region', { name: 'Mission location' })).findByText(/The aircraft is 0 m from the mission start\./)).toBeTruthy()
-    expect(screen.queryByRole('button', { name: /MOVE SIMULATION TO MISSION START/ })).toBeNull()
+    expect(within(screen.getByRole('region', { name: 'Mission location' })).queryByRole('button', { name: /RESTART AT MISSION START/ })).toBeNull()      // no location warning, so no button in the notice
     // The approved version can be started by the operator; the role rule says why.
     const mission = await screen.findByRole('region', { name: 'Mission status' })
     await waitFor(() => expect((within(mission).getByRole('button', { name: /START IN SIMULATION/ }) as HTMLButtonElement).disabled).toBe(false))

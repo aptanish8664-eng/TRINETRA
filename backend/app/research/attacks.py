@@ -66,7 +66,7 @@ START_RANGE_S = (0.0, 86_400.0)
 
 # What each experiment field means, in plain words. Served by the limits endpoint and mirrored in the frontend.
 FIELD_HELP: dict[str, str] = {
-    "start": "Seconds after the aircraft starts its route when the attack begins.",
+    "start": "Seconds of flight time, counted from when the aircraft arms, when the attack begins (a few seconds of take-off come first).",
     "duration": "How long the attack lasts, in seconds. It must end before the route does.",
     "magnitude": "How strong the attack is: a distance in metres, a rate in m/s, or a noise level, depending on the type.",
     "direction": "Compass direction the reported position is pushed (0 = north, 90 = east). Leave it blank for a random direction fixed by the seed.",

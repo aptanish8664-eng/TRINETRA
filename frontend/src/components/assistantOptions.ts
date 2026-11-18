@@ -51,10 +51,8 @@ export function buildAssistantOptions(ctx: HelpContext): AssistantOption[] {
         id: 'set-count', label: 'Set UAV count', edits: true,
         input: {
           type: 'select', label: 'Required UAVs',
-          choices: Array.from({ length: UAV_COUNT_RANGE.max - UAV_COUNT_RANGE.min + 1 }, (_, index) => {
-            const count = String(UAV_COUNT_RANGE.min + index)
-            return { value: count, label: count }
-          }),
+          // A few common counts as buttons; any other whole number can be typed ("I need 12 UAVs").
+          choices: [1, 2, 3, 4, 6, 12].filter(count => count >= UAV_COUNT_RANGE.min && count <= UAV_COUNT_RANGE.max).map(count => ({ value: String(count), label: String(count) })),
         },
         compose: value => `I need ${value} UAVs`,
       },

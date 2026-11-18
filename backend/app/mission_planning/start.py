@@ -18,7 +18,7 @@ from typing import Any, Optional
 from .geometry import distance_m
 from .schemas import AircraftPlan, GeoPoint, MissionPlan
 
-# An aircraft further than this from the mission start gets the "Move simulation to mission start" notice.
+# An aircraft further than this from the mission start gets the "Restart at mission start" notice.
 RELOCATION_NOTICE_M = 1_000.0
 # An aircraft further than this from the operating area gets the stronger "far from the mission area" message.
 FAR_FROM_AREA_M = 50_000.0

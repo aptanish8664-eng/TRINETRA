@@ -4,7 +4,7 @@ import type { Entity, Viewer } from 'cesium'
 import 'cesium/Build/Cesium/Widgets/widgets.css'
 import { THRESHOLDS, circleRing, isTelemetryStale, type MissionOverlay } from './missionControlModel'
 import { DEFAULT_BASEMAP } from './basemapPreference'
-import { SAFE_VIEWER_OPTIONS, attachRenderGuard, hasRenderableSize, whenRenderable } from './cesiumRenderGuard'
+import { ON_DEMAND_RENDER_OPTIONS, SAFE_VIEWER_OPTIONS, attachRenderGuard, hasRenderableSize, watchContextLoss, whenRenderable } from './cesiumRenderGuard'
 
 export type MapLayers = { routes: boolean; geofence: boolean; trails: boolean; labels: boolean }
 export type Basemap = 'offline' | 'street' | 'satellite'
@@ -63,6 +63,7 @@ export function CesiumLiveMap({
   overlayRef.current = overlay
   const [viewerReady, setViewerReady] = useState(false)
   const [mapError, setMapError] = useState('')
+  const [attempt, setAttempt] = useState(0)   // bumped by RETRY and after a lost WebGL context
   const [mapNotice, setMapNotice] = useState('')
   const [renderNotice, setRenderNotice] = useState('')
 
@@ -72,7 +73,9 @@ export function CesiumLiveMap({
     let viewer: Viewer | null = null
     let clickHandler: import('cesium').ScreenSpaceEventHandler | null = null
     let disposeGuard: (() => void) | null = null
+    let disposeLoss: (() => void) | null = null
     const sized = hostRef.current ? whenRenderable(hostRef.current) : null
+    setMapError('')
 
     void (async () => {
       const Cesium = await import('cesium')
@@ -94,10 +97,12 @@ export function CesiumLiveMap({
         shouldAnimate: true,
         scene3DOnly: true,
         ...SAFE_VIEWER_OPTIONS,
+        ...ON_DEMAND_RENDER_OPTIONS,
         useDefaultRenderLoop: hasRenderableSize(hostRef.current),
       })
       viewerRef.current = viewer
       disposeGuard = attachRenderGuard(viewer, hostRef.current, { onNotice: setRenderNotice })
+      disposeLoss = watchContextLoss(viewer.scene.canvas, () => setAttempt(value => value + 1))
       viewer.camera.setView({
         destination: Cesium.Cartesian3.fromDegrees(77.5946, 12.9716, 2_500_000),
       })
@@ -116,12 +121,13 @@ export function CesiumLiveMap({
       cancelled = true
       sized?.cancel()
       disposeGuard?.()
+      disposeLoss?.()
       clickHandler?.destroy()
       if (viewer && !viewer.isDestroyed()) viewer.destroy()
       viewerRef.current = null
       setViewerReady(false)
     }
-  }, [])
+  }, [attempt])
 
   // Basemap: street by default (DEFAULT_BASEMAP). Offline Natural Earth is the always-available fallback when an online provider fails.
   useEffect(() => {
@@ -356,7 +362,7 @@ export function CesiumLiveMap({
 
   return <div className="cesium-live-map" aria-label="Live PX4 geographic map">
     <div className="cesium-live-map-host" ref={hostRef}/>
-    {mapError && <div className="cesium-map-error" role="alert">{mapError}</div>}
+    {mapError && <div className="cesium-map-error" role="alert">{mapError} <button type="button" className="button-secondary" onClick={() => setAttempt(value => value + 1)}>RETRY</button></div>}
     {mapNotice && !mapError && <div className="cesium-map-notice" role="status">{mapNotice}</div>}
     {renderNotice && !mapError && <div className="cesium-map-notice render" role="status">{renderNotice}</div>}
     {!mapError && !vehicles.some(validPosition) && <div className="cesium-map-waiting" role="status">Waiting for valid PX4 position telemetry</div>}

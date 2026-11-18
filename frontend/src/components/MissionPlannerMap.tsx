@@ -5,7 +5,7 @@ import type { GeographicPoint, GeographicUavAssignment, GeographicZone } from '.
 import { parseGeographicSearchResults, type GeographicSearchResult } from './missionPlanning'
 import './mission-planner.css'
 import { readPlannerMapStyle, storePlannerMapStyle } from './basemapPreference'
-import { SAFE_VIEWER_OPTIONS, attachRenderGuard, hasRenderableSize, whenRenderable } from './cesiumRenderGuard'
+import { ON_DEMAND_RENDER_OPTIONS, SAFE_VIEWER_OPTIONS, attachRenderGuard, hasRenderableSize, watchContextLoss, whenRenderable } from './cesiumRenderGuard'
 
 export type PlannerMapMode =
   | 'navigate'
@@ -32,6 +32,10 @@ type Props = {
   onMoveLocation: (location: 'start' | 'destination', point: GeographicPoint) => void
   onAircraftLocationChange: (uavId: string, location: 'start_location' | 'destination', point: GeographicPoint) => void
   onAddAircraftWaypoint: (uavId: string, point: GeographicPoint) => void
+  /** Optional: a chosen search result also counts as picking that place (the Quick mission panel uses it). */
+  onPlacePicked?: (point: GeographicPoint, label: string) => void
+  /** Optional: where the camera looks first when there is nothing else to frame (the Quick mission map uses the aircraft). */
+  focus?: GeographicPoint | null
 }
 
 const ENTITY_PREFIX = 'mission-planner:'
@@ -85,7 +89,7 @@ function fromScreenPosition(Cesium: typeof import('cesium'), viewer: Viewer, pos
 export function MissionPlannerMap({
   start, destination, zones, draftVertices, assignments, activeAssignmentId, mode,
   onStartChange, onDestinationChange, onAddVertex, onSelectVertex, onMoveVertex, onMoveLocation,
-  onAircraftLocationChange, onAddAircraftWaypoint,
+  onAircraftLocationChange, onAddAircraftWaypoint, onPlacePicked, focus = null,
 }: Props) {
   const hostRef = useRef<HTMLDivElement>(null)
   const viewerRef = useRef<Viewer | null>(null)
@@ -105,6 +109,7 @@ export function MissionPlannerMap({
   const dragRef = useRef<{ entityId: string; kind: 'start' | 'destination' | 'vertex'; zoneId?: string; index?: number; moved: boolean } | null>(null)
   const [viewerReady, setViewerReady] = useState(false)
   const [mapError, setMapError] = useState('')
+  const [attempt, setAttempt] = useState(0)   // bumped by RETRY and after a lost WebGL context: the viewer is created again
   const [renderNotice, setRenderNotice] = useState('')
   const [mapStyle, setMapStyleState] = useState<MapStyle>(readPlannerMapStyle)  // stored choice, otherwise the street default
   const setMapStyle = (next: MapStyle) => { setMapStyleState(next); storePlannerMapStyle(next) }
@@ -127,7 +132,9 @@ export function MissionPlannerMap({
     let viewer: Viewer | null = null
     let input: import('cesium').ScreenSpaceEventHandler | null = null
     let disposeGuard: (() => void) | null = null
+    let disposeLoss: (() => void) | null = null
     const sized = hostRef.current ? whenRenderable(hostRef.current) : null
+    setMapError('')
 
     void (async () => {
       const Cesium = await import('cesium')
@@ -149,10 +156,12 @@ export function MissionPlannerMap({
         timeline: false,
         scene3DOnly: true,
         ...SAFE_VIEWER_OPTIONS,
+        ...ON_DEMAND_RENDER_OPTIONS,
         useDefaultRenderLoop: hasRenderableSize(hostRef.current),
       })
       viewerRef.current = viewer
       disposeGuard = attachRenderGuard(viewer, hostRef.current, { onNotice: setRenderNotice })
+      disposeLoss = watchContextLoss(viewer.scene.canvas, () => setAttempt(value => value + 1))
       viewer.scene.globe.show = true
       viewer.scene.globe.baseColor = Cesium.Color.fromCssColorString('#233a49')
       viewer.camera.setView({
@@ -248,6 +257,7 @@ export function MissionPlannerMap({
       cancelled = true
       sized?.cancel()
       disposeGuard?.()
+      disposeLoss?.()
       input?.destroy()
       searchControllerRef.current?.abort()
       if (viewer && !viewer.isDestroyed()) viewer.destroy()
@@ -255,7 +265,7 @@ export function MissionPlannerMap({
       imageryLayersRef.current = []
       setViewerReady(false)
     }
-  }, [])
+  }, [attempt])
 
   useEffect(() => {
     const viewer = viewerRef.current
@@ -371,6 +381,7 @@ export function MissionPlannerMap({
   }
 
   const goToSearchResult = (result: GeographicSearchResult) => {
+    if (Number.isFinite(result.latitude) && Number.isFinite(result.longitude)) onPlacePicked?.({ latitude: result.latitude, longitude: result.longitude }, result.label)
     const viewer = viewerRef.current
     if (!viewer || viewer.isDestroyed()) return
     void Promise.resolve(cesiumRef.current ?? import('cesium')).then(Cesium => {
@@ -395,9 +406,10 @@ export function MissionPlannerMap({
       // When the map opens with something to show (an operating area chosen in Section A, an aircraft start), look at it once
       // instead of the whole Earth; after that the camera is the user's.
       if (!framedRef.current) {
-        framedRef.current = true
         const points = [...zones.flatMap(zone => zone.vertices), ...(start ? [start] : []), ...(destination ? [destination] : []),
           ...assignments.flatMap(item => [item.start_location, item.destination, ...(item.waypoints ?? [])].filter((point): point is GeographicPoint => Boolean(point)))]
+        if (!points.length && focus) points.push({ latitude: focus.latitude - 0.004, longitude: focus.longitude - 0.004 }, { latitude: focus.latitude + 0.004, longitude: focus.longitude + 0.004 })
+        framedRef.current = points.length > 0
         if (points.length) {
           const latitudes = points.map(point => point.latitude), longitudes = points.map(point => point.longitude)
           const padLat = Math.max((Math.max(...latitudes) - Math.min(...latitudes)) * 0.4, 0.002)
@@ -540,7 +552,7 @@ export function MissionPlannerMap({
         })
       })
     }).catch(() => setMapError('Cesium could not update the proposed mission overlay.'))
-  }, [start, destination, zones, draftVertices, assignments, viewerReady])
+  }, [start, destination, zones, draftVertices, assignments, viewerReady, focus?.latitude, focus?.longitude])
 
   return <div className={`mission-planner-map ${mode === 'navigate' ? '' : 'map-picking'}`} aria-label="Geographic mission planning map">
     <div className="mission-planner-map-host" ref={hostRef}/>
@@ -574,7 +586,7 @@ export function MissionPlannerMap({
       </small>
     </div>
     {imageryLoading && <div className="mission-map-loading" role="status">Loading {MAP_STYLES.find(style => style.value === mapStyle)?.label.toLowerCase()} map…</div>}
-    {mapError && <div className="cesium-map-error" role="alert">{mapError}</div>}
+    {mapError && <div className="cesium-map-error" role="alert">{mapError} <button type="button" className="button-secondary" onClick={() => setAttempt(value => value + 1)}>RETRY</button></div>}
     {renderNotice && !mapError && <div className="cesium-map-notice" role="status">{renderNotice}</div>}
     <div className="mission-map-caption">WGS84 · {mapStyle === 'terrain3d' ? 'terrain' : 'ellipsoid'} · proposed routes only · no flight feasibility validation</div>
   </div>

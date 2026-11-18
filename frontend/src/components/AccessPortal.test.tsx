@@ -12,6 +12,7 @@ vi.mock('../services/api', () => ({
     pendingScenarioApprovals: vi.fn(),
     generalAudit: vi.fn(),
     reviewScenario: vi.fn(),
+    generalScenarios: vi.fn(),
   },
 }))
 
@@ -109,7 +110,9 @@ describe('sign-in and scenario review (walkthrough fixes)', () => {
     apiMock.pendingScenarioApprovals.mockResolvedValue([request] as never)
     apiMock.generalAudit.mockResolvedValue({ events: [], total: 0 } as never)
     apiMock.reviewScenario.mockResolvedValue({} as never)
-    return render(<AccessPortal page="general" userSession={general as never} {...props}/>)
+    const view = render(<AccessPortal page="general" userSession={general as never} {...props}/>)
+    fireEvent.click(screen.getByRole('button', { name: 'Scenario reviews' }))      // the General control center is tabbed
+    return view
   }
 
   it('the review note is asked in the page (no native prompt) and the decision is sent only after confirming', async () => {
@@ -127,6 +130,17 @@ describe('sign-in and scenario review (walkthrough fixes)', () => {
     fireEvent.change(note, { target: { value: 'Route checked against the area.' } })
     fireEvent.click(screen.getByRole('button', { name: 'CONFIRM APPROVAL' }))
     await waitFor(() => expect(apiMock.reviewScenario).toHaveBeenCalledWith('r1', 'approve', 'Route checked against the area.'))
+  })
+
+  it('the control center is tabbed (users, scenario reviews, saved scenarios, audit log) and Saved scenarios loads every user scenario', async () => {
+    apiMock.generalScenarios.mockResolvedValue([])
+    renderGeneral()
+    const tabs = screen.getByRole('navigation', { name: 'General control center sections' })
+    expect(Array.from(tabs.querySelectorAll('button')).map(item => item.textContent)).toEqual(['Users and requests', 'Scenario reviews', 'Saved scenarios', 'Audit log'])
+    fireEvent.click(screen.getByRole('button', { name: 'Saved scenarios' }))
+    await waitFor(() => expect(apiMock.generalScenarios).toHaveBeenCalled())
+    expect(screen.getByRole('region', { name: 'Saved scenarios' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'APPROVE VERSION' })).toBeNull()
   })
 
   it('cancel closes the form without a decision, and rejecting asks for a reason', async () => {

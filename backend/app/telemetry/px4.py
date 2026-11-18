@@ -18,8 +18,9 @@ _MAVLINK_FRAME_STARTS = {0xFE, 0xFD}
 _SUPPORTED_TYPES = {
     "HEARTBEAT", "GLOBAL_POSITION_INT", "ATTITUDE", "GPS_RAW_INT",
     "HIGHRES_IMU", "SYS_STATUS", "BATTERY_STATUS", "MISSION_CURRENT",
-    "LOCAL_POSITION_NED", "ESTIMATOR_STATUS", "VIBRATION",
+    "LOCAL_POSITION_NED", "ESTIMATOR_STATUS", "VIBRATION", "EXTENDED_SYS_STATE",
 }
+_LANDED_STATE_NAMES = {0: "undefined", 1: "on_ground", 2: "in_air", 3: "takeoff", 4: "landing"}
 _TRAIL_MAX_POINTS = 3000
 _RATE_WINDOW_S = 5.0
 # Raw detector streams kept since arming (PX4-clock stamps). Sized for the detector's 300 s window at the requested rates.
@@ -136,6 +137,7 @@ class Px4TelemetryStore:
             "_trail": [],
             "estimator_status": None,
             "vibration": None,
+            "landed_state": None,
             "_detector": _new_detector_buffer(),
             "_rates": {},
             "_received": {},
@@ -176,6 +178,10 @@ class Px4TelemetryStore:
             }
             vehicle["last_heartbeat_at"] = received_at
             vehicle["_last_heartbeat_monotonic"] = received_monotonic
+
+        elif kind == "EXTENDED_SYS_STATE":
+            value = int(message.landed_state)
+            vehicle["landed_state"] = {"value": value, "name": _LANDED_STATE_NAMES.get(value, "undefined"), "source_message": kind, "received_at": received_at}
 
         elif kind == "GLOBAL_POSITION_INT":
             heading = int(message.hdg)
@@ -352,6 +358,9 @@ class Px4TelemetryStore:
             else:
                 status = "connected"
             vehicle["status"] = status
+            landed_time = current["_received"].get("EXTENDED_SYS_STATE")
+            if vehicle.get("landed_state") is not None:
+                vehicle["landed_state"]["age_s"] = None if landed_time is None else round(max(0.0, now - landed_time), 2)
             vehicle["telemetry_age_seconds"] = round(age, 3)
             vehicle["heartbeat_age_seconds"] = None if heartbeat_age is None else round(heartbeat_age, 3)
             if include_trails:
@@ -429,6 +438,14 @@ class Px4TelemetryStore:
             "estimator_status": deepcopy(current["estimator_status"]), "vibration": deepcopy(current["vibration"]),
             "flight_mode": (current["heartbeat"] or {}).get("flight_mode"),
         }
+
+    def forget_except(self, keep_ids: set[str]) -> list[str]:
+        """Drops every aircraft that is not in `keep_ids` (a restarted simulation no longer has them). Returns what was dropped.
+        The dict is replaced, not edited, so a reader that is iterating the old one is not disturbed."""
+        dropped = [key for key in self._vehicles if key not in keep_ids]
+        if dropped:
+            self._vehicles = {key: value for key, value in self._vehicles.items() if key in keep_ids}
+        return dropped
 
     def vehicle_ids(self) -> list[str]:
         """Aircraft that have sent a PX4 autopilot heartbeat (other MAVLink senders on the link are not aircraft)."""

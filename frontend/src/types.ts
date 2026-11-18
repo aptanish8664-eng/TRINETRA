@@ -36,6 +36,8 @@ export type Px4TelemetryVehicle = {
   status: 'connected' | 'stale' | 'disconnected'; armed: boolean | null
   heartbeat: { vehicle_type: number; autopilot: number; base_mode: number; custom_mode: number; flight_mode: string | null; system_status: number; received_at: string } | null
   position: Px4Position | null
+  /** PX4's EXTENDED_SYS_STATE landed state (preferred for "on the ground"); age_s is how old it is. */
+  landed_state?: { value: number; name: 'undefined' | 'on_ground' | 'in_air' | 'takeoff' | 'landing'; age_s?: number | null; received_at: string } | null
   velocity: { north_m_s: number; east_m_s: number; down_m_s: number; ground_speed_m_s: number; source_message: string; received_at: string } | null
   attitude: { roll_rad: number; pitch_rad: number; yaw_rad: number; source_message: string; source_time_boot_ms: number; received_at: string } | null
   gps_raw: { latitude: number; longitude: number; altitude_m: number; fix_type: number; valid: boolean; source_time_usec: number; eph_m: number | null; epv_m: number | null; satellites_visible: number | null; received_at: string } | null

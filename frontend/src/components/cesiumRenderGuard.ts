@@ -22,6 +22,19 @@ export interface GuardableViewer {
 
 /** Options every viewer must be created with: no modal render-error dialog. */
 export const SAFE_VIEWER_OPTIONS = { showRenderLoopErrors: false } as const
+/** Render on demand: a frame is drawn when something changed (camera, entities, imagery) or at most every half second of clock time. */
+export const ON_DEMAND_RENDER_OPTIONS = { requestRenderMode: true, maximumRenderTimeChange: 0.5 } as const
+
+/**
+ * WebGL can lose its context (GPU reset, too many contexts, sleep). Calls `onLost` once per loss; the caller recreates the viewer.
+ * Returns the cleanup function.
+ */
+export function watchContextLoss(canvas: HTMLCanvasElement | null | undefined, onLost: () => void): () => void {
+  if (!canvas || typeof canvas.addEventListener !== 'function') return () => {}
+  const lost = (event: Event) => { event.preventDefault(); onLost() }
+  canvas.addEventListener('webglcontextlost', lost)
+  return () => canvas.removeEventListener('webglcontextlost', lost)
+}
 
 export function hasRenderableSize(host: HTMLElement | null | undefined): boolean {
   return Boolean(host) && host!.clientWidth > 0 && host!.clientHeight > 0
@@ -58,11 +71,24 @@ export interface RenderGuardCallbacks {
 }
 
 const RETRY_MS = 1500
+/**
+ * A render error is usually one transient zero-size frame (a tab or section hidden, a layout change, a resized window). The loop is stopped at once and
+ * restarted by the recovery below; the notice appears only when the error comes back after that recovery (a real, repeating failure), and it clears after
+ * the map has rendered cleanly for HEALTHY_MS. A map that fixes itself therefore never shows "Map rendering paused".
+ */
+const HEALTHY_MS = 3000
 
 export function attachRenderGuard(viewer: GuardableViewer, host: HTMLElement, { onNotice }: RenderGuardCallbacks): () => void {
   let disposed = false
   let failed = false
+  let consecutive = 0
+  let noticeShown = false
   let retryTimer: number | undefined
+  let healthyTimer: number | undefined
+  const clearHealthyTimer = () => {
+    if (healthyTimer !== undefined) window.clearTimeout(healthyTimer)
+    healthyTimer = undefined
+  }
 
   const alive = () => !disposed && !viewer.isDestroyed()
 
@@ -78,7 +104,12 @@ export function attachRenderGuard(viewer: GuardableViewer, host: HTMLElement, { 
     viewer.scene?.requestRender?.()
     if (failed) {
       failed = false
-      onNotice('')
+      clearHealthyTimer()
+      healthyTimer = window.setTimeout(() => {
+        healthyTimer = undefined
+        consecutive = 0
+        if (noticeShown) { noticeShown = false; onNotice('') }
+      }, HEALTHY_MS)
     }
   }
 
@@ -95,10 +126,15 @@ export function attachRenderGuard(viewer: GuardableViewer, host: HTMLElement, { 
   const handler: Listener = (_scene, error) => {
     if (!alive()) return
     failed = true
+    consecutive += 1
+    clearHealthyTimer()
     const detail = error instanceof Error ? error.message : String(error ?? '')
     // Cesium stops its render loop after a render error; keep it stopped until the size is valid, then restart it.
     viewer.useDefaultRenderLoop = false
-    onNotice(`Map rendering paused (${detail || 'render error'}). Recovering automatically…`)
+    if (consecutive >= 2 && !noticeShown) {
+      noticeShown = true
+      onNotice(`Map rendering paused (${detail || 'render error'}). Recovering automatically…`)
+    }
     scheduleRetry()
   }
   const removeListener = viewer.scene?.renderError?.addEventListener(handler)
@@ -118,6 +154,7 @@ export function attachRenderGuard(viewer: GuardableViewer, host: HTMLElement, { 
     observer?.disconnect()
     if (poll !== undefined) window.clearInterval(poll)
     if (retryTimer !== undefined) window.clearTimeout(retryTimer)
+    clearHealthyTimer()
     if (typeof removeListener === 'function') removeListener()
     else viewer.scene?.renderError?.removeEventListener?.(handler)
   }

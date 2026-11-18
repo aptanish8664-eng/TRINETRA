@@ -63,7 +63,7 @@ def test_executor_adapter_allows_disarm_without_an_execution_id():
 
 
 def test_ground_state_uses_altitude_and_speed_and_never_guesses():
-    assert ground_state(None) == {"known": False, "connected": False, "armed": None, "on_ground": None}
+    assert ground_state(None) == {"known": False, "connected": False, "armed": None, "on_ground": None, "landed_state": None, "source": None}
     assert ground_state(vehicle(status="stale"))["connected"] is False
     assert ground_state(standing())["on_ground"] is True
     assert ground_state(airborne())["on_ground"] is False
@@ -88,7 +88,7 @@ def test_disarm_is_refused_in_the_air_with_the_abort_hint_and_nothing_is_sent(ge
     disarmer.sim.state["vehicles"] = [airborne()]
     refused = disarm(client)
     assert refused.status_code == 409 and refused.json()["detail"]["code"] == "in_the_air"
-    assert refused.json()["detail"]["message"] == IN_THE_AIR == "In the air: abort (return to launch) first; it disarms itself after landing."
+    assert refused.json()["detail"]["message"] == IN_THE_AIR == "In the air: use Land here (lands at the current position and disarms) or Abort (return to launch)."
     assert disarmer.disarms == []
 
 
@@ -155,7 +155,7 @@ def test_executor_failures_are_reported_not_hidden(general_client, disarmer):
     assert disarm(client).status_code == 503
     disarmer.answer = {"failure": "PX4 instance 0 was not started by the TRINETRA fleet manager.", "failure_code": "instance_not_managed"}
     assert disarm(client).status_code == 409
-    assert disarm(client, "px4-9").status_code == 422 and disarm(client, "px4-1;rm").status_code in (404, 422)
+    assert disarm(client, "px4-1000").status_code == 422 and disarm(client, "px4-1;rm").status_code in (404, 422)
 
 
 def test_both_roles_may_disarm_without_approval_and_csrf_and_login_are_required(general_client, operator_client, disarmer):
@@ -182,7 +182,8 @@ def _relocation_setup(client, monkeypatch):
     row = {"aircraft_id": "px4-1", "instance_number": 0, "system_id": 1, "gazebo_model": "x500_0", "px4_status": "connected", "gazebo_status": "connected", "verified": True}
     monkeypatch.setattr("app.fleet_routes._verified_fleet", lambda count: ([row], [row]))
     sent = []
-    monkeypatch.setattr("app.fleet_routes.invoke_fleet_manager", lambda action, **k: sent.append(action) or _manager_ok())
+    from test_simulation_home import staged
+    monkeypatch.setattr("app.fleet_routes.invoke_fleet_manager", staged(lambda action, **k: sent.append(action) or _manager_ok()))
     return {"scenario_id": scenario_id, "scenario_version_id": version_id, "confirm": True}, sent
 
 
@@ -196,10 +197,11 @@ def test_relocation_is_not_blocked_by_an_aircraft_that_is_armed_on_the_ground(ge
     monkeypatch.setattr("app.fleet_routes._fleet_snapshot", lambda: ([on_ground], []))
     response = client.post("/api/fleet/relocate", json=body)
     assert response.status_code == 200, response.text            # PX4 is restarted, so the armed flag is lost with it
-    assert sent == ["relocate"] and response.json()["relocated"] is True
+    assert [item for item in sent if item == "relocate"] == ["relocate"] and response.json()["relocated"] is True      # (a read-only "status" check of who started PX4 comes first)
 
 
-def test_relocation_still_refuses_an_armed_aircraft_that_is_in_the_air_or_unconfirmed(general_client, flight, monkeypatch):
+def test_relocation_is_no_longer_refused_for_an_aircraft_in_the_air_or_with_an_unknown_state(general_client, flight, monkeypatch):
+    """Restart at mission start is available in every state (the restart ends the flight): the old "armed, not on the ground" refusal is gone."""
     from test_mission_planning import offset
 
     client, _ = general_client
@@ -207,13 +209,11 @@ def test_relocation_still_refuses_an_armed_aircraft_that_is_in_the_air_or_unconf
     near = offset(2, 1)
     flying = {**home_vehicle(**near, armed=True), "position": {**near, "valid": True, "relative_altitude_m": 30.0}, "velocity": {"ground_speed_m_s": 8.0}}
     monkeypatch.setattr("app.fleet_routes._fleet_snapshot", lambda: ([flying], []))
-    refused = client.post("/api/fleet/relocate", json=body)
-    assert refused.status_code == 409 and refused.json()["detail"]["code"] == "aircraft_armed"
-    assert "Abort (return to launch) first" in refused.json()["detail"]["message"]
-    unknown = home_vehicle(**near, armed=True)                    # no altitude reported: not confirmed on the ground
+    assert client.post("/api/fleet/relocate", json=body).status_code == 200
+    unknown = home_vehicle(**near, armed=True)                    # no altitude reported
     monkeypatch.setattr("app.fleet_routes._fleet_snapshot", lambda: ([unknown], []))
-    assert client.post("/api/fleet/relocate", json=body).status_code == 409
-    assert sent == []
+    assert client.post("/api/fleet/relocate", json=body).status_code == 200
+    assert [item for item in sent if item == "relocate"] == ["relocate", "relocate"]
 
 
 # --- the one-shot executor against the fake PX4 peer ------------------------------------------------------------------

@@ -25,9 +25,11 @@ export function CommandDecisionPanel({ runId, currentUserId, canRequest, canAppr
   }, [])
   useEffect(() => { void refresh() }, [refresh, refreshKey])
 
-  const decide = async (request: CommandDecision, decision: 'approve' | 'reject') => {
-    const reason = decision === 'reject' ? window.prompt('Reason for rejecting this command:') : undefined
+  // The rejection reason is asked in the page (never with a native browser dialog).
+  const [rejecting, setRejecting] = useState<{ id: string; reason: string } | null>(null)
+  const decide = async (request: CommandDecision, decision: 'approve' | 'reject', reason?: string) => {
     if (decision === 'reject' && !reason?.trim()) return
+    setRejecting(null)
     setBusyId(request.id)
     setMessage('')
     setError('')
@@ -53,8 +55,12 @@ export function CommandDecisionPanel({ runId, currentUserId, canRequest, canAppr
       <div><b>{request.command.replace(/_/g, ' ').toUpperCase()}</b><span>{request.requester_username} · RUN {request.run_id} · {new Date(request.created_at).toLocaleString()}</span><small>{JSON.stringify(request.payload)} · {request.status.toUpperCase()}</small>{request.decision_reason && <small>{request.decision_reason}</small>}</div>
       {canApprove && request.status === 'pending' && request.requester_id !== currentUserId && <div className="admin-action-buttons">
         <button className="button-secondary" disabled={Boolean(busyId)} onClick={() => void decide(request, 'approve')}>{busyId === request.id ? 'PROCESSING…' : 'APPROVE & EXECUTE'}</button>
-        <button className="button-secondary" disabled={Boolean(busyId)} onClick={() => void decide(request, 'reject')}>REJECT</button>
+        <button className="button-secondary" disabled={Boolean(busyId)} onClick={() => setRejecting({ id: request.id, reason: '' })}>REJECT</button>
       </div>}
+      {rejecting?.id === request.id && <div className="scenario-review-form" role="group" aria-label="Rejection reason">
+        <label>REASON FOR REJECTING THIS COMMAND<textarea rows={2} maxLength={500} value={rejecting.reason} onChange={event => setRejecting({ ...rejecting, reason: event.target.value })}/></label>
+        <div className="admin-action-buttons"><button className="button-primary" disabled={!rejecting.reason.trim() || Boolean(busyId)} onClick={() => void decide(request, 'reject', rejecting.reason)}>CONFIRM REJECTION</button>
+          <button className="button-quiet" onClick={() => setRejecting(null)}>CANCEL</button></div></div>}
     </article>)}
   </section>
 }

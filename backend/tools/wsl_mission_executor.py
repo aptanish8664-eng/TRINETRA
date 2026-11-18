@@ -35,7 +35,7 @@ import sys
 import time
 from typing import Any, Callable, Optional
 
-FLEET_CAPACITY = 5
+FLEET_CAPACITY = 16       # technical ceiling of instance slots; the policy limit is the backend's TRINETRA_SIM_MAX_AIRCRAFT
 MAX_ITEMS = 500
 
 # MAVLink constants (common dialect); kept local so this file imports without pymavlink (unit tests, CLI status).
@@ -46,6 +46,8 @@ MAV_CMD_NAV_TAKEOFF = 22
 MAV_CMD_DO_SET_MODE = 176
 MAV_CMD_DO_CHANGE_SPEED = 178
 MAV_CMD_MISSION_START = 300
+MAV_CMD_SET_MESSAGE_INTERVAL = 511
+MSG_EXTENDED_SYS_STATE = 245
 MAV_CMD_COMPONENT_ARM_DISARM = 400
 MAV_FRAME_GLOBAL_RELATIVE_ALT_INT = 6
 MAV_FRAME_MISSION = 2
@@ -54,6 +56,10 @@ MAV_AUTOPILOT_PX4 = 12
 MAV_MODE_FLAG_SAFETY_ARMED = 128
 MAV_MODE_FLAG_CUSTOM_MODE_ENABLED = 1
 MAV_LANDED_STATE_ON_GROUND = 1
+MAV_LANDED_STATE_LANDING = 4
+LANDED_STATE_NAMES = {0: "undefined", 1: "on_ground", 2: "in_air", 3: "takeoff", 4: "landing"}
+ON_GROUND_ALT_M = 1.5
+ON_GROUND_SPEED_M_S = 0.7
 MISSION_STATE_COMPLETE = 5
 PX4_MAIN_AUTO = 4
 PX4_SUB = {"takeoff": 2, "hold": 3, "mission": 4, "return": 5, "land": 6}
@@ -66,8 +72,8 @@ COMMAND_RESULT_NAMES = {0: "ACCEPTED", 1: "TEMPORARILY_REJECTED", 2: "DENIED", 3
 
 # The only mission commands an item may carry, and the only commands this process may send.
 ITEM_COMMANDS = {MAV_CMD_NAV_TAKEOFF: "takeoff", MAV_CMD_NAV_WAYPOINT: "waypoint", MAV_CMD_NAV_LAND: "land", MAV_CMD_DO_CHANGE_SPEED: "change_speed"}
-SENDABLE_COMMANDS = frozenset({MAV_CMD_MISSION_START, MAV_CMD_COMPONENT_ARM_DISARM, MAV_CMD_DO_SET_MODE, MAV_CMD_NAV_RETURN_TO_LAUNCH})
-CONTROL_COMMANDS = ("pause", "resume", "abort")
+SENDABLE_COMMANDS = frozenset({MAV_CMD_MISSION_START, MAV_CMD_COMPONENT_ARM_DISARM, MAV_CMD_DO_SET_MODE, MAV_CMD_NAV_RETURN_TO_LAUNCH, MAV_CMD_SET_MESSAGE_INTERVAL})
+CONTROL_COMMANDS = ("pause", "resume", "abort", "land")
 TERMINAL_STATES = frozenset({"completed", "aborted", "failed", "link_lost"})
 
 HEARTBEAT_INTERVAL_S = 1.0
@@ -83,6 +89,10 @@ ARM_CONFIRM_S = 6.0
 LINK_LOST_S = 10.0
 LINK_LOST_GIVE_UP_S = 120.0
 DISARM_AFTER_LANDING_S = 10.0
+DISARM_AFTER_TOUCHDOWN_S = 4.0      # Land here: PX4 normally disarms itself after touchdown; if not, a NORMAL disarm after this long
+LAND_GIVE_UP_S = 300.0
+LANDED_STATE_STALE_S = 5.0
+LANDED_STATE_INTERVAL_US = 500000   # EXTENDED_SYS_STATE at 2 Hz
 
 _EXECUTION_ID = re.compile(r"^[0-9a-f]{32}$")
 
@@ -230,6 +240,15 @@ class MissionExecutor:
         self._return_failed = False
         self._finish_link_lost = False
         self._rtl_last_sent: Optional[float] = None
+        self._landed_state_at: Optional[float] = None
+        self._landed_state_requested: Optional[float] = None
+        self.rel_alt_m: Optional[float] = None
+        self.ground_speed_m_s: Optional[float] = None
+        self._land_result: Optional[str] = None      # accepted | refused: <PX4's reason> (read by the backend right after the request)
+        self._land_started: Optional[float] = None
+        self._land_last_sent: Optional[float] = None
+        self._before_land: Optional[str] = None
+        self._fallback_noted = False
         self._emit("executor_started", "Mission executor started; sending a GCS heartbeat every second.", {"items": len(self.items), "route_waypoints": mission["route_total"]})
 
     # --- bookkeeping -------------------------------------------------------------------------------------------
@@ -280,11 +299,35 @@ class MissionExecutor:
             "execution_id": self.mission["execution_id"], "instance": self.mission["instance"], "system_id": self.target_system,
             "state": self.state, "reason": self.reason, "terminal": self.terminal, "updated_at": self.wall_clock(),
             "uploaded": self.uploaded, "armed": self.armed, "px4_mode": mode_name(self.custom_mode) if self.custom_mode is not None else None,
-            "landed_state": self.landed_state, "current_item": self.current_item, "items": len(self.items),
+            "landed_state": self.landed_state, "landed_state_name": LANDED_STATE_NAMES.get(self.landed_state) if self.landed_state is not None else None,
+            "on_ground": self.on_ground(), "on_ground_source": self.on_ground_source(), "rel_alt_m": self.rel_alt_m, "land_result": self._land_result, "current_item": self.current_item, "items": len(self.items),
             "px4_heartbeat_age_s": None if self._last_px4_heartbeat is None else round(now - self._last_px4_heartbeat, 2),
             "gcs_heartbeats_sent": self.heartbeats_sent, "armed_at": self.armed_at_wall, "events": len(self.events),
             "px4_messages": self._statustexts[-5:], **self.route_progress(),
         }
+
+    # --- landed state --------------------------------------------------------------------------------------------
+    def _landed_state_fresh(self, now: Optional[float] = None) -> bool:
+        now = self.clock() if now is None else now
+        return self.landed_state is not None and self._landed_state_at is not None and now - self._landed_state_at <= LANDED_STATE_STALE_S
+
+    def on_ground_source(self) -> str:
+        return "px4_landed_state" if self._landed_state_fresh() else "altitude_speed_fallback"
+
+    def on_ground(self) -> Optional[bool]:
+        """On the ground from PX4's EXTENDED_SYS_STATE; only when that is missing or stale, from relative altitude and ground speed."""
+        if self._landed_state_fresh():
+            return self.landed_state == MAV_LANDED_STATE_ON_GROUND
+        if self.rel_alt_m is None:
+            return None
+        return abs(self.rel_alt_m) < ON_GROUND_ALT_M and (self.ground_speed_m_s is None or self.ground_speed_m_s < ON_GROUND_SPEED_M_S)
+
+    def _request_landed_state(self, now: float) -> None:
+        """Ask PX4 for EXTENDED_SYS_STATE at 2 Hz on this onboard link (retried every 5 s while none has arrived)."""
+        if self._landed_state_requested is not None and (self._landed_state_fresh(now) or now - self._landed_state_requested < 5.0):
+            return
+        self._landed_state_requested = now
+        self.link.send_command(MAV_CMD_SET_MESSAGE_INTERVAL, (float(MSG_EXTENDED_SYS_STATE), float(LANDED_STATE_INTERVAL_US), 0.0, 0.0, 0.0, 0.0, 0.0))
 
     # --- commands (allowlisted) ----------------------------------------------------------------------------------
     def _command(self, command: int, params: tuple[float, ...], label: str, on_ok: Callable[[], None], on_fail: Callable[[str], None]) -> None:
@@ -315,9 +358,13 @@ class MissionExecutor:
             return {"accepted": False, "detail": "unknown control command"}
         if self.terminal:
             return {"accepted": False, "detail": f"the run is already {self.state}"}
+        if command == "land":
+            return self._begin_land()
         if command == "abort":
             if self.state == "returning":
                 return {"accepted": True, "detail": "already returning to launch"}
+            if self.state == "landing":
+                return {"accepted": False, "detail": "landing at the current position; Abort (return to launch) is not available while landing"}
             self._emit("abort_requested", "Abort requested.")
             if self.armed:
                 self._begin_return("aborted by the operator")
@@ -339,6 +386,47 @@ class MissionExecutor:
         self._set_state("resuming")
         self._set_mode("mission", "mission", self._resumed, lambda result: self._control_failed("resume", result, "paused"))
         return {"accepted": True, "detail": "resume accepted"}
+
+    def _begin_land(self) -> dict[str, Any]:
+        """Land at the current position and disarm (not a motor kill, not return to launch). Idempotent."""
+        if self.state == "landing":
+            return {"accepted": True, "detail": "already landing"}
+        if not self.armed:
+            return {"accepted": False, "detail": "the aircraft is already disarmed"}
+        self._before_land = self.state
+        self._land_result, self._land_started, self._abort_requested = None, self.clock(), True
+        self._expected_mode = "land"
+        self._set_state("landing", "landing at the current position")
+        before = {"state": self._before_land, "rel_alt_m": self.rel_alt_m, "landed_state": LANDED_STATE_NAMES.get(self.landed_state), "on_ground": self.on_ground(), "source": self.on_ground_source()}
+        self._emit("land_requested", f"Land here requested ({'on the ground' if self.on_ground() else 'in the air'}; {self.on_ground_source().replace('_', ' ')}).", before)
+        if self.on_ground():
+            self._land_result = "accepted"
+            self._disarm_normal("armed on the ground: normal disarm")
+        else:
+            self._pending = None
+            self._set_mode("land", "land", lambda: self._land_ok(), lambda result: self._land_refused(result))
+        return {"accepted": True, "detail": "land accepted"}
+
+    def _land_ok(self) -> None:
+        self._land_result = "accepted"
+        self._emit("land_accepted", "PX4 accepted Land: the aircraft descends at its current position.")
+
+    def _land_refused(self, result: str) -> None:
+        recent = "; ".join(self._statustexts[-3:])
+        reason = f"PX4 answered Land with {result}" + (f" (PX4 said: {recent})" if recent else "") + f"; values used: AUTO LAND at relative altitude {self.rel_alt_m if self.rel_alt_m is not None else 'unknown'} m, armed {self.armed}"
+        self._land_result = f"refused: {reason}"
+        self._emit("land_rejected", reason, {"result": result})
+        back = self._before_land or "executing"
+        self._abort_requested = back == "returning"
+        self._expected_mode = {"returning": "return", "paused": "hold"}.get(back, "mission")
+        self._set_state(back, f"Land was refused: {reason}")
+
+    def _disarm_normal(self, why: str) -> None:
+        """A NORMAL disarm (param2 = 0, never the force flag)."""
+        self._disarm_sent = True
+        self._emit("disarm_sent", f"Disarm sent ({why}).")
+        self._command(MAV_CMD_COMPONENT_ARM_DISARM, (0.0,), "disarm", lambda: self._emit("disarm_accepted", "PX4 accepted the disarm."),
+                      lambda result: (self._emit("disarm_rejected", f"PX4 answered disarm with {result}."), setattr(self, "_disarm_sent", False)))
 
     def _paused(self) -> None:
         self._set_state("paused")
@@ -416,6 +504,10 @@ class MissionExecutor:
             self._item_reached(int(message.seq))
         elif kind == "EXTENDED_SYS_STATE":
             self.landed_state = int(message.landed_state)
+            self._landed_state_at = now
+        elif kind == "GLOBAL_POSITION_INT":
+            self.rel_alt_m = round(int(message.relative_alt) / 1000.0, 2)
+            self.ground_speed_m_s = round(((int(message.vx) / 100.0) ** 2 + (int(message.vy) / 100.0) ** 2) ** 0.5, 2)
 
     def _armed_changed(self, armed: bool) -> None:
         if armed and self.state == "connecting":
@@ -442,6 +534,9 @@ class MissionExecutor:
             else:
                 self._set_state("aborted", "returned to launch and disarmed")
                 self._emit("aborted", "Aborted: the aircraft returned to launch, landed and disarmed.")
+        elif self.state == "landing":
+            self._set_state("aborted", "landed in place")
+            self._emit("aborted", "Aborted: landed in place. The aircraft landed at its current position and PX4 reports disarmed.", {"reason": "landed in place"})
         elif self.state == "failsafe":
             self._set_state("failed", self.reason)
             self._emit("failed", f"Landed and disarmed after a PX4 failsafe ({self.reason}).")
@@ -548,6 +643,8 @@ class MissionExecutor:
             self._before_link_lost = self.state
             self._set_state("link_lost", f"no PX4 heartbeat for {LINK_LOST_S:g} s")
             self._emit("link_lost", f"Link lost: no PX4 heartbeat for more than {LINK_LOST_S:g} s. The run is no longer reported as executing.")
+        if self._last_px4_heartbeat is not None and self.state not in ("link_lost", "connecting"):
+            self._request_landed_state(now)
         if self.state == "link_lost":
             if now - self.state_since > LINK_LOST_GIVE_UP_S:
                 self._before_link_lost = None
@@ -592,6 +689,11 @@ class MissionExecutor:
             if self.armed and not (main == PX4_MAIN_AUTO and sub in (PX4_SUB["return"], PX4_SUB["land"])):
                 self._rtl_last_sent = now  # abort must work: keep asking until PX4 is in Return or Land
                 self._command(MAV_CMD_NAV_RETURN_TO_LAUNCH, (), "return to launch", lambda: None, lambda result: None)
+        if self.state == "landing" and self._pending is None and self.armed and self._land_started is not None and now - (self._land_last_sent or self._land_started) >= 3.0:
+            main, sub = ((self.custom_mode or 0) >> 16) & 0xFF, ((self.custom_mode or 0) >> 24) & 0xFF
+            if not self.on_ground() and not (main == PX4_MAIN_AUTO and sub == PX4_SUB["land"]):
+                self._land_last_sent = now      # Land here must work: keep asking until PX4 is in Land mode
+                self._set_mode("land", "land", lambda: self._land_ok(), lambda result: None)
         self._disarm_when_landed(now)
 
     def _send_count(self, now: float) -> None:
@@ -610,6 +712,19 @@ class MissionExecutor:
 
     def _disarm_when_landed(self, now: float) -> None:
         """After the landing item, PX4 normally disarms itself (COM_DISARM_LAND). If it stays armed on the ground, disarm."""
+        if self.state == "landing":
+            if not self.armed or self._disarm_sent or self._pending is not None:
+                return
+            if self.on_ground_source() != "px4_landed_state" and not self._fallback_noted:
+                self._fallback_noted = True
+                self._emit("landed_state_missing", "PX4's landed state is not arriving; on the ground is judged from relative altitude and ground speed.")
+            if not self.on_ground():
+                self._landed_since = None
+            elif self._landed_since is None:
+                self._landed_since = now
+            elif now - self._landed_since >= DISARM_AFTER_TOUCHDOWN_S:
+                self._disarm_normal("PX4 reports on the ground but is still armed")
+            return
         if not self.armed or self._disarm_sent or self.state not in ("executing", "returning", "failsafe") or self._pending is not None:
             return
         on_ground = self.landed_state == MAV_LANDED_STATE_ON_GROUND
@@ -649,14 +764,14 @@ def _read_json(path: Path) -> Any:
         return None
 
 
-def _pid_alive(pid: Any) -> bool:
+def _pid_alive(pid: Any, word: str = "run") -> bool:
     if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
         return False
     try:
         cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().decode("utf-8", "ignore")
     except OSError:
         return False
-    return Path(__file__).name in cmdline and "run" in cmdline.split("\0")
+    return Path(__file__).name in cmdline and word in cmdline.split("\0")
 
 
 def read_events(directory: Path, after: int) -> list[dict[str, Any]]:
@@ -679,7 +794,9 @@ def read_status(instance: int, events_after: int = -1) -> dict[str, Any]:
     status = _read_json(directory / "status.json")
     pid = _read_json(directory / "daemon.pid")
     alive = _pid_alive(pid)
+    land = _read_json(directory / "land.json")
     return {"status": status if isinstance(status, dict) else None, "daemon_alive": alive, "events": read_events(directory, events_after),
+            "land": land if isinstance(land, dict) else None, "land_alive": _pid_alive(_read_json(directory / "land.pid"), "land-run"),
             "now": time.time(), "executor": "trinetra_mission_executor_v1"}
 
 
@@ -827,6 +944,214 @@ def emergency_return(instance: int, seconds: float = 6.0) -> dict[str, Any]:
     return {"emergency_return": True, "armed": armed, "ack": acked}
 
 
+def run_land(instance: int) -> int:
+    """Land here without a mission run: its own short-lived onboard connection. Heartbeat every second, PX4 Land mode, a NORMAL
+    disarm a few seconds after touchdown if PX4 has not disarmed itself, then exit. Status goes to land.json for the backend."""
+    directory = runtime_dir(instance)
+    _write_json(directory / "land.pid", os.getpid())
+    link = PymavlinkLink(instance, instance + 1)
+    state: dict[str, Any] = {"state": "connecting", "result": None, "reason": "", "armed": None, "rel_alt_m": None, "landed_state": None, "on_ground_source": None,
+                             "started_at": time.time(), "finished_at": None, "events": [], "px4_messages": []}
+    land_params = (float(MAV_MODE_FLAG_CUSTOM_MODE_ENABLED), float(PX4_MAIN_AUTO), float(PX4_SUB["land"]), 0.0, 0.0, 0.0, 0.0)
+
+    def note(kind: str, message: str) -> None:
+        state["events"].append({"t": time.time(), "type": kind, "message": message})
+        del state["events"][:-30]
+
+    def publish() -> None:
+        _write_json(directory / "land.json", {**state, "updated_at": time.time(), "pid": os.getpid()})
+
+    def refuse(reason: str) -> int:
+        state.update(state="failed", result=f"refused: {reason}", reason=reason, finished_at=time.time())
+        note("land_rejected", reason)
+        publish()
+        return 2
+
+    start = time.monotonic()
+    last_heartbeat = last_request = last_land = last_publish = 0.0
+    first_heartbeat_at, px4_seen = None, False
+    custom_mode, landed_at, rel_alt, speed = None, None, None, None
+    pending: Optional[dict[str, Any]] = None
+    landed_since: Optional[float] = None
+    disarm_sent = False
+    stop = {"requested": False}
+    signal.signal(signal.SIGTERM, lambda *_: stop.__setitem__("requested", True))
+    publish()
+    while time.monotonic() - start < LAND_GIVE_UP_S and not stop["requested"]:
+        now = time.monotonic()
+        if now - last_heartbeat >= HEARTBEAT_INTERVAL_S:
+            link.send_heartbeat()
+            first_heartbeat_at = first_heartbeat_at or now
+            last_heartbeat = now
+        if px4_seen and now - last_request >= (60.0 if landed_at is not None else 5.0):
+            last_request = now
+            link.send_command(MAV_CMD_SET_MESSAGE_INTERVAL, (float(MSG_EXTENDED_SYS_STATE), float(LANDED_STATE_INTERVAL_US), 0.0, 0.0, 0.0, 0.0, 0.0))
+        message = link.recv()
+        while message is not None:
+            kind = message.get_type()
+            if kind == "HEARTBEAT" and getattr(message, "autopilot", None) == MAV_AUTOPILOT_PX4:
+                px4_seen = True
+                armed = bool(message.base_mode & MAV_MODE_FLAG_SAFETY_ARMED)
+                custom_mode = int(message.custom_mode)
+                if state["armed"] is True and not armed:
+                    state.update(state="landed", result="landed", reason="landed in place and disarmed", finished_at=time.time(), armed=False)
+                    note("disarmed", "PX4 reports disarmed.")
+                    publish()
+                    return 0
+                state["armed"] = armed
+            elif kind == "EXTENDED_SYS_STATE":
+                state["landed_state"] = int(message.landed_state)
+                landed_at = now
+            elif kind == "GLOBAL_POSITION_INT":
+                rel_alt = int(message.relative_alt) / 1000.0
+                speed = (((int(message.vx) / 100.0) ** 2 + (int(message.vy) / 100.0) ** 2) ** 0.5)
+                state["rel_alt_m"] = round(rel_alt, 2)
+            elif kind == "STATUSTEXT":
+                text = str(getattr(message, "text", "")).strip("\x00 ")[:160]
+                if text:
+                    state["px4_messages"] = (state["px4_messages"] + [text])[-5:]
+            elif kind == "COMMAND_ACK" and pending is not None and int(message.command) == pending["command"] and int(message.result) != 5:
+                result = COMMAND_RESULT_NAMES.get(int(message.result), str(message.result))
+                if pending["label"] == "land":
+                    if result == "ACCEPTED":
+                        state["result"] = "accepted"
+                        note("land_accepted", "PX4 accepted Land.")
+                    else:
+                        said = f" (PX4 said: {'; '.join(state['px4_messages'][-3:])})" if state["px4_messages"] else ""
+                        return refuse(f"PX4 answered Land with MAV_RESULT_{result}{said}; values used: AUTO LAND at relative altitude {state['rel_alt_m']} m")
+                elif result != "ACCEPTED":
+                    disarm_sent = False
+                    note("disarm_rejected", f"PX4 answered disarm with MAV_RESULT_{result}.")
+                pending = None
+            message = link.recv()
+        fresh = landed_at is not None and now - landed_at <= LANDED_STATE_STALE_S
+        if fresh:
+            on_ground: Optional[bool] = state["landed_state"] == MAV_LANDED_STATE_ON_GROUND
+        else:
+            on_ground = None if rel_alt is None else (abs(rel_alt) < ON_GROUND_ALT_M and (speed is None or speed < ON_GROUND_SPEED_M_S))
+        state["on_ground_source"] = "px4_landed_state" if fresh else "altitude_speed_fallback"
+        if state["state"] == "connecting" and px4_seen and first_heartbeat_at is not None and now - first_heartbeat_at >= PRE_COMMAND_HEARTBEAT_S:
+            if state["armed"] is False:
+                state.update(state="failed", result="already_disarmed", reason="The aircraft is already disarmed.", finished_at=time.time())
+                publish()
+                return 0
+            state["state"] = "landing"
+            where = "armed on the ground, normal disarm" if on_ground else "PX4 Land mode at the current position"
+            note("land_requested", f"Land here: {where} (relative altitude {state['rel_alt_m']} m, {state['on_ground_source'].replace('_', ' ')}).")
+            if on_ground:
+                state["result"] = "accepted"
+                pending = {"command": MAV_CMD_COMPONENT_ARM_DISARM, "label": "disarm", "sent": now, "tries": 1}
+                link.send_command(MAV_CMD_COMPONENT_ARM_DISARM, (0.0,) * 7)
+                disarm_sent = True
+            else:
+                pending = {"command": MAV_CMD_DO_SET_MODE, "label": "land", "sent": now, "tries": 1}
+                link.send_command(MAV_CMD_DO_SET_MODE, land_params)
+                last_land = now
+        elif state["state"] == "landing" and state["armed"]:
+            if pending is not None and now - pending["sent"] >= COMMAND_RETRY_S:
+                if pending["tries"] >= COMMAND_RETRIES:
+                    if pending["label"] == "land":
+                        return refuse(f"PX4 did not answer the Land command; values used: AUTO LAND at relative altitude {state['rel_alt_m']} m")
+                    pending, disarm_sent = None, False
+                else:
+                    pending["tries"] += 1
+                    pending["sent"] = now
+                    link.send_command(pending["command"], (0.0,) * 7 if pending["label"] == "disarm" else land_params)
+            main, sub = ((custom_mode or 0) >> 16) & 0xFF, ((custom_mode or 0) >> 24) & 0xFF
+            if pending is None and not on_ground and not (main == PX4_MAIN_AUTO and sub == PX4_SUB["land"]) and now - last_land >= 3.0:
+                last_land = now
+                pending = {"command": MAV_CMD_DO_SET_MODE, "label": "land", "sent": now, "tries": 1}
+                link.send_command(MAV_CMD_DO_SET_MODE, land_params)
+            if on_ground and not disarm_sent and pending is None:
+                landed_since = landed_since or now
+                if now - landed_since >= DISARM_AFTER_TOUCHDOWN_S:
+                    disarm_sent = True
+                    note("disarm_sent", "PX4 reports on the ground but is still armed: normal disarm sent.")
+                    pending = {"command": MAV_CMD_COMPONENT_ARM_DISARM, "label": "disarm", "sent": now, "tries": 1}
+                    link.send_command(MAV_CMD_COMPONENT_ARM_DISARM, (0.0,) * 7)
+            elif not on_ground:
+                landed_since = None
+        if now - last_publish >= 0.5:
+            last_publish = now
+            publish()
+        time.sleep(0.02)
+    state.update(state="failed", result="timeout", reason="stopped" if stop["requested"] else "Landing was not finished within the time limit.", finished_at=time.time())
+    publish()
+    return 1
+
+
+def cleanup_processes(proc_root: Path = Path("/proc")) -> dict[str, Any]:
+    """Stop every mission-executor and land process of this checkout (they hold the onboard UDP ports) and report what was stopped."""
+    killed: list[dict[str, Any]] = []
+    me = os.getpid()
+    for entry in proc_root.iterdir():
+        if not entry.name.isdigit() or int(entry.name) == me:
+            continue
+        try:
+            argv = (entry / "cmdline").read_bytes().decode("utf-8", "ignore").split("\0")
+        except OSError:
+            continue
+        if not any(part and Path(part).name == Path(__file__).name for part in argv[:4]) or not set(argv) & {"run", "land-run"}:
+            continue
+        pid = int(entry.name)
+        try:
+            os.kill(pid, getattr(signal, "SIGKILL", 9))
+            killed.append({"kind": "land" if "land-run" in argv else "executor", "pid": pid, "instance": argv[argv.index("--instance") + 1] if "--instance" in argv else None})
+        except OSError:
+            pass
+    for instance in range(FLEET_CAPACITY):
+        directory = runtime_dir(instance)
+        for name in ("daemon.pid", "land.pid"):
+            try:
+                (directory / name).unlink()
+            except OSError:
+                pass
+    return {"cleanup": True, "killed": killed}
+
+
+def cli_land(instance: int, px4_root: Path, execution_id: Optional[str]) -> dict[str, Any]:
+    refusal = verify_managed_instance(instance, px4_root)
+    if refusal:
+        return refusal
+    try:
+        import pymavlink  # noqa: F401
+    except ImportError:
+        return {"failure_code": "pymavlink_missing", "failure": "pymavlink is not installed in WSL (python3 -m pip install pymavlink)."}
+    directory = runtime_dir(instance)
+    if _pid_alive(_read_json(directory / "daemon.pid")):
+        if execution_id is None:
+            previous = _read_json(directory / "status.json") or {}
+            return {"failure_code": "execution_running", "failure": f"An execution ({previous.get('execution_id', 'unknown')}) is running on instance {instance}; land through that execution."}
+        return cli_control(instance, execution_id, "land")
+    if _pid_alive(_read_json(directory / "land.pid"), "land-run"):
+        return {"accepted": True, "already_landing": True, "detail": "a landing is already in progress", **read_status(instance)}
+    try:
+        (directory / "land.json").unlink()
+    except OSError:
+        pass
+    with (directory / "land.log").open("ab") as log:
+        process = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "land-run", "--instance", str(instance)],
+                                   stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+    deadline = time.monotonic() + 9.0
+    while time.monotonic() < deadline:
+        land = _read_json(directory / "land.json")
+        if process.poll() is not None and not (isinstance(land, dict) and land.get("finished_at")):
+            tail = (directory / "land.log").read_text(encoding="utf-8", errors="ignore").strip().splitlines()[-1:]
+            return {"failure_code": "land_start_failed", "failure": f"The landing process exited at once: {tail[0][:200] if tail else process.returncode}"}
+        if isinstance(land, dict) and (land.get("result") or land.get("state") in ("failed", "landed")):
+            break
+        time.sleep(0.15)
+    land = _read_json(directory / "land.json") or {}
+    result = str(land.get("result") or "")
+    if result.startswith("refused"):
+        return {"accepted": False, "refused": True, "reason": land.get("reason"), "px4_messages": land.get("px4_messages", []), **read_status(instance)}
+    if result == "already_disarmed":
+        return {"accepted": False, "already_disarmed": True, "reason": land.get("reason"), **read_status(instance)}
+    if not result:
+        return {"failure_code": "no_heartbeat", "failure": "PX4 did not answer on the onboard link, so nothing was sent.", **read_status(instance)}
+    return {"accepted": True, "detail": "landing started", **read_status(instance)}
+
+
 # --- CLI (the only entry points the Windows backend uses) -----------------------------------------------------------------
 
 def disarm_once(instance: int, seconds: float = 9.0) -> dict[str, Any]:
@@ -929,6 +1254,8 @@ def cli_control(instance: int, execution_id: str, command: str) -> dict[str, Any
     status = _read_json(directory / "status.json")
     known = isinstance(status, dict) and status.get("execution_id") == execution_id
     if not _pid_alive(_read_json(directory / "daemon.pid")):
+        if command == "land":
+            return cli_land(instance, Path(os.environ.get("TRINETRA_PX4_ROOT", "/home/apt8055/uav-sim/PX4-Autopilot")), None)
         if command == "abort":
             # Abort must work even without a live executor: go straight to the managed instance.
             try:
@@ -946,7 +1273,7 @@ def cli_control(instance: int, execution_id: str, command: str) -> dict[str, Any
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("start", "status", "pause", "resume", "abort", "disarm", "run"))
+    parser.add_argument("action", choices=("start", "status", "pause", "resume", "abort", "land", "disarm", "run", "land-run", "cleanup"))
     parser.add_argument("--instance", type=int, default=0, choices=range(FLEET_CAPACITY))
     parser.add_argument("--execution-id")
     parser.add_argument("--events-after", type=int, default=-1)
@@ -959,7 +1286,13 @@ def main() -> int:
             if args.execution_id is None:
                 raise ValueError("run requires --execution-id")
             return run_daemon(args.instance, args.execution_id)
-        if args.action == "start":
+        if args.action == "land-run":
+            return run_land(args.instance)
+        if args.action == "cleanup":
+            result = cleanup_processes()
+        elif args.action == "land":
+            result = cli_land(args.instance, args.px4_root, args.execution_id)
+        elif args.action == "start":
             result = cli_start(args.px4_root, sys.stdin.read(2_000_000))
         elif args.action == "status":
             result = read_status(args.instance, args.events_after)

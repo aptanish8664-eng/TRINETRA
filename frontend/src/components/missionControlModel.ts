@@ -289,31 +289,39 @@ export function explainSitlStartup(status: string, detail?: string): string {
   return `Fleet startup degraded: when the backend started, its automatic start of one PX4/Gazebo aircraft did not end with a fully verified aircraft (process, telemetry and Gazebo pose).${reason} This describes backend start-up only, not the current state: if "Verified aircraft" shows the aircraft, nothing is wrong now. Otherwise use Activate and verify in Scenario Lab.`
 }
 
-/** Same sentence the backend refuses with (backend/app/mission_execution/ground.py). */
-export const IN_THE_AIR = 'In the air: abort (return to launch) first; it disarms itself after landing.'
-const FLYING_EXECUTION_STATES = ['executing', 'pausing', 'paused', 'resuming', 'returning', 'failsafe']
-export interface DisarmView { allowed: boolean; reason: string; armed: boolean; onGround: boolean; armedOnGround: boolean }
+const ON_GROUND_ALT_M = 1.5
+const ON_GROUND_SPEED_M_S = 0.7
+const LANDED_STATE_FRESH_S = 5
+export interface LandView {
+  allowed: boolean; reason: string; armed: boolean; armedOnGround: boolean; landing: boolean
+  /** on the ground: PX4's landed state when it is fresh, else altitude and speed (source says which); null when unknown. */
+  onGround: boolean | null; source: 'px4_landed_state' | 'altitude_speed_fallback' | null; landedState: string | null; altitudeM: number | null
+  phase: 'unknown' | 'disarmed' | 'ground' | 'air' | 'landing'
+}
 
 /**
- * Whether a normal disarm may be offered, from live telemetry only: PX4's armed flag, and "on the ground" = relative altitude under
- * 1.5 m and ground speed under 0.7 m/s (the same rule as the backend and the start pre-check; the landed state is not in the
- * telemetry feed). The backend repeats every check, and PX4 refuses an unsafe normal disarm on its own.
+ * Land here (lands at the current position, then disarms; not a motor kill, not return to launch). Enabled whenever the aircraft is connected and armed,
+ * in the air or on the ground, with or without a run; "Already disarmed" otherwise. From live telemetry only. "On the ground" is PX4's landed state
+ * (EXTENDED_SYS_STATE) when it is fresh; relative altitude is unreliable far from home, so altitude and speed are only the fallback. The backend repeats the checks.
  */
-export function disarmState(row: AircraftRow | null, execution: { active: boolean; state: string; aircraft_id: string } | null): DisarmView {
+export function landState(row: AircraftRow | null, execution: { active: boolean; state: string; aircraft_id: string } | null): LandView {
   const vehicle = row?.vehicle ?? null
   const altitude = vehicle?.position?.relative_altitude_m
   const speed = vehicle?.velocity?.ground_speed_m_s
   const connected = vehicle?.status === 'connected'
   const armed = connected && vehicle?.armed === true
-  const onGround = connected && typeof altitude === 'number' && Math.abs(altitude) < 1.5 && (typeof speed !== 'number' || speed < 0.7)
-  const view = (allowed: boolean, reason: string): DisarmView => ({ allowed, reason, armed, onGround, armedOnGround: armed && onGround })
-  if (!row || !vehicle || !connected) return view(false, 'No telemetry from the aircraft, so its armed state is unknown.')
-  if (vehicle.armed === false) return view(false, 'The aircraft is already disarmed.')
-  if (vehicle.armed !== true) return view(false, 'PX4 has not reported whether the aircraft is armed.')
-  if (execution?.active && execution.aircraft_id === row.id) {
-    return view(false, FLYING_EXECUTION_STATES.includes(execution.state) ? IN_THE_AIR : `A run is ${execution.state} on this aircraft. Wait for it, or abort it first.`)
-  }
-  if (typeof altitude !== 'number') return view(false, "The aircraft's altitude is unknown, so it cannot be confirmed on the ground.")
-  if (!onGround) return view(false, IN_THE_AIR)
-  return view(true, '')
+  const extended = vehicle?.landed_state
+  const fresh = Boolean(extended && extended.value !== 0 && typeof extended.age_s === 'number' && extended.age_s <= LANDED_STATE_FRESH_S)
+  const onGround: boolean | null = fresh ? extended!.value === 1
+    : typeof altitude === 'number' ? Math.abs(altitude) < ON_GROUND_ALT_M && (typeof speed !== 'number' || speed < ON_GROUND_SPEED_M_S) : null
+  const source = fresh ? 'px4_landed_state' as const : typeof altitude === 'number' ? 'altitude_speed_fallback' as const : null
+  const mode = vehicle?.heartbeat?.flight_mode ?? ''
+  const landing = armed && ((Boolean(execution?.active) && execution?.aircraft_id === row?.id && execution?.state === 'landing') || (fresh && extended!.value === 4) || /land/i.test(mode))
+  const view = (allowed: boolean, reason: string, phase: LandView['phase']): LandView => ({
+    allowed, reason, armed, armedOnGround: armed && onGround === true, landing, onGround, source, landedState: fresh ? extended!.name : null, altitudeM: typeof altitude === 'number' ? altitude : null, phase })
+  if (!row || !vehicle || !connected) return view(false, 'No telemetry from the aircraft, so its armed state is unknown.', 'unknown')
+  if (vehicle.armed === false) return view(false, 'Already disarmed', 'disarmed')
+  if (vehicle.armed !== true) return view(false, 'PX4 has not reported whether the aircraft is armed.', 'unknown')
+  if (landing) return view(false, 'The aircraft is already landing.', 'landing')
+  return view(true, '', onGround ? 'ground' : 'air')
 }

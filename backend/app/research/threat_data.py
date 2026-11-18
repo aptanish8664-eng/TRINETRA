@@ -79,7 +79,7 @@ def _along(path: np.ndarray, speed: float, total_s: float) -> np.ndarray:
 
 def simulate_aircraft(rng: np.random.Generator, aircraft_id: str, role: str, path_xy: np.ndarray, attacks: Sequence[AttackConfig],
                       seed: int, total_s: float, offset: tuple[float, float] = (0.0, 0.0), speed: Optional[float] = None) -> SimAircraft:
-    speed = float(rng.uniform(3.0, 10.0)) if speed is None else float(speed)
+    speed = float(rng.uniform(3.0, 17.0)) if speed is None else float(speed)      # 3-17 m/s (it was 3-10: 12 and 16 m/s flights were outside training)
     xy = _along(path_xy, speed, total_s) + np.array(offset)
     n = len(xy)
     gust = float(rng.uniform(0.0, 1.2))
@@ -147,6 +147,9 @@ FEATURE_COLUMNS = FEATURE_COLUMNS_V1 + [
     "res_pos_w60", "res10_z", "res30_z", "res60_z", "resvel_z", "innov_z", "res30_rate10", "res60_rate10", "res10_accel", "res30_accel",
     "noise_std10", "noise_ratio", "var_ratio", "velpos_inconsist", "velpos_z", "gps_travel_3s", "imu_travel_3s", "freeze_ratio",
     "frozen_run", "cross_res30", "cross_z10", "cusum_innov",
+    # maneuver context (Job 2): how hard the aircraft is turning or accelerating over the last 2 s, from the GPS velocity alone. Real flights turn and brake
+    # smoothly while the estimator velocity lags the GPS; the model needs to know when that is happening so it is not read as spoofing.
+    "turn_rate_deg_s", "accel_m_s2",
 ]
 
 
@@ -298,8 +301,16 @@ def compute_features(t: np.ndarray, gps_position: np.ndarray, gps_velocity: np.n
             "res90_z": _ratio(res90, _reference_scale(t, res90, 1.2)), "res120_z": _ratio(res120, _reference_scale(t, res120, 1.5)),
             "res90_rate10": _lagged(res90, lag10) / 10.0, "res120_rate10": _lagged(res120, lag10) / 10.0,
         }
+    course = np.unwrap(np.arctan2(gv[:, 0], gv[:, 1]) * np.where(np.linalg.norm(gv, axis=1) > 0.5, 1.0, np.nan)) if n else np.zeros(0)
+    course = pd.Series(course).ffill().fillna(0.0).to_numpy()
+    maneuver_lag = max(1, int(round(2.0 / dt)))
+    turn_rate = np.zeros(n); accel = np.zeros(n)
+    if n > maneuver_lag:
+        turn_rate[maneuver_lag:] = np.degrees(np.abs(course[maneuver_lag:] - course[:-maneuver_lag])) / (maneuver_lag * dt)
+        accel[maneuver_lag:] = np.linalg.norm(gv[maneuver_lag:] - gv[:-maneuver_lag], axis=1) / (maneuver_lag * dt)
     frame = pd.DataFrame({
         **long_columns,
+        "turn_rate_deg_s": turn_rate, "accel_m_s2": accel,
         "res_pos_w10": res10, "res_pos_w30": res30, "res_vel": res_vel, "heading_res_deg": heading,
         "innov_ratio": innov_ratio, "res_rate": rate,
         "res10_mean": series.rolling(w10, min_periods=1).mean().to_numpy(),

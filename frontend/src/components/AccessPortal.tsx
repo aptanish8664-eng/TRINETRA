@@ -1,10 +1,15 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
+import { LoopingVideo } from '../visuals/VideoBackdrop'
+import { VisualsControls } from '../visuals/VisualsControls'
+import { useVisuals } from '../visuals/useVisuals'
+import '../visuals/login-scene.css'
 import { motion } from 'framer-motion'
 import gsap from 'gsap'
 import { Activity, ArrowLeft, ArrowRight, Download, Eye, EyeOff, Fingerprint, KeyRound, LockKeyhole, Search, ShieldAlert, ShieldCheck, UserRound, Wifi } from 'lucide-react'
 import { BrandMark } from './BrandMark'
 import type { AccountStatus, ApplicationRole, AuditLogEntry, ManagedUser, RegistrationApplication, RegistrationStatus, ScenarioApprovalRequest, UserSession } from '../services/auth'
 import { api } from '../services/api'
+import { SavedScenarios } from './SavedScenarios'
 import './access.css'
 
 export type AccessPage = 'login' | 'register' | 'general'
@@ -20,6 +25,11 @@ type AccessPortalProps = {
   apiReady: boolean | null
   streamConnected: boolean
   hasActiveRun: boolean
+  /** General: open a scenario (and a version) in Scenario Lab, or a quick-made one in Quick Mission. */
+  onOpenScenario?: (scenarioId: string, versionNumber?: number) => void
+  onOpenQuickMission?: (scenarioId: string) => void
+  /** The server ended the signed-in session (expiry or revocation): the sign-in page says so. */
+  sessionEnded?: boolean
 }
 
 function EyeStages({ active = 0, failed = false }: { active?: number; failed?: boolean }) {
@@ -54,7 +64,8 @@ function SystemTerminal({ apiReady, streamConnected, hasActiveRun }: Pick<Access
   </section>
 }
 
-function LoginForm({ onPageChange, onAuthenticated }: Pick<AccessPortalProps, 'onPageChange' | 'onAuthenticated'>) {
+function LoginForm({ onPageChange, onAuthenticated, onOutcome }: Pick<AccessPortalProps, 'onPageChange' | 'onAuthenticated'> & { onOutcome?: (outcome: 'success' | 'failed') => void }) {
+  const { animate } = useVisuals()
   const [identity, setIdentity] = useState({ username: '', password: '' })
   const [passwordVisible, setPasswordVisible] = useState(false)
   const [submitted, setSubmitted] = useState(false)
@@ -77,8 +88,11 @@ function LoginForm({ onPageChange, onAuthenticated }: Pick<AccessPortalProps, 'o
     try {
       const session = await api.login(identity)
       setIdentity({ username: '', password: '' })
+      onOutcome?.('success')
+      if (animate) await new Promise(resolve => window.setTimeout(resolve, 650))      // the drone flies up and away before the page changes
       onAuthenticated(session)
     } catch (cause) {
+      onOutcome?.('failed')
       setMessage(cause instanceof Error ? cause.message : 'Sign-in failed. Try again.')
       setRefusedFor(JSON.stringify(identity))
     } finally {
@@ -93,7 +107,7 @@ function LoginForm({ onPageChange, onAuthenticated }: Pick<AccessPortalProps, 'o
       <label className="access-field"><span>USERNAME</span><span className={`access-input ${invalid && !identity.username.trim() ? 'invalid' : ''}`}><UserRound size={15}/><input autoComplete="username" value={identity.username} onChange={event => setIdentity({ ...identity, username: event.target.value })} aria-label="Username" placeholder="Enter your username"/></span></label>
       <label className="access-field"><span>PASSWORD</span><span className={`access-input ${invalid && !identity.password ? 'invalid' : ''}`}><LockKeyhole size={15}/><input type={passwordVisible ? 'text' : 'password'} autoComplete="current-password" value={identity.password} onChange={event => setIdentity({ ...identity, password: event.target.value })} aria-label="Password" placeholder="Enter password"/><button className="visibility-toggle" type="button" onClick={() => setPasswordVisible(value => !value)} aria-label={passwordVisible ? 'Hide password' : 'Show password'}>{passwordVisible ? <EyeOff size={15}/> : <Eye size={15}/>}</button></span></label>
       <button className="access-submit" type="submit" disabled={busy}>{busy ? 'SIGNING IN…' : <><KeyRound size={15}/> SIGN IN <ArrowRight size={15}/></>}</button>
-      <div className="access-form-message" role="status" aria-live="polite">{message || 'The backend verifies credentials and returns a revocable session.'}</div>
+      <div className={`access-form-message ${refused || (message && submitted) ? 'is-error' : ''}`} role="status" aria-live="polite">{message || 'The backend verifies credentials and returns a revocable session.'}</div>
     </form>
     <div className="access-form-links"><span>Need an account?</span><button type="button" onClick={() => onPageChange('register')}>REGISTER <ArrowRight size={13}/></button></div>
   </div>
@@ -207,7 +221,10 @@ function RegistrationForm({ onPageChange }: Pick<AccessPortalProps, 'onPageChang
   </div>
 }
 
-function GeneralConsole({ session, onPageChange }: { session: UserSession; onPageChange: (page: AccessPage) => void }) {
+type AdminTab = 'users' | 'reviews' | 'saved' | 'audit'
+
+function GeneralConsole({ session, onPageChange, onOpenScenario, onOpenQuick }: { session: UserSession; onPageChange: (page: AccessPage) => void; onOpenScenario?: (id: string, version?: number) => void; onOpenQuick?: (id: string) => void }) {
+  const [adminTab, setAdminTab] = useState<AdminTab>('users')
   const [users, setUsers] = useState<ManagedUser[]>([])
   const [approvalRequests, setApprovalRequests] = useState<ScenarioApprovalRequest[]>([])
   const [audit, setAudit] = useState<AuditLogEntry[]>([])
@@ -258,9 +275,28 @@ function GeneralConsole({ session, onPageChange }: { session: UserSession; onPag
 
   useEffect(() => { void refresh() }, [statusFilter, offset])
 
-  const decideRegistration = async (user: ManagedUser, decision: 'approve' | 'reject' | 'hold' | 'resume') => {
-    const rejection = decision === 'reject' ? window.prompt('Optional reason for rejecting this registration:') : undefined
-    if (decision === 'reject' && rejection === null) return
+  // Rejecting, changing a role and (de)activating are confirmed in the page, never with a native browser dialog.
+  const [userAction, setUserAction] = useState<{ id: string; kind: 'reject' | 'role' | 'activate' | 'deactivate'; role?: ApplicationRole; note: string } | null>(null)
+  const userActionPanel = (user: ManagedUser) => {
+    if (userAction?.id !== user.id) return null
+    const text = userAction.kind === 'reject' ? `Reject the registration of ${user.username}?`
+      : userAction.kind === 'role' ? `Change ${user.username}'s role to ${userAction.role}? Their active sessions will be revoked.`
+        : `${userAction.kind === 'deactivate' ? 'Deactivate' : 'Activate'} ${user.username}?`
+    const confirm = () => {
+      const action = userAction
+      setUserAction(null)
+      if (action.kind === 'reject') void decideRegistration(user, 'reject', action.note.trim())
+      else if (action.kind === 'role') void saveRole(user, action.role)
+      else void toggleActive(user)
+    }
+    return <div className="scenario-review-form" role="group" aria-label="Confirm account change">
+      <b>{text}</b>
+      {userAction.kind === 'reject' && <label>OPTIONAL REASON<textarea value={userAction.note} maxLength={500} rows={2} onChange={event => setUserAction({ ...userAction, note: event.target.value })}/></label>}
+      <div className="admin-action-buttons"><button className="button-primary" disabled={busy} onClick={confirm}>CONFIRM</button>
+        <button className="button-quiet" disabled={busy} onClick={() => setUserAction(null)}>CANCEL</button></div></div>
+  }
+
+  const decideRegistration = async (user: ManagedUser, decision: 'approve' | 'reject' | 'hold' | 'resume', rejection?: string) => {
     setBusy(true)
     setError('')
     try {
@@ -268,7 +304,7 @@ function GeneralConsole({ session, onPageChange }: { session: UserSession; onPag
         user.id,
         decision,
         decision === 'approve' ? selectedRoles[user.id] ?? user.requested_role ?? 'OPERATOR' : undefined,
-        rejection ?? undefined,
+        rejection || undefined,
       )
       await refresh()
     } catch (cause) {
@@ -277,10 +313,9 @@ function GeneralConsole({ session, onPageChange }: { session: UserSession; onPag
     }
   }
 
-  const saveRole = async (user: ManagedUser) => {
-    const role = selectedRoles[user.id] ?? user.role
+  const saveRole = async (user: ManagedUser, chosen?: ApplicationRole) => {
+    const role = chosen ?? selectedRoles[user.id] ?? user.role
     if (!role || role === user.role) return
-    if (!window.confirm(`Change ${user.username}'s role to ${role}? Their active sessions will be revoked.`)) return
     setBusy(true)
     setError('')
     try {
@@ -294,8 +329,6 @@ function GeneralConsole({ session, onPageChange }: { session: UserSession; onPag
 
   const toggleActive = async (user: ManagedUser) => {
     const active = user.account_status === 'APPROVED'
-    const action = active ? 'deactivate' : 'activate'
-    if (!window.confirm(`${action === 'deactivate' ? 'Deactivate' : 'Activate'} ${user.username}?`)) return
     setBusy(true)
     setError('')
     try {
@@ -355,26 +388,32 @@ function GeneralConsole({ session, onPageChange }: { session: UserSession; onPag
     <div className="access-form-heading"><span className="eyebrow">GENERAL CONTROL CENTER</span><h1>Review.<br/><em>Protect.</em></h1><p>Manage registrations, review exact scenario versions, and inspect persistent audit events.</p></div>
     <div className="admin-console-actions"><span>{session.user.full_name} · {session.user.username} · GENERAL</span><button className="button-secondary" disabled={busy} onClick={() => void refresh()}>{busy ? 'REFRESHING…' : 'REFRESH DATA'}</button></div>
     {error && <div className="admin-inline-error" role="alert">{error}</div>}
+    <nav className="admin-tabs" aria-label="General control center sections">
+      {([['users', 'Users and requests'], ['reviews', 'Scenario reviews'], ['saved', 'Saved scenarios'], ['audit', 'Audit log']] as [AdminTab, string][]).map(([key, label]) =>
+        <button key={key} type="button" className={adminTab === key ? 'active' : ''} aria-current={adminTab === key ? 'page' : undefined} onClick={() => setAdminTab(key)}>{label}</button>)}
+    </nav>
+    {adminTab === 'saved' && <SavedScenarios onOpen={(id, version) => onOpenScenario?.(id, version)} onOpenQuick={id => onOpenQuick?.(id)}/>}
 
-    <section className="admin-queue panel">
+    {adminTab === 'users' && <section className="admin-queue panel">
       <div className="admin-queue-head"><div><span className="eyebrow">USER MANAGEMENT</span><h2>Registered users and requests</h2></div><select aria-label="Filter users by status" value={statusFilter} onChange={event => { setOffset(0); setStatusFilter(event.target.value as AccountStatus | 'ALL') }}><option value="ALL">ALL STATUSES</option><option value="PENDING">PENDING</option><option value="ON_HOLD">ON HOLD</option><option value="APPROVED">APPROVED</option><option value="REJECTED">REJECTED</option><option value="DEACTIVATED">DEACTIVATED</option></select></div>
       {!users.length ? <div className="admin-empty"><ShieldCheck size={22}/><b>No users in this view</b><span>Change the status filter or refresh the list.</span></div> : <div className="admin-accounts">{users.map(user => <article className="admin-account-row" key={user.id}>
         <div className="admin-account-identity"><b>{user.full_name}</b><span>{user.username}{user.email ? ` · ${user.email}` : ''}</span><small>{user.account_status}{user.role ? ` · ${user.role}` : ''}</small>{user.registration_note && <small>{user.registration_note}</small>}</div>
         {user.account_status === 'PENDING' && <div className="admin-action-buttons">
           <label>ASSIGN ROLE<select value={selectedRoles[user.id] ?? user.requested_role ?? 'OPERATOR'} disabled={busy} onChange={event => setSelectedRoles(previous => ({ ...previous, [user.id]: event.target.value as ApplicationRole }))}><option value="GENERAL">GENERAL</option><option value="OPERATOR">OPERATOR</option></select></label>
-          <button className="button-secondary" disabled={busy} onClick={() => void decideRegistration(user, 'approve')}>APPROVE</button><button className="button-secondary" disabled={busy} onClick={() => void decideRegistration(user, 'hold')}>HOLD</button><button className="button-secondary" disabled={busy} onClick={() => void decideRegistration(user, 'reject')}>REJECT</button>
+          <button className="button-secondary" disabled={busy} onClick={() => void decideRegistration(user, 'approve')}>APPROVE</button><button className="button-secondary" disabled={busy} onClick={() => void decideRegistration(user, 'hold')}>HOLD</button><button className="button-secondary" disabled={busy} onClick={() => setUserAction({ id: user.id, kind: 'reject', note: '' })}>REJECT</button>
         </div>}
         {user.account_status === 'ON_HOLD' && <button className="button-secondary" disabled={busy} onClick={() => void decideRegistration(user, 'resume')}>RETURN TO PENDING</button>}
         {user.account_status === 'APPROVED' && <div className="admin-action-buttons">
           <label>ROLE<select value={selectedRoles[user.id] ?? user.role ?? 'OPERATOR'} disabled={busy || user.id === session.user.id} onChange={event => setSelectedRoles(previous => ({ ...previous, [user.id]: event.target.value as ApplicationRole }))}><option value="GENERAL">GENERAL</option><option value="OPERATOR">OPERATOR</option></select></label>
-          {user.id !== session.user.id && <><button className="button-secondary" disabled={busy} onClick={() => void saveRole(user)}>SAVE ROLE</button><button className="button-secondary" disabled={busy} onClick={() => void toggleActive(user)}>DEACTIVATE</button></>}
+          {user.id !== session.user.id && <><button className="button-secondary" disabled={busy} onClick={() => { const role = selectedRoles[user.id] ?? user.role; if (role && role !== user.role) setUserAction({ id: user.id, kind: 'role', role, note: '' }) }}>SAVE ROLE</button><button className="button-secondary" disabled={busy} onClick={() => setUserAction({ id: user.id, kind: 'deactivate', note: '' })}>DEACTIVATE</button></>}
         </div>}
-        {user.account_status === 'DEACTIVATED' && <button className="button-secondary" disabled={busy || user.id === session.user.id} onClick={() => void toggleActive(user)}>ACTIVATE</button>}
+        {user.account_status === 'DEACTIVATED' && <button className="button-secondary" disabled={busy || user.id === session.user.id} onClick={() => setUserAction({ id: user.id, kind: 'activate', note: '' })}>ACTIVATE</button>}
+        {userActionPanel(user)}
         <time>{new Date(user.created_at).toLocaleString()}</time>
       </article>)}</div>}
-    </section>
+    </section>}
 
-    <section className="admin-queue panel">
+    {adminTab === 'reviews' && <section className="admin-queue panel">
       <div className="admin-queue-head"><div><span className="eyebrow">SCENARIO APPROVAL REQUESTS</span><h2>Immutable version review</h2></div><span className="terminal-state online">{approvalRequests.length} PENDING</span></div>
       {!approvalRequests.length ? <div className="admin-empty"><ShieldCheck size={22}/><b>No scenario versions await review</b><span>Operator submissions will appear here with their exact configuration hash.</span></div> : approvalRequests.map(item => <article className="admin-request-card" key={item.id}>
         <div className="admin-request-heading"><div><b>{item.scenario_title} · v{item.version_number}</b><span>{item.owner_name} · {item.config_hash.slice(0, 16)}</span></div><time>{new Date(item.submitted_at).toLocaleString()}</time></div>
@@ -400,9 +439,9 @@ function GeneralConsole({ session, onPageChange }: { session: UserSession; onPag
           {!reviewDraft.note.trim() && <small>A note is required.</small>}
         </div> : <div className="admin-action-buttons"><button className="button-secondary" disabled={busy || !item.latest_version} onClick={() => startReview(item, 'approve')}>APPROVE VERSION</button><button className="button-secondary" disabled={busy || !item.latest_version} onClick={() => startReview(item, 'request_changes')}>REQUEST CHANGES</button><button className="button-secondary" disabled={busy || !item.latest_version} onClick={() => startReview(item, 'reject')}>REJECT</button></div>}
       </article>)}
-    </section>
+    </section>}
 
-    <section className="admin-audit panel">
+    {adminTab === 'audit' && <section className="admin-audit panel">
       <div className="admin-queue-head"><div><span className="eyebrow">AUDIT LOGS</span><h2>Persistent security and operations events</h2></div><button className="button-secondary" disabled={busy} onClick={() => void exportAudit()}><Download size={14}/> EXPORT CSV</button></div>
       <div className="audit-filters">
         <label><Search size={14}/><input aria-label="Search audit events" value={search} onChange={event => setSearch(event.target.value)} placeholder="Search text"/></label>
@@ -415,11 +454,11 @@ function GeneralConsole({ session, onPageChange }: { session: UserSession; onPag
       </div>
       {!audit.length ? <p>No audit events match these filters.</p> : <div className="admin-audit-list">{audit.map(entry => <article key={entry.id}><time dateTime={entry.created_at}>{new Date(entry.created_at).toLocaleString()}</time><b>{entry.event_type.replace(/_/g, ' ').toUpperCase()}</b><span>{entry.actor_name ?? 'ANONYMOUS'} · {entry.actor_role ?? 'ROLE NOT RECORDED'} · {entry.target_type ?? '—'} {entry.target_id ?? ''}</span><small>{entry.reason} · {entry.outcome}</small></article>)}</div>}
       <div className="audit-pagination"><span>{totalAudit ? `${offset + 1}–${Math.min(offset + pageSize, totalAudit)} of ${totalAudit}` : '0 events'}</span><div><button className="button-secondary" disabled={busy || offset === 0} onClick={() => setOffset(Math.max(0, offset - pageSize))}>PREVIOUS</button><button className="button-secondary" disabled={busy || offset + pageSize >= totalAudit} onClick={() => setOffset(offset + pageSize)}>NEXT</button></div></div>
-    </section>
+    </section>}
   </section>
 }
 
-export function AccessPortal({ page, onPageChange, onExit, onAuthenticated, userSession, apiReady, streamConnected, hasActiveRun }: AccessPortalProps) {
+export function AccessPortal({ page, onPageChange, onExit, onAuthenticated, userSession, apiReady, streamConnected, hasActiveRun, sessionEnded = false, onOpenScenario, onOpenQuickMission }: AccessPortalProps) {
   const rootRef = useRef<HTMLElement>(null)
   useEffect(() => {
     if (!rootRef.current || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
@@ -429,21 +468,30 @@ export function AccessPortal({ page, onPageChange, onExit, onAuthenticated, user
     return () => context.revert()
   }, [page])
 
+  const [outcome, setOutcome] = useState<{ kind: 'success' | 'failed'; at: number } | null>(null)
+  const [shaking, setShaking] = useState(false)
+  useEffect(() => {
+    if (outcome?.kind !== 'failed') return
+    setShaking(true)
+    const timer = window.setTimeout(() => setShaking(false), 600)
+    return () => window.clearTimeout(timer)
+  }, [outcome])
   const isGeneralPage = page === 'general'
   const mode = page === 'register' ? 'register' : page === 'general' ? 'general' : 'login'
-  return <main className={`access-portal-page ${isGeneralPage ? 'admin-console-only' : ''}`} ref={rootRef}>
-    <div className="access-backdrop"/><div className="access-grid" aria-hidden="true"/><div className="access-glow" aria-hidden="true"/>
-    <div className="access-topline"><div className="access-brand"><BrandMark/><span className="access-brand-tag">SURVEIL. DETECT. PROTECT.</span></div><div className="access-top-actions">{!isGeneralPage && <button className="access-exit" type="button" onClick={onExit}><ArrowLeft size={14}/> RETURN TO OVERVIEW</button>}</div></div>
+  return <main className={`access-portal-page ${isGeneralPage ? 'admin-console-only' : ''} ${page === 'login' ? 'is-login' : ''} ${outcome?.kind === 'success' ? 'leaving' : ''}`} ref={rootRef}>
+    {isGeneralPage ? <><div className="access-backdrop"/><div className="access-grid" aria-hidden="true"/><div className="access-glow" aria-hidden="true"/></> : <LoopingVideo leaving={outcome?.kind === 'success'}/>}
+    {sessionEnded && page === 'login' && !userSession && <div className="access-session-ended" role="status">Your session ended (it expired or was closed from elsewhere). Sign in again to continue; anything unsaved in Scenario Lab is kept on this browser and offered back.</div>}
+    <div className="access-topline"><div className="access-brand"><BrandMark/><span className="access-brand-tag">SURVEIL. DETECT. PROTECT.</span></div><div className="access-top-actions">{!isGeneralPage && <VisualsControls/>}{!isGeneralPage && <button className="access-exit" type="button" onClick={onExit}><ArrowLeft size={14}/> RETURN TO OVERVIEW</button>}</div></div>
     <div className={`access-layout ${isGeneralPage ? 'admin-access-layout' : ''}`}>
-      {!isGeneralPage && <section className="access-context access-reveal"><div className="access-context-copy"><span className="eyebrow">CENTRAL USER ACCESS</span><h2>One identity.<br/><em>One session.</em></h2><p>Sign in once to use the TRINETRA modules permitted by your approved role.</p></div><SystemTerminal apiReady={apiReady} streamConnected={streamConnected} hasActiveRun={hasActiveRun}/></section>}
-      <motion.section className={`access-card ${isGeneralPage ? 'wide' : ''} access-reveal`} initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} transition={{ duration: .5 }}>
+      <motion.section className={`access-card ${isGeneralPage ? 'wide' : ''} access-reveal ${shaking ? 'shake-card' : ''}`} initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} transition={{ duration: .5 }}>
         {!isGeneralPage && <div className="access-route-tabs" aria-label="User access routes"><button className={mode === 'login' ? 'active' : ''} onClick={() => onPageChange('login')}>SIGN IN</button><button className={mode === 'register' ? 'active' : ''} onClick={() => onPageChange('register')}>REGISTER</button></div>}
-        {page === 'login' && <LoginForm onPageChange={onPageChange} onAuthenticated={onAuthenticated}/>}
+        {page === 'login' && <LoginForm onPageChange={onPageChange} onAuthenticated={onAuthenticated} onOutcome={kind => setOutcome({ kind, at: Date.now() })}/>}
         {page === 'register' && <RegistrationForm onPageChange={onPageChange}/>}
-        {page === 'general' && userSession && <GeneralConsole session={userSession} onPageChange={onPageChange}/>}
+        {page === 'general' && userSession && <GeneralConsole session={userSession} onPageChange={onPageChange} onOpenScenario={onOpenScenario} onOpenQuick={onOpenQuickMission}/>}
         {page === 'general' && !userSession && <div className="access-form-wrap"><div className="access-form-heading"><span className="eyebrow">GENERAL CONTROL CENTER</span><h1>General<br/><em>sign in.</em></h1><p>Sign in with a provisioned General account to manage users and scenario reviews.</p></div><LoginForm onPageChange={onPageChange} onAuthenticated={onAuthenticated}/></div>}
       </motion.section>
     </div>
-    {!isGeneralPage && <footer className="access-footer"><span>TRINETRA / SOFTWARE-ONLY RESEARCH DEMONSTRATOR</span><span>LOCAL ENVIRONMENT · NO OPERATIONAL FLIGHT CONTROL</span></footer>}
+    {!isGeneralPage && <details className="access-diagnostics"><summary>System diagnostics (read only)</summary><SystemTerminal apiReady={apiReady} streamConnected={streamConnected} hasActiveRun={hasActiveRun}/></details>}
+    {!isGeneralPage && <footer className="access-footer"><span>TRINETRA / SOFTWARE-ONLY RESEARCH DEMONSTRATOR</span><span className="footage-credit">BACKGROUND FOOTAGE: “MOUNTAIN LANDSCAPE WITH SNOW”, FREE HD VIDEOS · docs/MEDIA_CREDITS.md</span><span>LOCAL ENVIRONMENT · NO OPERATIONAL FLIGHT CONTROL</span></footer>}
   </main>
 }

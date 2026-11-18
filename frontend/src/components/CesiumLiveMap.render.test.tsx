@@ -28,7 +28,7 @@ vi.mock('cesium', () => ({
   buildModuleUrl: vi.fn((path: string) => path),
 }))
 
-vi.setConfig({ testTimeout: 30000 })
+vi.setConfig({ testTimeout: 120000 })   // the first test pays for the one-time import of the Cesium module, which is slow when the whole suite runs in parallel
 let size = { width: 0, height: 0 }
 let observerCallback: (() => void) | null = null
 class FakeResizeObserver { constructor(callback: () => void) { observerCallback = callback } observe() {} disconnect() {} }
@@ -59,7 +59,7 @@ describe('CesiumLiveMap render safety', () => {
     expect(cesium.viewer.resize).not.toHaveBeenCalled()
     size = { width: 800, height: 600 }
     fireResize()
-    await waitFor(() => expect(cesium.created).toHaveLength(1))
+    await waitFor(() => expect(cesium.created).toHaveLength(1), { timeout: 90_000 })
     expect(cesium.created[0]).toMatchObject({ useDefaultRenderLoop: true, showRenderLoopErrors: false })
   })
 
@@ -82,14 +82,17 @@ describe('CesiumLiveMap render safety', () => {
     size = { width: 800, height: 600 }
     render(<CesiumLiveMap vehicles={[]} selected={null} onSelect={() => undefined}/>)
     await waitFor(() => expect(cesium.listeners).toHaveLength(1))
+    // one transient error is recovered silently; the notice appears when the error repeats after the automatic recovery
+    act(() => cesium.listeners[0](cesium.viewer.scene, new Error('Expected width to be greater than 0, actual value was 0')))
+    expect(screen.queryByText(/Map rendering paused/)).toBeNull()
     act(() => cesium.listeners[0](cesium.viewer.scene, new Error('Expected width to be greater than 0, actual value was 0')))
     const notice = await screen.findByText(/Map rendering paused \(Expected width to be greater than 0/)
     expect(notice.getAttribute('role')).toBe('status')
     expect(cesium.viewer.useDefaultRenderLoop).toBe(false)
     expect(screen.queryByRole('alert')).toBeNull()
     fireResize()
-    await waitFor(() => expect(screen.queryByText(/Map rendering paused/)).toBeNull())
     expect(cesium.viewer.useDefaultRenderLoop).toBe(true)
+    await waitFor(() => expect(screen.queryByText(/Map rendering paused/)).toBeNull(), { timeout: 5000 })    // cleared after a clean 3 s
   })
 
   it('creates the viewer once: telemetry and prop changes never recreate it', async () => {

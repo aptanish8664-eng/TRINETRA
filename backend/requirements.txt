@@ -14,3 +14,4 @@ argon2-cffi==23.1.0
 python-dotenv==1.0.1
 openai==2.48.0
 pymavlink==2.4.50
+XlsxWriter==3.3.1

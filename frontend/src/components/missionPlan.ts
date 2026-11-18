@@ -11,7 +11,7 @@ import { MISSION_DURATION_RANGE_MINUTES, UAV_COUNT_RANGE } from './scenarioPlann
 export interface GeoPoint { latitude: number; longitude: number }
 export type TaskType =
   | 'expanding_square_search' | 'sector_search' | 'coverage_survey' | 'perimeter_patrol'
-  | 'point_inspection' | 'waypoint_route' | 'loiter_hold' | 'payload_dropoff'
+  | 'point_inspection' | 'waypoint_route' | 'loiter_hold' | 'payload_dropoff' | 'ground_standby'
 export type AircraftRole = 'primary' | 'decoy' | 'standby'
 export type ReturnMode = 'return_to_start' | 'land_at_destination'
 export type PayloadCategory = 'relief_supplies' | 'medical_kit' | 'flotation_device'
@@ -26,7 +26,7 @@ export interface TaskParameters {
   sector_radius_m?: number | null; sector_angle_deg?: number; sector_count?: number
   line_spacing_m?: number | null; path?: GeoPoint[]; laps?: number
   points?: GeoPoint[]; orbit_radius_m?: number; orbit_points?: number; hover_s?: number; hold_point?: GeoPoint | null
-  drop_point?: GeoPoint | null; drop_altitude_m?: number | null; hover_duration_s?: number | null
+  drop_point?: GeoPoint | null; drop_index?: number | null; drop_altitude_m?: number | null; hover_duration_s?: number | null
   payload_category?: PayloadCategory | null
 }
 export interface RouteWaypoint {
@@ -42,17 +42,21 @@ export interface GeneratedRoute {
   length_m: number; duration_s: number; assumptions: string
 }
 export interface AircraftPlan {
-  uav_id: string; role: AircraftRole | null; priority: number; reassignable: boolean
+  uav_id: string; callsign?: string | null; role: AircraftRole | null; priority: number; reassignable: boolean
   task_type: TaskType | null; parameters: TaskParameters; start_location: GeoPoint | null
   altitude_m: number | null; speed_mps: number | null; loiter_duration_s: number; return_mode: ReturnMode
   route: GeneratedRoute | null; confirmed: boolean
 }
+/** Limits flagged `auto` were derived from the generated route (by the backend); a value the user types turns its flag off. */
+export interface AutoLimits { max_distance_from_start_m: boolean; max_altitude_m: boolean; max_duration_minutes: boolean }
+export const NO_AUTO_LIMITS: AutoLimits = { max_distance_from_start_m: false, max_altitude_m: false, max_duration_minutes: false }
 export interface MissionPlan {
   objectives: ObjectiveValue[]; description: string; operating_area: OperatingArea | null
   required_uav_count: number | null; max_duration_minutes: number | null
   constraints: { max_distance_from_start_m: number | null; max_altitude_m: number | null }
   notes: string; allow_multiple_primary: boolean; selected_uav_ids: string[]; activated_uav_ids: string[]
   aircraft: AircraftPlan[]; workflow_stage: 'general' | 'aircraft' | 'faults' | 'review'; current_uav_index: number
+  auto_limits?: AutoLimits
 }
 export interface PlanIssue { code: string; message: string; uav_id?: string | null; field?: string | null }
 
@@ -60,7 +64,7 @@ export const SCHEMA_VERSION = 2
 export const EMPTY_PLAN: MissionPlan = {
   objectives: [], description: '', operating_area: null, required_uav_count: null, max_duration_minutes: null,
   constraints: { max_distance_from_start_m: null, max_altitude_m: null }, notes: '', allow_multiple_primary: false,
-  selected_uav_ids: [], activated_uav_ids: [], aircraft: [], workflow_stage: 'general', current_uav_index: 0,
+  selected_uav_ids: [], activated_uav_ids: [], aircraft: [], workflow_stage: 'general', current_uav_index: 0, auto_limits: NO_AUTO_LIMITS,
 }
 
 export const MISSION_OBJECTIVES: { value: ObjectiveValue; title: string; description: string }[] = [
@@ -90,7 +94,7 @@ export const DELIVERY_OBJECTIVES: ObjectiveValue[] = ['relief_supply_delivery', 
 /** Task types the objectives allow; mirrors the backend rule (tracking-only objectives allow a waypoint route only; drop-off needs a delivery objective). */
 export function allowedTaskTypes(objectives: ObjectiveValue[]): TaskType[] {
   const trackingOnly = objectives.length > 0 && objectives.every(value => TRACKING_ONLY_OBJECTIVES.includes(value))
-  return TASK_TYPE_VALUES.filter(value => (!trackingOnly || value === 'waypoint_route')
+  return TASK_TYPE_VALUES.filter(value => (!trackingOnly || value === 'waypoint_route' || value === 'ground_standby')
     && (value !== 'payload_dropoff' || objectives.some(objective => DELIVERY_OBJECTIVES.includes(objective))))
 }
 export const TRACKING_NOTE = 'No tracking capability exists: this objective only allows a waypoint route you define.'
@@ -163,6 +167,7 @@ export const TASK_SPECS: TaskSpec[] = [
     P({ key: 'payload_category', label: 'Payload category', kind: 'select', required: true, help: 'Fixed list: relief supplies, medical kit or flotation device.', example: 'Medical kit' }),
   ] },
 ]
+TASK_SPECS.push({ value: 'ground_standby', label: 'Stay on the ground (standby)', summary: 'The aircraft stays on the ground at its start: it is never armed or flown.', params: [] })
 export const TASK_TYPE_VALUES: TaskType[] = TASK_SPECS.map(item => item.value)
 export const taskSpec = (value: TaskType | null | undefined): TaskSpec | undefined => TASK_SPECS.find(item => item.value === value)
 
@@ -211,7 +216,7 @@ export const DEFAULT_SPEED_MPS = 8
 
 export function newAircraft(uavId: string, index: number): AircraftPlan {
   return {
-    uav_id: uavId, role: index === 0 ? 'primary' : 'standby', priority: 2, reassignable: true, task_type: null, parameters: {},
+    uav_id: uavId, role: index === 0 ? 'primary' : 'standby', priority: index === 0 ? 1 : 2, reassignable: true, task_type: null, parameters: {},
     // Defaults the user can change: a cruise height and speed that work for the simulated x500 (the planning limits still apply).
     start_location: null, altitude_m: DEFAULT_ALTITUDE_M, speed_mps: DEFAULT_SPEED_MPS, loiter_duration_s: 0, return_mode: 'return_to_start',
     route: null, confirmed: false,
@@ -223,6 +228,7 @@ export function normalizePlan(plan: Partial<MissionPlan> | null | undefined): Mi
   return {
     ...EMPTY_PLAN, ...plan,
     constraints: { ...EMPTY_PLAN.constraints, ...(plan.constraints ?? {}) },
+    auto_limits: { ...NO_AUTO_LIMITS, ...(plan.auto_limits ?? {}) },
     aircraft: (plan.aircraft ?? []).map((item, index) => ({ ...newAircraft(item.uav_id, index), ...item, parameters: item.parameters ?? {} })),
   }
 }
@@ -285,22 +291,21 @@ export const FLEET_NOT_VERIFIED_ITEM = 'The selected PX4 processes, telemetry an
 export const WORKFLOW_ITEM = 'Complete the A–C scenario workflow and final review.'
 
 /** Section C (review) checklist (client mirror; the backend re-validates on save, approval and deploy). */
-export function computePlanMissing({ title, plan, fleetVerified, availableVehicleIds, endurance }: PlanValidationContext): string[] {
+/** Whether the aircraft are RUNNING is not part of this list: a plan may hold more aircraft than run. Deploy and Start check the fleet and say what to do. */
+export function computePlanMissing({ title, plan, endurance }: PlanValidationContext): string[] {
   const primaries = plan.aircraft.filter(item => item.role === 'primary').length
   return [
     !title.trim() ? 'Scenario name is required.' : '',
     !plan.objectives.length ? 'Select at least one mission objective.' : '',
     !plan.operating_area ? 'Select the operating area on the map.' : '',
-    plan.constraints.max_distance_from_start_m === null ? 'Set the maximum distance from start.' : '',
-    plan.constraints.max_altitude_m === null ? 'Set the maximum altitude.' : '',
-    !plan.selected_uav_ids.length ? 'Select at least one connected PX4 aircraft.' : '',
+    plan.constraints.max_distance_from_start_m === null ? (plan.auto_limits?.max_distance_from_start_m ? 'Generate the route: the maximum distance (auto) is derived from it.' : 'Set the maximum distance from start.') : '',
+    plan.constraints.max_altitude_m === null ? (plan.auto_limits?.max_altitude_m ? 'Generate the route: the maximum altitude (auto) is derived from it.' : 'Set the maximum altitude.') : '',
+    !plan.selected_uav_ids.length ? 'Set how many UAVs the mission needs (Section A).' : '',
     !plan.required_uav_count || plan.required_uav_count !== plan.selected_uav_ids.length || plan.aircraft.length !== plan.selected_uav_ids.length
-      ? 'Requested, activated and assigned UAV counts must match. Tick the aircraft, then press ACTIVATE AND VERIFY PX4 / GAZEBO FLEET in Section A.' : '',
+      ? 'The number of UAVs and the configured aircraft must match. Set the number in Section A.' : '',
     plan.activated_uav_ids.length !== (plan.required_uav_count ?? 0) || plan.activated_uav_ids.some(id => !plan.selected_uav_ids.includes(id))
-      ? 'The requested PX4/Gazebo fleet activation is not recorded for this exact selection.' : '',
-    !fleetVerified ? FLEET_NOT_VERIFIED_ITEM : '',
+      ? 'The aircraft list does not match the number of UAVs. Set the number in Section A again.' : '',
     plan.workflow_stage !== 'review' ? WORKFLOW_ITEM : '',
-    plan.selected_uav_ids.some(id => !availableVehicleIds.includes(id)) ? 'One or more selected aircraft are not currently available.' : '',
     plan.aircraft.some(item => !isAircraftComplete(item)) ? 'Every selected aircraft needs a generated route and a confirmed mission.' : '',
     ...plan.aircraft.flatMap(item => enduranceIssues(item.route, endurance).map(text => `${item.uav_id}: ${text}`)),
     ...plan.aircraft.filter(item => item.task_type && !allowedTaskTypes(plan.objectives).includes(item.task_type))
@@ -335,8 +340,8 @@ export const FLEET_VERIFICATION_LABEL: Record<FleetVerification, string> = {
   verified: 'VERIFIED', not_verified: 'NOT VERIFIED', stale: 'STALE', checking: 'CHECKING',
 }
 export const DEPLOY_REASON = {
-  fleetNotVerified: 'Fleet not freshly verified: run Activate and verify',
-  fleetStale: 'Fleet verification is stale: run Activate and verify',
+  fleetNotVerified: 'Fleet not verified yet. It is re-checked automatically; press ACTIVATE AND VERIFY only if the aircraft are not already running',
+  fleetStale: 'Fleet verification is stale. It is re-checked automatically; press ACTIVATE AND VERIFY if it stays stale',
   fleetChecking: 'Fleet verification is still running',
   unsaved: 'Unsaved changes',
   superseded: 'Version superseded',
@@ -379,9 +384,7 @@ export function computeNextAction(input: NextActionInput): NextAction {
   if (input.superseded) reasons.push(DEPLOY_REASON.superseded)
   const planItems = input.checklist.filter(item => item !== FLEET_NOT_VERIFIED_ITEM)
   if (planItems.length) reasons.push(`Plan incomplete: ${planItems.length} item(s) in the checklist above`)
-  if (input.fleet === 'not_verified') reasons.push(DEPLOY_REASON.fleetNotVerified)
-  else if (input.fleet === 'stale') reasons.push(DEPLOY_REASON.fleetStale)
-  else if (input.fleet === 'checking') reasons.push(DEPLOY_REASON.fleetChecking)
+  // The fleet is not a reason here any more: pressing Deploy checks it and offers to activate the aircraft or to deploy as a plan only.
   if (kind === 'submit') {
     if (input.approvalStatus === 'PENDING') reasons.push(DEPLOY_REASON.pending)
     else if (input.approvalStatus === 'REJECTED') reasons.push(DEPLOY_REASON.rejected)

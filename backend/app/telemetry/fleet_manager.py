@@ -6,14 +6,17 @@ import subprocess
 from typing import Any
 import uuid
 
+from .. import config
 from ..mission_planning.start import validate_home
 
 
 WSL_DISTRIBUTION = "Ubuntu"
 WSL_MANAGER_PATH = "/mnt/d/TRINETRA/backend/tools/wsl_fleet_manager.py"
 PX4_ROOT = "/home/apt8055/uav-sim/PX4-Autopilot"
-FLEET_CAPACITY = 5
-_ACTIONS = {"status", "activate", "stop", "relocate"}
+# How many aircraft this machine runs reliably (config.SIM_MAX_AIRCRAFT, set from measurements). It limits ACTIVATING and STARTING simulated aircraft only.
+FLEET_CAPACITY = config.SIM_MAX_AIRCRAFT
+_ACTIONS = {"status", "activate", "stop", "relocate", "start", "progress"}
+BATCH_RANGE = (1, 16)
 
 
 def _home_arguments(home: dict[str, Any]) -> list[str]:
@@ -45,18 +48,35 @@ def build_fleet_manager_command(action: str, *, count: int | None = None,
                                 request_id: str | None = None,
                                 ports: dict[str, int] | None = None,
                                 home: dict[str, Any] | None = None,
-                                profile: dict[str, Any] | None = None) -> list[str]:
+                                profile: dict[str, Any] | None = None,
+                                stop_first: bool = False,
+                                batch: int | None = None) -> list[str]:
     if action not in _ACTIONS:
         raise ValueError("unsupported fleet operation")
     command = ["wsl.exe", "--distribution", WSL_DISTRIBUTION, "--exec", "python3",
                WSL_MANAGER_PATH, action, "--px4-root", PX4_ROOT]
-    if action in {"activate", "relocate"}:
+    if action in {"activate", "relocate", "start"}:
         if count is None or not 1 <= count <= FLEET_CAPACITY:
             raise ValueError(f"fleet count must be between 1 and {FLEET_CAPACITY}")
         if action == "relocate" and home is None:
             raise ValueError("relocate requires a simulation home")
         command.extend(("--count", str(count)))
-    if action in {"activate", "relocate", "status"}:   # status compares the running bridges with these same ports
+    if action == "start":
+        # Staged start: optionally only some instances (retry the missing ones), stop first (a restart), and the batch size.
+        if instances:
+            if len(set(instances)) != len(instances) or any(isinstance(item, bool) or not isinstance(item, int) or not 0 <= item < count for item in instances):
+                raise ValueError("start instances must be unique numbers within the requested count")
+            command.append("--instances")
+            command.extend(str(item) for item in sorted(instances))
+        if stop_first:
+            command.append("--stop-first")
+        if batch is not None:
+            if isinstance(batch, bool) or not isinstance(batch, int) or not BATCH_RANGE[0] <= batch <= BATCH_RANGE[1]:
+                raise ValueError(f"batch must be a whole number from {BATCH_RANGE[0]} to {BATCH_RANGE[1]}")
+            command.extend(("--batch", str(batch)))
+    elif stop_first or batch is not None:
+        raise ValueError("stop_first and batch are only accepted by start")
+    if action in {"activate", "relocate", "status", "start", "progress"}:   # status compares the running bridges with these same ports
         for key, option in (("telemetry_forward", "--telemetry-forward-port"),
                             ("telemetry_source", "--telemetry-source-port"),
                             ("pose_forward", "--pose-forward-port"), ("pose_source", "--pose-source-port")):
@@ -65,13 +85,13 @@ def build_fleet_manager_command(action: str, *, count: int | None = None,
                 if not isinstance(value, int) or not 1024 <= value <= 65535:
                     raise ValueError("bridge ports must be integers from 1024 to 65535")
                 command.extend((option, str(value)))
-    if action in {"activate", "relocate"}:
+    if action in {"activate", "relocate", "start"}:
         if home is not None:
             command.extend(_home_arguments(home))
         if profile is not None:
             command.extend(_profile_arguments(profile))
     elif home is not None or profile is not None:
-        raise ValueError("a simulation home or profile is only accepted by activate and relocate")
+        raise ValueError("a simulation home or profile is only accepted by activate, relocate and start")
     elif action == "stop":
         values = instances or []
         if not values or len(values) != len(set(values)) or any(not 0 <= item < FLEET_CAPACITY for item in values):
@@ -79,7 +99,10 @@ def build_fleet_manager_command(action: str, *, count: int | None = None,
         command.append("--instances")
         command.extend(str(item) for item in values)
     elif count is not None or instances:
-        raise ValueError("unused fleet operation arguments are not accepted")
+        if action == "start":
+            pass
+        else:
+            raise ValueError("unused fleet operation arguments are not accepted")
     if request_id is not None:
         try:
             uuid.UUID(request_id)
@@ -93,19 +116,22 @@ def invoke_fleet_manager(action: str, *, count: int | None = None,
                          instances: list[int] | None = None,
                          request_id: str | None = None,
                          timeout_seconds: int = 35,
-                         home: dict[str, Any] | None = None) -> dict[str, Any]:
+                         home: dict[str, Any] | None = None,
+                         stop_first: bool = False,
+                         batch: int | None = None) -> dict[str, Any]:
     ports = None
     profile = None
-    if action in {"activate", "relocate", "status"}:
+    if action in {"activate", "relocate", "status", "start", "progress"}:
         from ..config import (GAZEBO_POSE_UDP_ALLOWED_SOURCE_PORT, GAZEBO_POSE_UDP_BIND_PORT, PX4_UDP_ALLOWED_SOURCE_PORT, PX4_UDP_BIND_PORT)
         ports = {"telemetry_forward": PX4_UDP_BIND_PORT, "telemetry_source": PX4_UDP_ALLOWED_SOURCE_PORT,
                  "pose_forward": GAZEBO_POSE_UDP_BIND_PORT, "pose_source": GAZEBO_POSE_UDP_ALLOWED_SOURCE_PORT}
-    if action in {"activate", "relocate"}:
+    if action in {"activate", "relocate", "start"}:
         from ..config import LONG_RANGE_ACCEL_MPS2, LONG_RANGE_GROUND_EXTENT_M, LONG_RANGE_PROFILE_ENABLED, LONG_RANGE_TILT_DEG, MP_MAX_SPEED_MPS
         profile = {"enabled": LONG_RANGE_PROFILE_ENABLED, "speed_cap_mps": MP_MAX_SPEED_MPS,
                    "accel_mps2": LONG_RANGE_ACCEL_MPS2, "tilt_deg": LONG_RANGE_TILT_DEG, "ground_extent_m": LONG_RANGE_GROUND_EXTENT_M}
     command = build_fleet_manager_command(action, count=count, instances=instances,
-                                          request_id=request_id, ports=ports, home=home, profile=profile)
+                                          request_id=request_id, ports=ports, home=home, profile=profile,
+                                          stop_first=stop_first, batch=batch)
     try:
         result = subprocess.run(command, capture_output=True, text=True, timeout=timeout_seconds, check=False)
     except (OSError, subprocess.TimeoutExpired) as exc:

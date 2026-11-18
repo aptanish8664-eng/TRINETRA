@@ -150,7 +150,7 @@ def _sanitize_one(raw: Any, known_indexes: set[int]) -> dict[str, Any] | None:
         return {"op": op, "minutes": minutes} if isinstance(minutes, int) and not isinstance(minutes, bool) and 1 <= minutes <= 1440 else None
     if op == "set_required_uav_count":
         count = raw.get("count")
-        return {"op": op, "count": count} if isinstance(count, int) and not isinstance(count, bool) and 1 <= count <= 5 else None
+        return {"op": op, "count": count} if isinstance(count, int) and not isinstance(count, bool) and 1 <= count <= 999 else None
     if op == "set_mission_text":
         field = raw.get("field")
         if field not in MISSION_TEXT_FIELDS:

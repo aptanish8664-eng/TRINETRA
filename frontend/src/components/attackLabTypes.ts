@@ -5,7 +5,7 @@
  * that the ids, labels and text below match what the backend serves.
  */
 export const ATTACK_LAB_NAME = 'Attack Lab'
-export const NOT_EXECUTED_NOTE = 'This defines a simulated, software-only attack. It is not executed until the experiment runner exists, and nothing is sent to PX4 or Gazebo.'
+export const NOT_EXECUTED_NOTE = 'This defines a simulated, software-only attack. It changes only the software copy of the GPS data that the monitor reads, and only while Implement is switched on and a flight of this exact version is flying; nothing is sent to PX4 or Gazebo.'
 export const GROUND_TRUTH_NOTE = 'Ground truth (which samples are attacked, the attack schedule and any labels) is never an input to the detector or the threat engine and is never shown in Mission Control or Scenario Lab. It is revealed only in an evaluation summary after an offline replay ends.'
 export const HIDDEN_SCHEDULE_NOTE = 'Operators will not see this schedule while the experiment runs. It is shown only in the evaluation after the run ends.'
 export const SOFTWARE_ONLY_NOTE = 'This is a software simulation. It changes only the simulated GPS data the monitor reads; it does not affect the aircraft.'
@@ -26,7 +26,7 @@ export const ATTACK_TYPE_SPECS: { value: AttackType; label: string; summary: str
 
 /** What each experiment field means, in plain words (mirrors `FIELD_HELP` in backend/app/research/attacks.py). */
 export const ATTACK_FIELD_HELP = {
-  start: 'Seconds after the aircraft starts its route when the attack begins.',
+  start: 'Seconds of flight time, counted from when the aircraft arms, when the attack begins (a few seconds of take-off come first).',
   duration: 'How long the attack lasts, in seconds. It must end before the route does.',
   magnitude: 'How strong the attack is: a distance in metres, a rate in m/s, or a noise level, depending on the type.',
   direction: 'Compass direction the reported position is pushed (0 = north, 90 = east). Leave it blank for a random direction fixed by the seed.',
@@ -53,11 +53,11 @@ export function presetsForPlan(aircraftCount: number): { offered: PresetSpec[]; 
 
 /** What an experiment measures (shown as a short summary; the stored `measurements` flags all default to on). */
 export const MEASUREMENT_SPECS: { key: keyof ExperimentConfig['measurements']; label: string; help: string }[] = [
-  { key: 'detection_latency', label: 'Detection latency', help: 'Seconds from the start of the attack to the first sustained alert.' },
-  { key: 'false_alarms', label: 'False alarms', help: 'Alerts raised while no attack is active.' },
-  { key: 'position_error', label: 'Position error', help: 'How far the reported position is from the true one.' },
-  { key: 'mission_completion', label: 'Mission completion', help: 'Not measured yet: it needs the experiment runner.' },
-  { key: 'handover_time', label: 'Handover time', help: 'Not measured yet: no handover is executed in an offline replay.' },
+  { key: 'detection_latency', label: 'Detection latency', help: 'Seconds from the scheduled start of the attack to the first Medium-or-higher assessment, measured in the live run record.' },
+  { key: 'false_alarms', label: 'False alarms', help: 'Episodes of a Medium-or-higher assessment while no attack is active, counted in the live run record.' },
+  { key: 'position_error', label: 'Position error', help: 'Not measured in live run records (only in an offline replay).' },
+  { key: 'mission_completion', label: 'Mission completion', help: 'Not measured: a live run record shows how the flight ended, not a completion percentage.' },
+  { key: 'handover_time', label: 'Handover time', help: 'Not measured: operator responses are listed with their times, but no handover time is computed.' },
 ]
 
 export interface AttackLimits {
@@ -109,7 +109,7 @@ export interface ExperimentInput {
   preset_id: PresetId | null
   seed: number
   config: ExperimentConfig
-  status: 'draft' | 'ready'
+  status: 'draft' | 'ready' | 'implemented'
 }
 export interface Experiment extends ExperimentInput {
   id: string
@@ -126,6 +126,37 @@ export interface Experiment extends ExperimentInput {
   has_results?: boolean
   edit_mode?: 'in_place' | 'copy'
   delete_keeps_results?: boolean
+  /** True while the Implement switch is on: the experiment runs automatically in flights of its exact version. */
+  implemented?: boolean
+  implement_note?: string
+}
+
+export interface Reconfiguration {
+  id: string; kind: 'handover' | 'switch_primary'; previous_primary: string; new_primary: string; started_at: string; finished_at: string | null
+  status: 'verifying' | 'completed' | 'degraded' | 'failed'; notes: string[]
+  checks: Record<'new_primary_flying' | 'previous_aircraft_safe' | 'mission_progressing', { ok: boolean; detail: string } | null>
+}
+
+/** What Mission Control may know about experiments: a count, never the schedule. */
+export interface LiveExperimentStatus { armed: number; run_active: boolean; experiments_in_run: number; note: string }
+
+export interface RunAttack {
+  target_aircraft: string; type: string; start_s: number; duration_s: number; magnitude: number; direction_deg: number | null
+  reached: boolean; fully_run: boolean; outcome: 'detected' | 'missed' | 'not_reached' | 'unclear'
+  first_reaction_s: number | null; first_reaction_tier: string | null; latency_s: number | null
+  first_alert_s: number | null; first_alert_latency_s: number | null; peak_score: number | null; peak_tier: string | null
+}
+export interface RunTimelinePoint { t: number; score: number; tier: string; attacked: boolean }
+export interface RunOperatorResponse { at: string; after_run_start_s: number; aircraft_id: string; action: string; tier: string | null; threat_score: number | null; by: string }
+export interface LiveRunRecord {
+  kind: 'live_run'; execution_id: string; started_at: string; ended_at: string; run_seconds: number; end_reason: string
+  reconfigurations?: Reconfiguration[]
+  attacks: RunAttack[]; false_alarms: number; outcome: 'detected' | 'missed' | 'not_reached' | 'no_attack' | 'unclear'
+  operator_responses: RunOperatorResponse[]; timeline: Record<string, RunTimelinePoint[]>; caveats: string[]; assessments_recorded: number
+}
+export interface StoredResult {
+  id: string; experiment_id: string; experiment_name: string; scenario_version_id: string; created_at: string
+  from_deleted_experiment: boolean; result: LiveRunRecord | Record<string, unknown>
 }
 export interface ExperimentIssue { code: string; message: string; field?: string | null }
 
@@ -141,6 +172,14 @@ export const DEFAULT_CONFIG: ExperimentConfig = {
 export type Tier = 'Low' | 'Medium' | 'High' | 'Critical'
 export const TIERS: Tier[] = ['Low', 'Medium', 'High', 'Critical']
 export type ActionId = 'continue_monitor' | 'increase_monitoring' | 'dead_reckoning_fallback' | 'isolate_aircraft' | 'handover_to_standby' | 'return_to_launch'
+/** One real single-aircraft response (simulator only) with the exact reason when it is disabled. */
+export interface ResponseOption { action: string; label: string; meaning: string; enabled: boolean; reason: string | null; runs_in_ui?: boolean; multi_aircraft?: boolean
+  candidates?: Array<{ aircraft_id: string; role: string | null; battery_pct: number | null; eligible: boolean; reason: string | null }> }
+export interface ResponseOptions { aircraft_id: string; options: ResponseOption[]; simulation_only: boolean; note: string }
+export interface ThreatResponseResult {
+  aircraft_id: string; action: string; outcome: 'executed' | 'acknowledged'; executed: boolean; message: string
+  tier: Tier | null; threat_score: number | null; evidence: string[]; simulation_only: boolean; decision?: DecisionRecord
+}
 export interface ActionRow { action: ActionId; label: string; reason: string; tradeoff: string; eligible: boolean; rank: number; rank_score: number }
 export interface HandoverCandidate {
   aircraft_id: string
@@ -172,8 +211,8 @@ export interface Assessment {
   flight_time_s?: number
 }
 export interface DecisionRecord {
-  id: string; username: string; aircraft_id: string; action: ActionId; handover_candidate: string | null
-  source: 'live_telemetry' | 'offline_replay'; source_name: string | null; tier: Tier | null; threat_score: number | null; created_at: string; executed: false
+  id: string; username: string; aircraft_id: string; action: ActionId | string; handover_candidate: string | null
+  source: 'live_telemetry' | 'offline_replay'; source_name: string | null; tier: Tier | null; threat_score: number | null; created_at: string; executed: boolean
 }
 export interface ReplayAircraft {
   aircraft_id: string; role: 'primary' | 'standby' | 'decoy' | null; reassignable: boolean

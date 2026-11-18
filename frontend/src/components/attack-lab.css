@@ -55,3 +55,17 @@
 .attack-exp-card{display:flex;flex-direction:column}
 .attack-exp-card dl{grid-template-columns:repeat(auto-fit,minmax(120px,1fr))}
 .attack-exp-actions{margin-top:auto;padding-top:4px}
+
+/* Part 3: Implement switch, run records, run timeline */
+.attack-implement { display: flex; gap: 8px; align-items: flex-start; padding: 6px 0; cursor: pointer; }
+.attack-implement input { margin-top: 3px; accent-color: var(--accent, #3aa6c7); }
+.attack-implement span { display: grid; gap: 1px; }
+.attack-implement.on b { color: var(--accent, #3aa6c7); }
+.attack-run-records { margin-top: 14px; }
+.run-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.run-table th, .run-table td { text-align: left; padding: 5px 8px; border-bottom: 1px solid color-mix(in srgb, currentColor 14%, transparent); vertical-align: top; }
+.run-table tr.selected { background: color-mix(in srgb, currentColor 7%, transparent); }
+.run-detail { margin-top: 12px; display: grid; gap: 8px; }
+.run-detail h4, .run-detail h5 { margin: 4px 0 0; }
+.run-timeline { width: 100%; max-width: 760px; height: auto; color: var(--text-muted, #9db0c3); }
+.attack-caveats { margin: 4px 0 0; padding-left: 16px; display: grid; gap: 2px; }

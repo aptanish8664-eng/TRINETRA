@@ -8,17 +8,20 @@ from __future__ import annotations
 import re
 from typing import Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer, model_validator
 
 SCHEMA_VERSION = 2
+# A plan may hold any number of aircraft. The only ceiling is technical: aircraft ids are px4-1 ... px4-999 (three digits).
+# How many aircraft can be SIMULATED is a separate setting (config.SIM_MAX_AIRCRAFT) that never limits planning or saving.
+PLAN_MAX_AIRCRAFT = 999
 
 TaskType = Literal[
     "expanding_square_search", "sector_search", "coverage_survey", "perimeter_patrol",
-    "point_inspection", "waypoint_route", "loiter_hold", "payload_dropoff",
+    "point_inspection", "waypoint_route", "loiter_hold", "payload_dropoff", "ground_standby",
 ]
 TASK_TYPES: tuple[str, ...] = (
     "expanding_square_search", "sector_search", "coverage_survey", "perimeter_patrol",
-    "point_inspection", "waypoint_route", "loiter_hold", "payload_dropoff",
+    "point_inspection", "waypoint_route", "loiter_hold", "payload_dropoff", "ground_standby",
 )
 AircraftRole = Literal["primary", "decoy", "standby"]
 ReturnMode = Literal["return_to_start", "land_at_destination"]
@@ -101,6 +104,13 @@ class MissionConstraints(StrictModel):
     max_altitude_m: Optional[float] = Field(default=None, gt=0, le=500, allow_inf_nan=False)
 
 
+class AutoLimits(StrictModel):
+    """Which mission limits are derived from the generated route (and recomputed with it) rather than typed by the user."""
+    max_distance_from_start_m: bool = False
+    max_altitude_m: bool = False
+    max_duration_minutes: bool = False
+
+
 class TaskParameters(StrictModel):
     """Union of per-type parameters. Which ones are required depends on `task_type` (see validation.REQUIRED)."""
     # search patterns
@@ -124,6 +134,8 @@ class TaskParameters(StrictModel):
     hold_point: Optional[GeoPoint] = None
     # simulated relief supply delivery (a logged software event only)
     drop_point: Optional[GeoPoint] = None
+    # Optional with `payload_dropoff`: fly through `points` in order and make the simulated drop at points[drop_index] (default: the last one).
+    drop_index: Optional[int] = Field(default=None, ge=0, le=49)
     drop_altitude_m: Optional[float] = Field(default=None, gt=0, le=500, allow_inf_nan=False)
     hover_duration_s: Optional[float] = Field(default=None, ge=0, le=3600, allow_inf_nan=False)
     payload_category: Optional[PayloadCategory] = None
@@ -160,6 +172,8 @@ class GeneratedRoute(StrictModel):
 
 class AircraftPlan(StrictModel):
     uav_id: str = Field(min_length=5, max_length=16, pattern=r"^px4-[1-9][0-9]{0,2}$")
+    # The name the user gave this aircraft (Quick Mission: UAV-1, UAV-2, ... by default). Display only: nothing is commanded by name.
+    callsign: Optional[str] = Field(default=None, min_length=1, max_length=40)
     role: Optional[AircraftRole] = None
     priority: int = Field(default=2, ge=1, le=3)
     reassignable: bool = True
@@ -173,21 +187,30 @@ class AircraftPlan(StrictModel):
     route: Optional[GeneratedRoute] = None
     confirmed: bool = False
 
+    @model_serializer(mode="wrap")
+    def _omit_empty_callsign(self, handler):
+        # A plan without a typed name is stored exactly as before this field existed (same content, same hash).
+        data = handler(self)
+        if data.get("callsign") is None:
+            data.pop("callsign", None)
+        return data
+
 
 class MissionPlan(StrictModel):
     objectives: list[Objective] = Field(default_factory=list, max_length=11)
     description: str = Field(default="", max_length=500)
     operating_area: Optional[OperatingArea] = None
-    required_uav_count: Optional[int] = Field(default=None, ge=1, le=5)
+    required_uav_count: Optional[int] = Field(default=None, ge=1, le=PLAN_MAX_AIRCRAFT)
     max_duration_minutes: Optional[int] = Field(default=None, ge=1, le=1440)
     constraints: MissionConstraints = Field(default_factory=MissionConstraints)
+    auto_limits: AutoLimits = Field(default_factory=AutoLimits)
     notes: str = Field(default="", max_length=500)
     allow_multiple_primary: bool = False
-    selected_uav_ids: list[str] = Field(default_factory=list, max_length=5)
-    activated_uav_ids: list[str] = Field(default_factory=list, max_length=5)
-    aircraft: list[AircraftPlan] = Field(default_factory=list, max_length=5)
+    selected_uav_ids: list[str] = Field(default_factory=list, max_length=PLAN_MAX_AIRCRAFT)
+    activated_uav_ids: list[str] = Field(default_factory=list, max_length=PLAN_MAX_AIRCRAFT)
+    aircraft: list[AircraftPlan] = Field(default_factory=list, max_length=PLAN_MAX_AIRCRAFT)
     workflow_stage: Literal["general", "aircraft", "faults", "review"] = "general"
-    current_uav_index: int = Field(default=0, ge=0, le=4)
+    current_uav_index: int = Field(default=0, ge=0, le=PLAN_MAX_AIRCRAFT - 1)
 
     @field_validator("description", "notes")
     @classmethod

@@ -1,12 +1,12 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { ActionRow, Assessment, LiveAircraft, LiveThreat, Tier } from './attackLabTypes'
+import type { ActionRow, Assessment, LiveAircraft, LiveThreat, ResponseOption, Tier } from './attackLabTypes'
 import { ThreatCard } from './ThreatCard'
 import { ThreatMonitor } from './ThreatMonitor'
 import { findGroundTruthKeys, sessionFreshness, threatSessionStore, type ThreatSession } from './threatSession'
 
 const apiMock = vi.hoisted(() => ({
-  researchModelInfo: vi.fn(), researchDecisions: vi.fn(), recordDecision: vi.fn(), researchLive: vi.fn(),
+  researchModelInfo: vi.fn(), researchDecisions: vi.fn(), recordDecision: vi.fn(), researchLive: vi.fn(), threatResponseOptions: vi.fn(), respondToThreat: vi.fn(),
 }))
 vi.mock('../services/api', () => ({ api: apiMock }))
 
@@ -46,6 +46,7 @@ beforeEach(() => {
   apiMock.researchLive.mockResolvedValue(live())
   apiMock.researchModelInfo.mockResolvedValue({ available: true, formula: 'f', live_residual_inputs_available: false })
   apiMock.researchDecisions.mockResolvedValue([])
+  apiMock.threatResponseOptions.mockRejectedValue(new Error('not offered in this test'))
   apiMock.recordDecision.mockImplementation(async (payload: Record<string, unknown>) => ({
     id: 'd1', username: 'op', created_at: new Date().toISOString(), executed: false, handover_candidate: null, ...payload,
   }))
@@ -328,5 +329,84 @@ describe('threat session helpers', () => {
     expect(sessionFreshness(session('Low', 1, 'playing', now), now)).toBe('ok')
     expect(sessionFreshness(session('Low', 1, 'playing', now - 60_000), now)).toBe('stale')
     expect(sessionFreshness(session('Low', 1, 'finished', now - 60_000), now)).toBe('ended')
+  })
+})
+
+
+describe('ThreatMonitor real responses (simulator only)', () => {
+  const props = () => ({ canRecord: true, onTierTransitions: vi.fn(), onTiers: vi.fn() })
+  const options = (patch: Record<string, { enabled?: boolean; reason?: string | null }> = {}) => ({ aircraft_id: 'px4-1', simulation_only: true, note: '', options: [
+    { action: 'acknowledge', label: 'Acknowledge and continue', meaning: 'm', enabled: true, reason: null },
+    { action: 'hold', label: 'Hold (pause the mission)', meaning: 'Pauses the mission.', ...{ enabled: true, reason: null, ...patch.hold } },
+    { action: 'resume', label: 'Resume the mission', meaning: 'm', ...{ enabled: false, reason: 'Resume is possible while paused; the run is executing.', ...patch.resume } },
+    { action: 'return_to_launch', label: 'Return to launch', meaning: 'm', enabled: true, reason: null },
+    { action: 'land_here', label: 'Land here', meaning: 'm', enabled: true, reason: null },
+    { action: 'restart', label: 'Restart the simulation at the mission start', meaning: 'm', enabled: true, reason: null, runs_in_ui: true },
+    { action: 'handover_to_standby', label: 'Hand over to a standby aircraft', meaning: 'm', enabled: false, reason: 'Needs more than one active aircraft.', multi_aircraft: true },
+  ] })
+  const highRow = () => live(liveAircraft({ assessment: { ...assessment('High', 70), source: 'live_telemetry', computed_at: 'x' } }))
+
+  it('shows each response with its reason when disabled, and runs Hold only after confirmation', async () => {
+    apiMock.researchLive.mockResolvedValue(highRow())
+    apiMock.threatResponseOptions.mockResolvedValue(options())
+    apiMock.respondToThreat.mockResolvedValue({ aircraft_id: 'px4-1', action: 'hold', outcome: 'executed', executed: true, message: 'The mission was paused (hold).', tier: 'High', threat_score: 70, evidence: [], simulation_only: true })
+    render(<ThreatMonitor {...props()}/>)
+    const group = await screen.findByRole('group', { name: 'Respond to px4-1' })
+    expect((within(group).getByRole('button', { name: 'Resume the mission' }) as HTMLButtonElement).disabled).toBe(true)
+    expect(group.textContent).toContain('Hand over to a standby aircraft: Needs more than one active aircraft.')
+    expect(screen.queryByRole('group', { name: 'Response options for px4-1' })).toBeNull()      // the recorded-only list is replaced
+    fireEvent.click(within(group).getByRole('button', { name: 'Hold (pause the mission)' }))
+    expect(apiMock.respondToThreat).not.toHaveBeenCalled()
+    fireEvent.click(await screen.findByRole('button', { name: /^CONFIRM: HOLD/ }))
+    await waitFor(() => expect(apiMock.respondToThreat).toHaveBeenCalledWith({ aircraft_id: 'px4-1', action: 'hold', confirm: true }))
+    expect(await screen.findByText(/The mission was paused \(hold\)\. \(High, score 70\)/)).toBeTruthy()
+  })
+
+  it('acknowledge runs at once, restart opens the page dialog, and a refused command shows the reason', async () => {
+    apiMock.researchLive.mockResolvedValue(highRow())
+    apiMock.threatResponseOptions.mockResolvedValue(options())
+    apiMock.respondToThreat.mockResolvedValueOnce({ aircraft_id: 'px4-1', action: 'acknowledge', outcome: 'acknowledged', executed: false, message: 'No command was sent.', tier: 'High', threat_score: 70, evidence: [], simulation_only: true })
+    apiMock.respondToThreat.mockRejectedValueOnce(new Error('The aircraft is landing at its current position.'))
+    const onRestart = vi.fn()
+    render(<ThreatMonitor {...props()} onRestart={onRestart}/>)
+    const group = await screen.findByRole('group', { name: 'Respond to px4-1' })
+    fireEvent.click(within(group).getByRole('button', { name: 'Acknowledge and continue' }))
+    await waitFor(() => expect(apiMock.respondToThreat).toHaveBeenCalledWith({ aircraft_id: 'px4-1', action: 'acknowledge', confirm: true }))
+    fireEvent.click(within(group).getByRole('button', { name: 'Restart the simulation at the mission start' }))
+    expect(onRestart).toHaveBeenCalledTimes(1)
+    fireEvent.click(within(group).getByRole('button', { name: 'Return to launch' }))
+    fireEvent.click(await screen.findByRole('button', { name: /^CONFIRM: RETURN TO LAUNCH/ }))
+    expect(await screen.findByText('The aircraft is landing at its current position.')).toBeTruthy()
+  })
+
+  it('handover asks which standby aircraft, lists the ones that cannot be used with the reason, and sends the choice', async () => {
+    apiMock.researchLive.mockResolvedValue(highRow())
+    const base = options() as unknown as { options: ResponseOption[] }
+    base.options = base.options.map(item => item.action === 'handover_to_standby' ? { ...item, enabled: true, reason: null, candidates: [
+      { aircraft_id: 'px4-2', role: 'standby', battery_pct: 90, eligible: true, reason: null },
+      { aircraft_id: 'px4-3', role: 'standby', battery_pct: 20, eligible: false, reason: 'battery 20% is below the 40% minimum' }] } : item)
+    apiMock.threatResponseOptions.mockResolvedValue(base)
+    apiMock.respondToThreat.mockResolvedValue({ aircraft_id: 'px4-1', action: 'handover_to_standby', outcome: 'executed', executed: true, message: 'px4-1 was sent back to launch and px4-2 started its own planned route.', tier: 'High', threat_score: 70, evidence: [], simulation_only: true })
+    render(<ThreatMonitor {...props()}/>)
+    const group = await screen.findByRole('group', { name: 'Respond to px4-1' })
+    fireEvent.click(within(group).getByRole('button', { name: 'Hand over to a standby aircraft' }))
+    const dialog = await screen.findByRole('group', { name: 'Confirm response' })
+    expect((within(dialog).getByRole('radio', { name: /px4-3/ }) as HTMLInputElement).disabled).toBe(true)
+    expect(dialog.textContent).toContain('not available: battery 20% is below the 40% minimum')
+    fireEvent.click(within(dialog).getByRole('button', { name: /^CONFIRM: HAND OVER/ }))
+    await waitFor(() => expect(apiMock.respondToThreat).toHaveBeenCalledWith({ aircraft_id: 'px4-1', action: 'handover_to_standby', confirm: true, candidate: 'px4-2' }))
+  })
+
+  it('shows a visible alert for High as well as Critical and the sound can be switched off', async () => {
+    apiMock.researchLive.mockResolvedValue(highRow())
+    render(<ThreatMonitor {...props()}/>)
+    const banner = await screen.findByRole('alert')
+    expect(banner.textContent).toMatch(/HIGH.*px4-1: threat tier High/)
+    const sound = screen.getByRole('checkbox', { name: 'Alert sound' }) as HTMLInputElement
+    expect(sound.checked).toBe(true)
+    fireEvent.click(sound)
+    expect(sound.checked).toBe(false)
+    expect(localStorage.getItem('trinetra.threatSound')).toBe('off')
+    localStorage.removeItem('trinetra.threatSound')
   })
 })

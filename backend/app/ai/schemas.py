@@ -181,7 +181,7 @@ class ScenarioAssistantTurn(StructuredOutput):
 
 
 class ScenarioAssistantAircraft(StructuredOutput):
-    index: int = Field(ge=1, le=5)
+    index: int = Field(ge=1, le=999)
     uav_id: str = Field(max_length=16)
     confirmed: bool
     role: Optional[str] = Field(default=None, max_length=20)
@@ -211,7 +211,7 @@ class ScenarioAssistantSnapshot(StructuredOutput):
     required_uav_count: Optional[int] = None
     activated_uav_count: int = Field(default=0, ge=0, le=20)
     fleet_verified: bool = False
-    active_uav_index: int = Field(default=1, ge=1, le=5)
+    active_uav_index: int = Field(default=1, ge=1, le=999)
     validation_items: list[str] = Field(default_factory=list, max_length=14)
     deploy_blockers: list[str] = Field(default_factory=list, max_length=16)
     aircraft: list[ScenarioAssistantAircraft] = Field(default_factory=list, max_length=5)

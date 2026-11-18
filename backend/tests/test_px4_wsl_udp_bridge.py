@@ -5,7 +5,7 @@ from tools.px4_wsl_udp_bridge import build_parser, forward_targets, px4_source_p
 
 
 def test_relay_accepts_multiple_configured_px4_instances_and_keeps_safe_default():
-    assert px4_source_ports(None) == frozenset({18570, 18571, 18572, 18573, 18574})
+    assert px4_source_ports(None) == frozenset(range(18570, 18586))          # instances 1-16 (it used to be 1-5, which silently rejected aircraft 6 and above)
     assert px4_source_ports([18570, 18572]) == frozenset({18570, 18572})
     assert build_parser().parse_args(["--windows-host", "172.23.80.1"]).px4_source_ports is None
 

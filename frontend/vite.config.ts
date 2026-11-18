@@ -1,3 +1,4 @@
+/// <reference types="vitest/config" />
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
@@ -22,6 +23,8 @@ export default defineConfig({
       })),
     }),
   ],
+  // The heavy workspace tests render large trees; under 29 parallel jsdom files they sometimes exceeded the 5 s default (flaky, not wrong).
+  test: { testTimeout: 30000, hookTimeout: 30000 },
   server: {
     host: '127.0.0.1',
     port: 5173,

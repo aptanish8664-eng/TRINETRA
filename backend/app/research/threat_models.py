@@ -28,6 +28,7 @@ from .threat_data import DT, FEATURE_COLUMNS, FEATURE_COLUMNS_ALL, FEATURE_COLUM
 ARTIFACT_DIR = Path(__file__).resolve().parents[2] / "research_artifacts"
 KEYS = ["flight_id", "aircraft_id"]
 SUSTAIN_SAMPLES = 3
+LIVE_CLEAN_WEIGHT = float(__import__("os").environ.get("TRINETRA_LIVE_CLEAN_WEIGHT", "4.0"))      # live clean flights (real SITL behaviour) count this much more than a synthetic row: they are rare and they are the case that matters
 REFERENCE_FEATURES = list(engine.EVIDENCE_TEMPLATES)
 
 
@@ -312,7 +313,8 @@ def _fit_set(columns: list[str], fit: pd.DataFrame, val: pd.DataFrame, test: pd.
     ]
     trials, best = [], None
     for params in grid:
-        candidate = HistGradientBoostingClassifier(**params, class_weight="balanced", early_stopping=False, random_state=seed).fit(fit[columns], y(fit))
+        weights = np.where(fit["cell"].to_numpy() == "live_clean", LIVE_CLEAN_WEIGHT, 1.0) if "cell" in fit else None
+        candidate = HistGradientBoostingClassifier(**params, class_weight="balanced", early_stopping=False, random_state=seed).fit(fit[columns], y(fit), sample_weight=weights)
         prob = candidate.predict_proba(val[columns])[:, 1]
         threshold = tune_threshold(val, prob, budget)
         summary = fast_eval(val).summary(prob, threshold)

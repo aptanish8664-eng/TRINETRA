@@ -7,6 +7,8 @@ import {
   type AttackLimits, type Experiment, type ExperimentAttack, type ExperimentConfig, type ExperimentInput, type ExperimentIssue,
   type PickerMission, type PickerVersion, type PresetId,
 } from './attackLabTypes'
+import { RunRecords } from './RunRecords'
+import { toast } from './Toasts'
 import './attack-lab.css'
 
 type Props = {
@@ -77,6 +79,9 @@ export function AttackLab({ canEdit, initialScenarioId = null, onOpenScenarioLab
   const [loaded, setLoaded] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
 
+  useEffect(() => { if (message) toast('success', message) }, [message])
+  useEffect(() => { if (error) toast('error', error) }, [error])
+
   const refresh = useCallback(async () => {
     const [list, picker] = await Promise.all([api.attackExperiments(), api.attackLabMissions()])
     setExperiments(list)
@@ -120,7 +125,7 @@ export function AttackLab({ canEdit, initialScenarioId = null, onOpenScenarioLab
 
   const open = (experiment: Experiment) => {
     setEditingId(experiment.id)
-    setReadOnly(false)
+    setReadOnly(Boolean(experiment.implemented))
     setDraft({ name: experiment.name, scenario_id: experiment.scenario_id, scenario_version_id: experiment.scenario_version_id, preset_id: experiment.preset_id, seed: experiment.seed, config: experiment.config, status: experiment.status })
     setIssues([]); setError(''); setMessage(''); setValidated(null)
     window.scrollTo?.({ top: 0, behavior: 'smooth' })
@@ -187,6 +192,15 @@ export function AttackLab({ canEdit, initialScenarioId = null, onOpenScenarioLab
       await refresh()
       setMessage(target.has_results ? `Deleted “${target.name}”. Its ${target.result_count} stored result(s) were kept, marked “from a deleted experiment”.` : `Deleted “${target.name}”.`)
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'The experiment could not be deleted.') } finally { setBusy(false) }
+  }
+  const implement = async (target: Experiment, enabled: boolean) => {
+    setBusy(true); setError(''); setMessage('')
+    try {
+      await api.implementExperiment(target.id, enabled)
+      await refresh()
+      setMessage(enabled ? `“${target.name}” is implemented: it runs automatically in the next flight of ${missionOf(target)}, on the monitor's copy of the GPS data only. Its schedule stays hidden until the run ends.`
+        : `“${target.name}” is no longer implemented. It can be edited or deleted again.`)
+    } catch (cause) { setError(cause instanceof Error ? cause.message : 'The Implement switch could not be changed.') } finally { setBusy(false) }
   }
   const repin = async (target: Experiment) => {
     setBusy(true); setError('')
@@ -337,7 +351,7 @@ export function AttackLab({ canEdit, initialScenarioId = null, onOpenScenarioLab
 
     <section className="panel attack-card attack-lab-list" aria-label="Experiments">
       <div className="panel-heading"><div><span className="eyebrow">SAVED EXPERIMENTS</span><h3>Experiments <span className="count-tag">{experiments.length}</span></h3></div></div>
-      {experiments.length === 0 ? <p className="planner-empty">No experiments yet. Build one above and save it.</p> : <ul className="attack-experiment-grid">{experiments.map(item => {
+      {experiments.length === 0 ? (!loaded ? <div className="skeleton-row" role="status" aria-label="Loading experiments"><span className="skeleton"/><span className="skeleton"/></div> : <p className="empty-state">No experiments yet. Build one above (choose a saved mission, pick a preset, add an attack) and save it.</p>) : <ul className="attack-experiment-grid">{experiments.map(item => {
         const old = item.superseded
         const pinned = missions.find(entry => entry.scenario_id === item.scenario_id)?.versions.find(entry => entry.id === item.scenario_version_id)
         return <li key={item.id} className={`attack-exp-card ${old ? 'old' : ''} ${editingId === item.id ? 'selected' : ''}`} aria-label={`Experiment ${item.name}`}>
@@ -349,19 +363,28 @@ export function AttackLab({ canEdit, initialScenarioId = null, onOpenScenarioLab
             <div><dt>Pinned version</dt><dd>{pinned ? `v${pinned.version_number}` : 'unknown'}</dd></div>
           </dl>
           <small>{item.has_results ? `${item.result_count} stored result(s): edits are saved as a copy` : 'Never run: can be edited in place'}</small>
+          <label className={`attack-implement ${item.implemented ? 'on' : ''}`} title={item.implement_note}>
+            <input type="checkbox" role="switch" checked={Boolean(item.implemented)} disabled={busy || !canEdit || (!item.implemented && item.config.attacks.length === 0)}
+              aria-label={`Implement ${item.name}`} onChange={event => void implement(item, event.target.checked)}/>
+            <span><b>Implement</b> <small>{item.implemented ? `ON: runs automatically in flights of ${missionOf(item)}` : item.config.attacks.length === 0 ? 'OFF: a baseline has no attack to run' : 'OFF: does nothing until switched on'}</small></span>
+          </label>
+          {item.implemented && old && <small className="warn">Pinned to {missionOf(item)} only: it will not run in a flight of the newer version. Use RE-PIN TO LATEST (this switches Implement off until you turn it on again).</small>}
           {old && <small className="warn">Greyed: a newer version of this mission exists, so this experiment is pinned to an older one.</small>}
           <div className="attack-exp-actions">
-            <button type="button" className="button-secondary" onClick={() => open(item)} aria-label={`Open experiment ${item.name}`}>{canEdit ? 'OPEN / EDIT' : 'OPEN'}</button>
+            <button type="button" className="button-secondary" onClick={() => open(item)} aria-label={`Open experiment ${item.name}`}>{canEdit && !item.implemented ? 'OPEN / EDIT' : 'OPEN'}</button>
             {canEdit && old && <button type="button" className="button-secondary" disabled={busy} onClick={() => void repin(item)} aria-label={`Re-pin ${item.name} to latest`}>RE-PIN TO LATEST</button>}
             {canEdit && (confirmDelete === item.id
               ? <span className="attack-confirm" role="group" aria-label={`Confirm delete ${item.name}`}>
                 <small>{item.has_results ? `Delete this experiment? Its ${item.result_count} result(s) are kept.` : 'Delete this experiment?'}</small>
                 <button type="button" className="button-primary" disabled={busy} onClick={() => void remove(item)}>DELETE</button>
                 <button type="button" className="button-quiet" onClick={() => setConfirmDelete(null)}>CANCEL</button></span>
-              : <button type="button" className="button-quiet" disabled={busy} onClick={() => setConfirmDelete(item.id)} aria-label={`Delete ${item.name}`}><Trash2 size={13}/> DELETE</button>)}
+              : <button type="button" className="button-quiet" disabled={busy || Boolean(item.implemented)} title={item.implemented ? 'Switch Implement off before deleting this experiment.' : undefined} onClick={() => setConfirmDelete(item.id)} aria-label={`Delete ${item.name}`}><Trash2 size={13}/> DELETE</button>)}
+            {item.implemented && <small className="warn">Edit and delete are locked while Implement is on.</small>}
           </div>
         </li>
       })}</ul>}
     </section>
+
+    <RunRecords/>
   </section>
 }

@@ -15,6 +15,7 @@ import type {
   ScenarioConfig,
   ScenarioIntent,
   MissionDeployment,
+  DeploymentOverview,
 } from './auth'
 import type { AIStatus, GeographicMissionPlanningRequest, GeographicMissionProposal, MissionAssessment, MissionConversation, MissionProposal, OperatorSimulationConfig, PendingMissionProposal } from './ai'
 
@@ -74,10 +75,15 @@ export interface ExecutionView {
   uploaded: boolean; armed: boolean; px4_mode: string | null
   route_total: number | null; route_reached: number | null; route_current: number | null; percent: number | null
   elapsed_s: number | null; estimated_s: number | null; px4_heartbeat_age_s: number | null; px4_messages: string[]
-  controls: { pause: ExecutionControl; resume: ExecutionControl; abort: ExecutionControl }
+  controls: { pause: ExecutionControl; resume: ExecutionControl; abort: ExecutionControl; land?: ExecutionControl }
+  landed_state?: string | null; on_ground?: boolean | null; on_ground_source?: string | null; relative_altitude_m?: number | null
   simulation_only: true
 }
-export interface PreflightCheck { key: string; label: string; ok: boolean; detail: string; offer_relocation?: boolean; code?: string }
+export interface PreflightCheck {
+  key: string; label: string; ok: boolean; detail: string; offer_relocation?: boolean; code?: string
+  /** aircraft_count: the machine runs fewer aircraft than the mission has (the plain sentence is `detail`) and what can be done about it */
+  capacity?: number; required?: number; running?: number; offer_activation?: number | null; options?: { id: string; label: string; aircraft: number | null }[]
+}
 export interface ExecutionPreflight {
   deployment_id: string; aircraft_id?: string; can_start: boolean
   role_rule: { allowed: boolean; code: string; message: string }
@@ -93,6 +99,27 @@ export interface RelocationResult {
   max_distance_to_start_m: number | null
   commands_sent_to_aircraft: false
   note: string
+}
+
+/** Land here: land at the current position and disarm (in the air or armed on the ground). */
+export interface LandResult {
+  aircraft_id: string; already_landing: boolean; mode: 'air' | 'ground' | null; state: 'landing' | 'disarmed'; forced?: false
+  execution_id?: string | null; execution?: ExecutionView | null; started_at?: string; px4_messages?: string[]; simulation_only: true
+}
+/** `skipped` = not run: an earlier step failed (it is never left on running or waiting). */
+export interface RestartStep { key: string; label: string; status: 'pending' | 'running' | 'ok' | 'failed' | 'skipped'; detail: string }
+/** One aircraft of a (re)start: starting -> telemetry_ok / pose_ok -> ready, or failed with the reason. */
+export interface RestartAircraft { aircraft_id: string; state: 'starting' | 'telemetry_ok' | 'pose_ok' | 'ready' | 'failed'; detail: string; manager_state?: string; telemetry?: boolean; pose?: boolean }
+/** One restart of the simulation at a mission start (also the one-click mission switch: purpose "switch"). */
+export interface RestartJob {
+  id: string; status: 'running' | 'succeeded' | 'failed' | 'partial'; purpose: 'restart' | 'switch'; deployment_id: string; reason: string
+  /** every aircraft with its own state and a live count ("3 of 5 ready, waiting for px4-4 and px4-5"); `partial`: only some came up */
+  aircraft: RestartAircraft[]; requested_count: number; ready_count: number; summary: string; partial: boolean; accepted_partial: boolean; missing: string[]
+  can_retry_missing: boolean; can_continue: boolean; retry_of: string | null
+  steps: RestartStep[]; failure: { step: string | null; code: string; message: string } | null; can_retry: boolean; elapsed_s: number
+  started_at: string; finished_at: string | null; started_by_name: string
+  result: { mission_start: { latitude: number; longitude: number }; max_distance_to_start_m: number | null; armed: boolean | null; ended_executions: string[]; killed_processes: { kind: string; pid: number }[] } | null
+  simulation_only: true
 }
 
 export class ApiError extends Error {
@@ -177,6 +204,18 @@ async function request<T>(path: string, options?: RequestInit, csrfRetry = true)
   return response.json() as Promise<T>
 }
 
+let fleetStatusShared: { at: number; promise: Promise<unknown> } | null = null
+const FLEET_STATUS_SHARE_MS = 4000
+function sharedFleetStatus<T>(): Promise<T> {
+  const now = Date.now()
+  if (fleetStatusShared && now - fleetStatusShared.at < FLEET_STATUS_SHARE_MS) return fleetStatusShared.promise as Promise<T>
+  const promise = request<T>('/api/fleet/status')
+  const entry = { at: now, promise }
+  fleetStatusShared = entry
+  promise.catch(() => { if (fleetStatusShared === entry) fleetStatusShared = null })
+  return promise
+}
+
 export const api = {
   health: (signal?: AbortSignal) => request<{
     status: string
@@ -235,9 +274,10 @@ export const api = {
   exportExperiment: (id: string) => request<{ filename: string; content: string }>(`/api/experiments/${id}.csv`),
   export: (id: string) => request<{ filename: string; content: string }>(`/api/analytics/${id}.csv`),
   socket: (id: string) => new WebSocket(`${API.replace(/^http/, 'ws')}/api/simulations/${id}/stream`),
-  px4Telemetry: () => request<Px4TelemetrySnapshot>('/api/telemetry/px4'),
+  /** `trails: false` leaves out the flight trails: polls that only need positions and states use it (a full frame is only needed once). */
+  px4Telemetry: (options: { trails?: boolean } = {}) => request<Px4TelemetrySnapshot>(`/api/telemetry/px4${options.trails === false ? '?trails=false' : ''}`),
   px4TelemetrySocket: (since: string) => new WebSocket(`${API.replace(/^http/, 'ws')}/api/telemetry/px4/stream?trail_mode=delta-v1&since=${encodeURIComponent(since)}`),
-  gazeboPoses: () => request<GazeboPoseSnapshot>('/api/telemetry/gazebo'),
+  gazeboPoses: (options: { trails?: boolean } = {}) => request<GazeboPoseSnapshot>(`/api/telemetry/gazebo${options.trails === false ? '?trails=false' : ''}`),
   gazeboPoseSocket: (since: string) => new WebSocket(`${API.replace(/^http/, 'ws')}/api/telemetry/gazebo/stream?trail_mode=delta-v1&since=${encodeURIComponent(since)}`),
   aiStatus: () => request<AIStatus>('/api/ai/status'),
   createAIProposal: (description: string, operator_config: OperatorSimulationConfig) => request<MissionProposal>('/api/ai/proposals', { method: 'POST', body: JSON.stringify({ description, operator_config }) }),
@@ -295,9 +335,21 @@ export const api = {
   executionPreflight: (deploymentId: string) => request<ExecutionPreflight>(`/api/mission-control/executions/preflight?deployment_id=${encodeURIComponent(deploymentId)}`),
   latestExecution: async () => (await request<{ execution: ExecutionView | null }>('/api/mission-control/executions/latest')).execution,
   startExecution: (deploymentId: string) => request<ExecutionView>('/api/mission-control/executions', { method: 'POST', body: JSON.stringify({ deployment_id: deploymentId, confirm: true }) }),
+  fleetExecutions: (deploymentId: string) => request<{ deployment_id: string; executions: Array<ExecutionView & { role: string | null }>; on_the_ground: Array<{ aircraft_id: string; role: string }>; simulation_only: true }>(`/api/mission-control/executions/fleet?deployment_id=${encodeURIComponent(deploymentId)}`),
   pauseExecution: (id: string) => request<ExecutionView>(`/api/mission-control/executions/${encodeURIComponent(id)}/pause`, { method: 'POST' }),
   resumeExecution: (id: string) => request<ExecutionView>(`/api/mission-control/executions/${encodeURIComponent(id)}/resume`, { method: 'POST' }),
   disarmAircraft: (aircraftId: string) => request<{ aircraft_id: string; disarmed: boolean; armed: boolean; forced: false; px4_messages: string[] }>(`/api/mission-control/aircraft/${encodeURIComponent(aircraftId)}/disarm`, { method: 'POST' }),
+  landHere: (aircraftId: string) => request<LandResult>(`/api/mission-control/aircraft/${encodeURIComponent(aircraftId)}/land`, { method: 'POST', body: JSON.stringify({ confirm: true }) }),
+  startRestart: (deploymentId: string, purpose: 'restart' | 'switch' = 'restart') =>
+    request<RestartJob>('/api/mission-control/restart', { method: 'POST', body: JSON.stringify({ deployment_id: deploymentId, confirm: true, purpose }) }),
+  restartJob: (id: string) => request<RestartJob>(`/api/mission-control/restart/${encodeURIComponent(id)}`),
+  /** Restart only the aircraft that did not come up (the ready ones keep running). */
+  retryMissingAircraft: (id: string) => request<RestartJob>(`/api/mission-control/restart/${encodeURIComponent(id)}/retry-missing`, { method: 'POST' }),
+  /** Accept a partial result: continue with the ready aircraft; the others stay not available. */
+  continueWithReady: (id: string) => request<RestartJob>(`/api/mission-control/restart/${encodeURIComponent(id)}/continue`, { method: 'POST' }),
+  latestRestart: async () => (await request<{ job: RestartJob | null }>('/api/mission-control/restart')).job,
+  deploymentRoleRule: async (deploymentId: string) =>
+    (await request<{ role_rule: { allowed: boolean; code: string; message: string } }>(`/api/mission-control/deployments/${encodeURIComponent(deploymentId)}/role-rule`)).role_rule,
   abortExecution: (id: string) => request<ExecutionView>(`/api/mission-control/executions/${encodeURIComponent(id)}/abort`, { method: 'POST' }),
   executionEvents: (id: string, after = 0) => request<{ execution_id: string; state: string; events: ExecutionEvent[] }>(`/api/mission-control/executions/${encodeURIComponent(id)}/events?after=${after}`),
   attackLabMissions: async () => (await request<{ missions: import('../components/attackLabTypes').PickerMission[]; legacy_only_count: number }>('/api/attack-lab/missions')),
@@ -311,6 +363,17 @@ export const api = {
   createExperiment: (input: unknown) => request<import('../components/attackLabTypes').Experiment>('/api/attack-lab/experiments', { method: 'POST', body: JSON.stringify(input) }),
   updateExperiment: (id: string, input: unknown) => request<import('../components/attackLabTypes').Experiment>(`/api/attack-lab/experiments/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(input) }),
   copyExperiment: (id: string, input?: unknown) => request<import('../components/attackLabTypes').Experiment>(`/api/attack-lab/experiments/${encodeURIComponent(id)}/copy`, { method: 'POST', ...(input ? { body: JSON.stringify(input) } : {}) }),
+  reconfigurations: async () => (await request<{ reconfigurations: import('../components/attackLabTypes').Reconfiguration[] }>('/api/research/reconfigurations')).reconfigurations,
+  threatResponseOptions: (aircraftId: string) => request<import('../components/attackLabTypes').ResponseOptions>(`/api/research/responses?aircraft_id=${encodeURIComponent(aircraftId)}`),
+  respondToThreat: (payload: { aircraft_id: string; action: string; confirm: boolean; candidate?: string }) => request<import('../components/attackLabTypes').ThreatResponseResult>('/api/research/responses', { method: 'POST', body: JSON.stringify(payload) }),
+  implementExperiment: (id: string, enabled: boolean) => request<import('../components/attackLabTypes').Experiment>(`/api/attack-lab/experiments/${encodeURIComponent(id)}/implement`, { method: 'POST', body: JSON.stringify({ enabled }) }),
+  attackLabLive: () => request<import('../components/attackLabTypes').LiveExperimentStatus>('/api/attack-lab/live'),
+  attackLabResults: async () => (await request<{ results: import('../components/attackLabTypes').StoredResult[] }>('/api/attack-lab/results')).results,
+  exportRunRecords: async () => {
+    const response = await fetch(`${API}/api/attack-lab/results/export`, { credentials: 'include' })
+    if (!response.ok) throw await responseError(response)
+    return response.blob()
+  },
   repinExperiment: (id: string) => request<import('../components/attackLabTypes').Experiment>(`/api/attack-lab/experiments/${encodeURIComponent(id)}/repin`, { method: 'POST' }),
   deleteExperiment: (id: string) => request<void>(`/api/attack-lab/experiments/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   researchModelInfo: () => request<import('../components/attackLabTypes').ModelInfo>('/api/research/model-info'),
@@ -322,13 +385,19 @@ export const api = {
   finishReplay: (replayId: string) => request<{ finished: boolean }>(`/api/research/replays/${encodeURIComponent(replayId)}/finish`, { method: 'POST' }),
   replayEvaluation: (replayId: string) => request<import('../components/attackLabTypes').ReplayEvaluation>(`/api/research/replays/${encodeURIComponent(replayId)}/evaluation`),
   previewRoute: (plan: unknown, uavId: string) =>
-    request<{ route: import('../components/missionPlan').GeneratedRoute; summary: { length_m: number; duration_s: number; waypoints: number; limit_duration_s?: number; limit_length_m?: number } }>(
+    request<{ route: import('../components/missionPlan').GeneratedRoute; summary: { length_m: number; duration_s: number; waypoints: number; limit_duration_s?: number; limit_length_m?: number }
+      warnings?: import('../components/missionPlan').PlanIssue[]; limits?: { max_distance_from_start_m: number | null; max_altitude_m: number | null; max_duration_minutes: number | null; auto: import('../components/missionPlan').AutoLimits } | null }>(
       '/api/mission-plans/preview-route', { method: 'POST', body: JSON.stringify({ plan, uav_id: uavId }) }),
-  planningLimits: () => request<{ schema_version: number; limits: Record<string, number> }>('/api/mission-plans/limits'),
+  planningLimits: () => request<{ schema_version: number; limits: Record<string, number>; quick?: import('../components/quickMission').QuickRules }>('/api/mission-plans/limits'),
+  quickMission: (payload: import('../components/quickMission').QuickRequest) =>
+    request<import('../components/quickMission').QuickResult>('/api/mission-plans/quick', { method: 'POST', body: JSON.stringify(payload) }),
+  parseMission: (payload: import('../components/quickMission').ParseRequest) =>
+    request<import('../components/quickMission').ParseResult>('/api/mission-plans/quick/parse', { method: 'POST', body: JSON.stringify(payload) }),
   scenarioAssistant: (payload: { draft_id: string; message: string; history: { role: 'user' | 'assistant'; content: string }[]; snapshot: unknown }) =>
     request<{ reply: string; actions: unknown[]; source: 'ai'; dropped_actions: number }>(
       '/api/ai/scenario-assistant', { method: 'POST', body: JSON.stringify(payload) }),
-  fleetStatus: () => request<{ capacity: number; verified_count: number; instances: { aircraft_id: string; instance_number: number; system_id: number; gazebo_model: string; verified: boolean }[]; manager_error: string | null; bridges?: { telemetry?: { status: string }; pose?: { status: string } } | null; gazebo_server?: string | null; wsl_address?: string | null }>('/api/fleet/status'),
+  /** One shared read: the backend asks the WSL fleet manager for every status call, so callers within a few seconds share one answer. */
+  fleetStatus: () => sharedFleetStatus<{ capacity: number; verified_count: number; instances: { aircraft_id: string; instance_number: number; system_id: number; gazebo_model: string; verified: boolean }[]; manager_error: string | null; bridges?: { telemetry?: { status: string }; pose?: { status: string } } | null; gazebo_server?: string | null; wsl_address?: string | null }>(),
   createScenario: (title: string, config: ScenarioConfig, intent?: ScenarioIntent) =>
     request<ScenarioDetail>('/api/scenarios', { method: 'POST', body: JSON.stringify({ title, config, intent }) }),
   updateScenario: (scenarioId: string, title: string, config: ScenarioConfig, intent?: ScenarioIntent) =>
@@ -337,10 +406,23 @@ export const api = {
     request<void>(`/api/scenarios/${encodeURIComponent(scenarioId)}`, { method: 'DELETE' }),
   submitScenario: (scenarioId: string, versionId: string) =>
     request<{ id: string; status: string }>(`/api/scenarios/${encodeURIComponent(scenarioId)}/versions/${encodeURIComponent(versionId)}/submit`, { method: 'POST' }),
-  deployScenario: (scenarioId: string, versionId: string) =>
-    request<MissionDeployment>(`/api/scenarios/${encodeURIComponent(scenarioId)}/versions/${encodeURIComponent(versionId)}/deploy`, { method: 'POST' }),
+  /** `plan_only`: hand the mission to Mission Control without checking or starting any aircraft (Start stays blocked until enough aircraft run). */
+  deployScenario: (scenarioId: string, versionId: string, mode?: 'plan_only') =>
+    request<MissionDeployment>(`/api/scenarios/${encodeURIComponent(scenarioId)}/versions/${encodeURIComponent(versionId)}/deploy`,
+      mode ? { method: 'POST', body: JSON.stringify({ mode }) } : { method: 'POST' }),
+  generalScenarios: async (filters: { owner?: string; status?: string; q?: string } = {}) => {
+    const params = new URLSearchParams(Object.entries(filters).filter(([, value]) => value) as [string, string][])
+    return (await request<{ scenarios: import('./auth').GeneralScenarioRow[] }>(`/api/general/scenarios${params.size ? `?${params}` : ''}`)).scenarios
+  },
+  generalScenarioExport: (scenarioId: string) => request<Record<string, unknown>>(`/api/general/scenarios/${encodeURIComponent(scenarioId)}/export`),
+  generalDeletePreview: (scenarioId: string) => request<import('./auth').ScenarioDeletePreview>(`/api/general/scenarios/${encodeURIComponent(scenarioId)}/delete-preview`),
+  generalDeleteScenario: (scenarioId: string, confirmName: string, deleteResults: boolean) =>
+    request<{ scenario_id: string; title: string; counts: Record<string, number>; content_hash: string }>(`/api/general/scenarios/${encodeURIComponent(scenarioId)}/delete`,
+      { method: 'POST', body: JSON.stringify({ confirm_name: confirmName, delete_results: deleteResults }) }),
   latestMissionDeployment: async () =>
     (await request<{ deployment: MissionDeployment | null }>('/api/mission-control/deployments/latest')).deployment,
+  /** The latest deployment plus the deployment the newest execution belongs to (mission switching). */
+  missionDeployments: () => request<DeploymentOverview>('/api/mission-control/deployments/latest'),
   myScenarioRequests: async () =>
     (await request<{ requests: ScenarioApprovalRequest[] }>('/api/scenarios/my-approval-requests')).requests,
   pendingScenarioApprovals: async () =>

@@ -3,8 +3,10 @@ import { ShieldAlert } from 'lucide-react'
 import { api } from '../services/api'
 import { TIER_COLORS, type ActionId, type DecisionRecord, type LiveAircraft, type LiveThreat, type ModelInfo, type Tier } from './attackLabTypes'
 import { ThreatCard } from './ThreatCard'
+import { ContinuityPanel } from './ContinuityPanel'
 import { findGroundTruthKeys, sessionFreshness, useThreatSession } from './threatSession'
 import type { Alert } from './missionControlModel'
+import type { ResponseOption } from './attackLabTypes'
 import './threat-panel.css'
 
 type Props = {
@@ -12,6 +14,26 @@ type Props = {
   /** One entry per tier transition (never per poll); the dashboard merges them into its alerts list. */
   onTierTransitions: (alerts: Alert[]) => void
   onTiers: (tiers: Record<string, Tier>) => void
+  /** Opens the page's Restart-at-mission-start dialog (the response "Restart the simulation"). */
+  onRestart?: () => void
+}
+
+const SOUND_KEY = 'trinetra.threatSound'
+const readSound = () => { try { return localStorage.getItem(SOUND_KEY) !== 'off' } catch { return true } }
+/** A short tone for a new High or Critical tier (WebAudio; silently does nothing where audio is blocked). */
+export function playAlertTone(tier: Tier) {
+  try {
+    const Context = window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
+    if (!Context) return
+    const audio = new Context()
+    const gain = audio.createGain(); gain.gain.value = 0.05; gain.connect(audio.destination)
+    const beeps = tier === 'Critical' ? 3 : 2
+    for (let index = 0; index < beeps; index += 1) {
+      const oscillator = audio.createOscillator(); oscillator.frequency.value = tier === 'Critical' ? 880 : 660; oscillator.connect(gain)
+      oscillator.start(audio.currentTime + index * 0.28); oscillator.stop(audio.currentTime + index * 0.28 + 0.16)
+    }
+    window.setTimeout(() => void audio.close().catch(() => undefined), 1500)
+  } catch { /* no sound where the browser blocks it */ }
 }
 
 const CLOCK_MS = 5000
@@ -45,7 +67,11 @@ function LiveNotice({ item }: { item: LiveAircraft }) {
 }
 
 /** Mission Control threat monitor: live assessments computed by the backend from PX4 SITL telemetry, or an offline replay. It never invents values. */
-export function ThreatMonitor({ canRecord, onTierTransitions, onTiers }: Props) {
+export function ThreatMonitor({ canRecord, onTierTransitions, onTiers, onRestart }: Props) {
+  const [soundOn, setSoundOn] = useState(readSound)
+  const soundRef = useRef(soundOn)
+  soundRef.current = soundOn
+  const [responses, setResponses] = useState<Record<string, ResponseOption[]>>({})
   const session = useThreatSession()
   const [model, setModel] = useState<ModelInfo | null>(null)
   const [live, setLive] = useState<LiveThreat | null>(null)
@@ -114,6 +140,7 @@ export function ThreatMonitor({ canRecord, onTierTransitions, onTiers }: Props) 
         alerts.push({ id: `threat:${id}:${before}>${tier}:${stamp}`, severity: tier === 'Critical' ? 'critical' : tier === 'High' || tier === 'Medium' ? 'warning' : 'info',
           source: 'threat monitor', message: `${id} threat tier ${before} → ${tier} (score ${score.toFixed(0)}).` })
         if (tier !== 'Critical') setAcknowledged(current => ({ ...current, [id]: false }))
+        if ((tier === 'High' || tier === 'Critical') && soundRef.current) playAlertTone(tier)
       }
       previousTiers.current[id] = tier
     }
@@ -126,6 +153,25 @@ export function ThreatMonitor({ canRecord, onTierTransitions, onTiers }: Props) 
     if (alerts.length) onTierTransitions(alerts)
   }, [flying, flightRunning, session, leaked, onTierTransitions, onTiers])
 
+  // The response options (real single-aircraft actions with their enabled state and reasons) for the aircraft with a live assessment.
+  const liveIds = flying.filter(item => item.state === 'live' && item.assessment).map(item => item.aircraft_id).join(',')
+  useEffect(() => {
+    if (!liveIds) { setResponses({}); return }
+    let stopped = false
+    const read = () => liveIds.split(',').forEach(id => {
+      void Promise.resolve().then(() => api.threatResponseOptions(id)).then(value => { if (!stopped) setResponses(current => ({ ...current, [id]: value.options })) }).catch(() => undefined)
+    })
+    read()
+    const timer = window.setInterval(read, 2000)
+    return () => { stopped = true; window.clearInterval(timer) }
+  }, [liveIds])
+  const respond = async (aircraftId: string, action: string, candidate?: string) => {
+    const result = await api.respondToThreat({ aircraft_id: aircraftId, action, confirm: true, ...(candidate ? { candidate } : {}) })
+    if (result.decision) setDecisions(current => [result.decision as DecisionRecord, ...current].slice(0, 50))
+    const options = await api.threatResponseOptions(aircraftId).catch(() => null)
+    if (options) setResponses(current => ({ ...current, [aircraftId]: options.options }))
+    return `${result.message}${result.tier ? ` (${result.tier}, score ${result.threat_score?.toFixed(0)})` : ''} Recorded with the evidence shown.`
+  }
   const rule = live?.handover_rule?.message ?? model?.handover_rule?.message
   const recordLive = async (aircraftId: string, action: ActionId, candidate: string | null) => {
     const assessment = flying.find(item => item.aircraft_id === aircraftId)?.assessment
@@ -148,8 +194,8 @@ export function ThreatMonitor({ canRecord, onTierTransitions, onTiers }: Props) 
   const replayTop = replayCards.find(item => item.assessment)
   const top = flightRunning ? (liveTop ? { id: liveTop.aircraft_id, tier: liveTop.assessment!.tier } : null)
     : replayActive && replayTop?.assessment ? { id: replayTop.aircraftId, tier: replayTop.assessment.tier } : null
-  const critical = flightRunning ? flying.filter(item => item.state === 'live' && item.assessment?.tier === 'Critical' && !acknowledged[item.aircraft_id]).map(item => item.aircraft_id)
-    : replayActive ? replayCards.filter(item => item.assessment?.tier === 'Critical' && !acknowledged[item.aircraftId]).map(item => item.aircraftId) : []
+  const critical = flightRunning ? flying.filter(item => item.state === 'live' && (item.assessment?.tier === 'Critical' || item.assessment?.tier === 'High') && !acknowledged[item.aircraft_id]).map(item => item.aircraft_id)
+    : replayActive ? replayCards.filter(item => (item.assessment?.tier === 'Critical' || item.assessment?.tier === 'High') && !acknowledged[item.aircraftId]).map(item => item.aircraftId) : []
   const replayLine = session
     ? `Source: offline replay (${session.sourceName}) · last update ${new Date(session.updatedAt).toLocaleTimeString()}${session.state === 'finished' ? ' · replay ended' : ''}`
     : 'Source: none'
@@ -157,6 +203,8 @@ export function ThreatMonitor({ canRecord, onTierTransitions, onTiers }: Props) 
 
   return <section className={`panel mc-panel threat-monitor ${idle ? 'idle' : ''}`} aria-label="Threat monitor">
     <div className="panel-heading"><div><span className="eyebrow">THREAT MONITOR</span><h3><ShieldAlert size={15}/> GPS threat assessment</h3></div>
+      <label className="threat-sound" title="A short tone when a tier becomes High or Critical"><input type="checkbox" checked={soundOn} aria-label="Alert sound"
+        onChange={event => { setSoundOn(event.target.checked); try { localStorage.setItem(SOUND_KEY, event.target.checked ? 'on' : 'off') } catch { /* private window */ } }}/> Alert sound</label>
       {top && !liveStale && <span className="count-tag" style={{ color: TIER_COLORS[top.tier] }}>FLEET: {top.tier.toUpperCase()} · {top.id}</span>}
       {idle && <p className="threat-waiting" role="status">
         <span>Waiting for a flight.</span>
@@ -165,8 +213,9 @@ export function ThreatMonitor({ canRecord, onTierTransitions, onTiers }: Props) 
         {replayCards.length > 0 && session && <button type="button" className="button-quiet" onClick={() => setShowReplay(true)}>Last offline replay: {session.sourceName}{freshness === 'ended' ? ' (ended)' : freshness === 'stale' ? ' (stopped)' : ''} · VIEW</button>}
       </p>}
     </div>
-    {critical.length > 0 && <div className="threat-banner" role="alert"><b>CRITICAL</b><span>{critical.join(', ')}: threat tier Critical. Review the recommended action below.</span>
+    {critical.length > 0 && <div className="threat-banner" role="alert"><b>{flying.some(item => item.assessment?.tier === 'Critical' && critical.includes(item.aircraft_id)) || replayCards.some(item => item.assessment?.tier === 'Critical' && critical.includes(item.aircraftId)) ? 'CRITICAL' : 'HIGH'}</b><span>{critical.join(', ')}: threat tier {flying.some(item => item.assessment?.tier === 'Critical' && critical.includes(item.aircraft_id)) || replayCards.some(item => item.assessment?.tier === 'Critical' && critical.includes(item.aircraftId)) ? 'Critical' : 'High'}. Review the response options below.</span>
       <button type="button" className="button-secondary" onClick={() => setAcknowledged(current => ({ ...current, ...Object.fromEntries(critical.map(id => [id, true])) }))}>ACKNOWLEDGE</button></div>}
+    <ContinuityPanel/>
     {leaked.length > 0 && <p role="alert" className="scenario-library-error">Threat data was rejected because it contained ground-truth fields.</p>}
 
     {flightRunning && <>
@@ -189,6 +238,7 @@ export function ThreatMonitor({ canRecord, onTierTransitions, onTiers }: Props) 
           return <div key={item.aircraft_id} className="threat-live-item">
             <ThreatCard aircraftId={item.aircraft_id} role={item.role} assessment={item.assessment} state={landed ? 'landed' : lost || liveStale ? 'stale' : 'ok'} staleNote={staleNote}
               history={history.current[item.aircraft_id] ?? []} sourceLine={sourceLine} canRecord={canRecord && !lost && !landed} decisions={decisions} handoverRule={rule}
+              responses={!lost && !landed ? responses[item.aircraft_id] : undefined} onRespond={(action, candidate) => respond(item.aircraft_id, action, candidate)} onRestart={onRestart}
               highlighted={!lost && !landed && item.assessment?.tier !== undefined && item.assessment.tier !== 'Low'} onConfirm={(action, candidate) => recordLive(item.aircraft_id, action, candidate)}/>
             {item.state === 'live' && optional.length > 0 && <p className="threat-live-note amber" role="status"><b>Input missing (score still computed):</b> {optional.map(entry => `${entry.title} — ${entry.meaning}`).join(' ')}</p>}
             {item.state === 'live' && quality && quality.flags.length > 0 && <p className="threat-live-note" role="status">{quality.flags.join(' ')}</p>}

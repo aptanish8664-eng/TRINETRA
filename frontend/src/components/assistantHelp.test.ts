@@ -99,6 +99,20 @@ describe('three sections: A mission, B individual UAV configuration, C review an
     expect(explainTopic('what is the handover battery')).toContain(HANDOVER_BATTERY_NOTE)
     expect(explainTopic('is the attack schedule hidden')).toContain(HIDDEN_SCHEDULE_NOTE)
     expect(explainTopic('how do I deploy')).toMatch(/Deploy to Mission Control hands the saved/)
-    expect(explainTopic('why is the aircraft in zurich')).toMatch(/Move simulation to mission start/)
+    expect(explainTopic('why is the aircraft in zurich')).toMatch(/Restart at mission start/)
+    expect(explainTopic('what does land here do?')).toMatch(/lands the aircraft at its current position and then disarms it.*not a motor kill and not return to launch.*aborted: landed in place/)
+    expect(explainTopic('how do I switch to the newer deployment?')).toMatch(/Switch and restart at the new start.*simulation restarted for a new mission.*Operator.*approved/)
+    expect(explainTopic('how do I restart at the mission start?')).toMatch(/always available.*steps are shown one by one.*Retry/)
   })
 })
+
+describe('assistant help: health check', () => {
+  it('points to the one-command health check, says it is read-only and never reads the settings file', () => {
+    const answer = explainTopic('how do I check my setup, something is not working')
+    expect(answer).toMatch(/trinetra_doctor\.py/)
+    expect(answer).toMatch(/read-only/)
+    expect(answer).toMatch(/never reads backend\/\.env/)
+    expect(answer).toMatch(/--start/)
+  })
+})
+

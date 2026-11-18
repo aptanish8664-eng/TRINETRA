@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AlertTriangle, CheckCircle2 } from 'lucide-react'
-import { api, ApiError } from '../services/api'
+import { api, ApiError, type RestartJob } from '../services/api'
 import type { GazeboPoseSnapshot, Px4TelemetrySnapshot, Px4TelemetryStreamSnapshot } from '../types'
 import type { MissionDeployment } from '../services/auth'
 import { readLiveBasemap, storeLiveBasemap } from './basemapPreference'
@@ -10,6 +10,9 @@ import { MapErrorBoundary } from './MapErrorBoundary'
 import { ThreatMonitor } from './ThreatMonitor'
 import { SimulationLocationNotice } from './SimulationLocationNotice'
 import { MissionExecutionPanel } from './MissionExecutionPanel'
+import { MissionSwitchBanner } from './MissionSwitchBanner'
+import { RestartDialog } from './RestartDialog'
+import { useDeploymentOverview } from './useDeploymentOverview'
 import type { ExecutionEvent } from '../services/api'
 import type { Tier } from './attackLabTypes'
 import { mergePx4TelemetryStream } from '../services/telemetryStreams'
@@ -73,8 +76,18 @@ export function Px4MissionControl({ notice = '', onDismissNotice, onOpenScenario
   const [status, setStatus] = useState<LinkState>('checking')
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [error, setError] = useState('')
-  const [deployment, setDeployment] = useState<MissionDeployment | null>(null)
-  const [deploymentLoaded, setDeploymentLoaded] = useState(false)
+  // Mission switching: the deployment the newest execution belongs to stays shown (pinned) while a newer one waits; the user switches explicitly.
+  const { overview, loaded: deploymentLoaded, refresh: refreshOverview } = useDeploymentOverview(true)
+  const [switchedTo, setSwitchedTo] = useState<string | null>(null)
+  const latestDeployment = overview?.deployment ?? null
+  const executionDeployment = overview?.execution_deployment ?? null
+  const executionSummary = overview?.execution ?? null
+  const newerWaiting = Boolean(latestDeployment && executionDeployment && latestDeployment.id !== executionDeployment.id)
+  const pinned = newerWaiting && (executionSummary?.active || switchedTo !== latestDeployment!.id)
+  const deployment: MissionDeployment | null = pinned ? executionDeployment : latestDeployment
+  // The one restart dialog of the page: "Restart at mission start" (the deployment shown) and "Switch and restart at the new start" (the newest deployment).
+  const [restart, setRestart] = useState<{ purpose: 'restart' | 'switch'; deployment: MissionDeployment; resume: RestartJob | null } | null>(null)
+  const [locationKey, setLocationKey] = useState(0)    // bumped after a restart so the location notice reads the new position at once
   const [layers, setLayers] = useState<MapLayers>(DEFAULT_LAYERS)
   const [basemap, setBasemap] = useState<Basemap>(readLiveBasemap)  // stored choice, otherwise the street default
   const chooseBasemap = (next: Basemap) => { setBasemap(next); storeLiveBasemap(next) }
@@ -161,15 +174,21 @@ export function Px4MissionControl({ notice = '', onDismissNotice, onOpenScenario
     }
   }, [])
 
+  // A restart that is still running (the page was reloaded) is picked up again so the user never loses its progress.
   useEffect(() => {
-    let active = true
-    void api.latestMissionDeployment().then(value => { if (active) setDeployment(value) }).catch(() => { if (active) setDeployment(null) }).finally(() => { if (active) setDeploymentLoaded(true) })
-    return () => { active = false }
-  }, [])
+    let stopped = false
+    Promise.resolve().then(() => api.latestRestart()).then(job => {
+      if (stopped || !job || job.status !== 'running') return
+      const target = [latestDeployment, executionDeployment].find(item => item?.id === job.deployment_id)
+      if (target) setRestart({ purpose: job.purpose, deployment: target, resume: job })
+    }).catch(() => undefined)
+    return () => { stopped = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deploymentLoaded])
 
   const health = usePolling<HealthPayload>(useCallback(() => api.health() as Promise<HealthPayload>, []), HEALTH_POLL_MS)
   const fleet = usePolling<FleetPayload>(useCallback(() => api.fleetStatus() as Promise<FleetPayload>, []), FLEET_POLL_MS)
-  const gazebo = usePolling<GazeboPoseSnapshot>(useCallback(() => api.gazeboPoses(), []), GAZEBO_POLL_MS)
+  const gazebo = usePolling<GazeboPoseSnapshot>(useCallback(() => api.gazeboPoses({ trails: false }), []), GAZEBO_POLL_MS)
 
   const vehicles = snapshot?.vehicles ?? []
   const plan = deploymentPlan(deployment)
@@ -220,11 +239,17 @@ export function Px4MissionControl({ notice = '', onDismissNotice, onOpenScenario
   return <section className="mc-dashboard" aria-label="Live PX4 mission control">
     {notice && <div className="mc-deploy-notice" role="status"><CheckCircle2 size={15}/><span>{notice}</span>
       {onDismissNotice && <button type="button" onClick={onDismissNotice}>DISMISS</button>}</div>}
+    {/* A newer deployment never changes a flight in progress; the user switches explicitly. */}
+    {pinned && latestDeployment && executionDeployment && executionSummary && <MissionSwitchBanner latest={latestDeployment} pinned={executionDeployment}
+      execution={{ active: executionSummary.active, state: executionSummary.state, aircraft_id: executionSummary.aircraft_id }}
+      row={rows.find(item => item.id === executionSummary.aircraft_id) ?? null} onSwitch={() => setSwitchedTo(latestDeployment.id)}
+      onSwitchAndRestart={() => setRestart({ purpose: 'switch', deployment: latestDeployment, resume: null })}/>}
     <HeaderStrip deployment={deployment} loading={!deploymentLoaded} chips={chips} onOpenScenarioLab={onOpenScenarioLab}/>
     {error && <div className="px4-inline-error" role="status"><AlertTriangle size={15}/>{error}</div>}
     {/* Where the simulated aircraft is relative to the deployed mission; the restart is always an explicit, confirmed action. */}
     {deployment && !isLegacyDeployment(deployment) && <section className="panel mc-location" aria-label="Mission location">
-      <SimulationLocationNotice scenarioId={deployment.scenario_id} versionId={deployment.scenario_version_id} canRelocate={canManageFleet}/>
+      <SimulationLocationNotice key={locationKey} scenarioId={deployment.scenario_id} versionId={deployment.scenario_version_id} canRelocate={canManageFleet} inFlight={Boolean(executionSummary?.active)}
+        onRestart={() => setRestart({ purpose: 'restart', deployment, resume: null })}/>
     </section>}
 
     <div className="mc-main">
@@ -242,11 +267,13 @@ export function Px4MissionControl({ notice = '', onDismissNotice, onOpenScenario
       </section>
       <div className="mc-rail mc-rail-right">
         <AlertsPanel alerts={alerts} acknowledged={acknowledged} onAcknowledge={id => setAcknowledged(current => new Set(current).add(id))}/>
-        <MissionExecutionPanel deployment={deployment} rows={rows} onEvents={addExecutionEvents}/>
+        <MissionExecutionPanel deployment={deployment} rows={rows} onEvents={addExecutionEvents}
+          onRestart={deployment && !isLegacyDeployment(deployment) ? () => setRestart({ purpose: 'restart', deployment, resume: null }) : undefined}/>
       </div>
     </div>
 
-    <ThreatMonitor canRecord onTierTransitions={addThreatAlerts} onTiers={setThreatTiers}/>
+    <ThreatMonitor canRecord onTierTransitions={addThreatAlerts} onTiers={setThreatTiers}
+      onRestart={deployment && !isLegacyDeployment(deployment) ? () => setRestart({ purpose: 'restart', deployment, resume: null }) : undefined}/>
 
     <div className="mc-lower">
       {/* The log and the (rarely filled) reassignments list share one column beside the tall Gazebo panel. */}
@@ -265,6 +292,14 @@ export function Px4MissionControl({ notice = '', onDismissNotice, onOpenScenario
       />
       </GazeboPanel>
     </div>
+    {restart && <RestartDialog deploymentId={restart.deployment.id} purpose={restart.purpose} resumeJob={restart.resume}
+      missionLabel={`${restart.deployment.scenario_title} v${restart.deployment.scenario_version_number ?? '?'}`} onClose={() => setRestart(null)}
+      missionAircraft={deploymentPlan(restart.deployment)?.aircraft.length} runningAircraft={vehicles.filter(item => item.status === 'connected').length}
+      onSucceeded={() => {
+        if (restart.purpose === 'switch') setSwitchedTo(restart.deployment.id)      // the new deployment becomes the shown one
+        setFitSignal(value => value + 1)                                              // the map is refitted to the mission
+        setLocationKey(value => value + 1)
+        void refreshOverview()
+      }}/>}
   </section>
 }
-

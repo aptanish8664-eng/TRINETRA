@@ -27,7 +27,7 @@ describe('mission plan model (client mirror of the backend)', () => {
       custom_mission: 'waypoint_route', relief_supply_delivery: 'payload_dropoff',
     })
     expect(MISSION_OBJECTIVES).toHaveLength(11)
-    expect(TASK_SPECS.map(task => task.value)).toHaveLength(8)
+    expect(TASK_SPECS.map(task => task.value)).toHaveLength(9)   // eight flown tasks plus the standby (stays on the ground)
   })
 
   it('has no weapon, strike or targeting vocabulary in objectives, tasks or labels', () => {
@@ -144,6 +144,8 @@ describe('walkthrough fixes: defaults and messages', () => {
     const { EMPTY_PLAN, computePlanMissing } = await import('./missionPlan')
     const items = computePlanMissing({ title: 'x', plan: { ...EMPTY_PLAN, selected_uav_ids: ['px4-1'] }, fleetVerified: true, availableVehicleIds: ['px4-1'] })
     const counts = items.find(item => /counts must match/.test(item))
-    expect(counts).toBe('Requested, activated and assigned UAV counts must match. Tick the aircraft, then press ACTIVATE AND VERIFY PX4 / GAZEBO FLEET in Section A.')
+    expect(counts).toBeUndefined()
+    // Planning no longer depends on activation: the message points at the number of UAVs in Section A.
+    expect(items).toContain('The number of UAVs and the configured aircraft must match. Set the number in Section A.')
   })
 })

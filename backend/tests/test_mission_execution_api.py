@@ -31,12 +31,17 @@ class FakeExecutor:
         self.unreachable = False
         self.daemon_alive = True
         self.now_offset = 0.0
+        self.auto_advance = 0.0
 
     def __call__(self, action, *, instance=0, execution_id=None, events_after=None, mission=None, timeout_seconds=20):
         build_executor_command(action, instance=instance, execution_id=execution_id, events_after=events_after)  # argument rules still apply
         self.calls.append((action, execution_id or (mission or {}).get("execution_id")))
         if self.unreachable:
             return {"failure": "WSL mission executor could not complete: TimeoutExpired", "failure_code": "executor_unreachable"}
+        if action == "cleanup":     # kills every executor / landing process of the checkout and reports them
+            killed = [{"kind": "executor", "pid": 4000 + number, "instance": str(number)} for number, run in self.runs.items() if not run["executor"].terminal]
+            self.runs.clear()
+            return {"cleanup": True, "killed": killed}
         if action == "start":
             if self.start_failure:
                 return dict(self.start_failure)
@@ -46,6 +51,8 @@ class FakeExecutor:
             self.runs[instance] = {"executor": ex.MissionExecutor(fake, valid, clock=clock, wall_clock=clock), "fake": fake, "clock": clock, "mission": valid}
             return {"started": True, **self._status(instance, -1)}
         if action == "status":
+            if self.auto_advance and instance in self.runs:
+                self.advance(self.auto_advance, instance=instance)     # time passes on the fake PX4 while the route waits for an answer
             return self._status(instance, events_after if events_after is not None else -1)
         run = self.runs.get(instance)
         if run is None or not self.daemon_alive:
@@ -161,7 +168,7 @@ def test_general_starts_directly_and_the_run_is_recorded_from_upload_to_landing(
     _scenario, _version, deployment_id = deployed(client)
     preflight = client.get(f"/api/mission-control/executions/preflight?deployment_id={deployment_id}").json()
     assert preflight["can_start"] is True and preflight["role_rule"]["code"] == "general" and preflight["blocking"] == []
-    assert list(checks(preflight)) == ["plan_valid", "role", "single_aircraft", "fleet_verified", "managed_instance", "telemetry_fresh", "gps_fix",
+    assert list(checks(preflight)) == ["plan_valid", "role", "aircraft_count", "fleet_verified", "managed_instance", "telemetry_fresh", "gps_fix",
                                        "disarmed_landed", "at_mission_start", "battery", "no_execution_running", "endurance"]
     assert all(item["ok"] for item in preflight["checks"])
     assert preflight["confirmation"] == "This runs your route in the PX4/Gazebo simulation. The aircraft will arm, take off and fly the plan."
@@ -269,7 +276,7 @@ def test_one_execution_at_a_time_per_aircraft(general_client, sim):
 # --- pre-start checks -------------------------------------------------------------------------------------------------------
 
 @pytest.mark.parametrize("key, change, text", [
-    ("at_mission_start", lambda s: s["vehicles"][0]["position"].update(latitude=47.397971, longitude=8.546164), "Use Move simulation to mission start"),
+    ("at_mission_start", lambda s: s["vehicles"][0]["position"].update(latitude=47.397971, longitude=8.546164), "Use Restart at mission start"),
     ("disarmed_landed", lambda s: s["vehicles"][0].update(armed=True), "The aircraft is armed."),
     ("disarmed_landed", lambda s: s["vehicles"][0]["position"].update(relative_altitude_m=12.0), "not on the ground"),
     ("battery", lambda s: s["vehicles"][0]["battery"].update(remaining_percent=39.0), "Battery 39%"),
@@ -295,20 +302,85 @@ def test_each_failed_pre_start_check_blocks_the_start_with_its_reason(general_cl
     assert sim.calls == [] and client.get("/api/mission-control/executions/latest").json() == {"execution": None}
 
 
-def test_two_aircraft_plans_and_plans_over_the_endurance_limit_are_not_started(general_client, sim, monkeypatch):
+def deployed_roles(client, roles, title="Roles plan"):
+    """A saved and deployed plan whose aircraft have the given roles (the first must be the primary)."""
+    plan = complete_plan(len(roles))
+    plan = plan.model_copy(update={"aircraft": [item.model_copy(update={"role": role}) for item, role in zip(plan.aircraft, roles)]})
+    saved = client.post("/api/scenarios", json=plan_body(plan, title))
+    assert saved.status_code == 201, saved.text
+    deployment = client.post(f"/api/scenarios/{saved.json()['id']}/versions/{saved.json()['versions'][0]['id']}/deploy")
+    assert deployment.status_code == 200, deployment.text
+    return deployment.json()["id"]
+
+
+def test_a_standby_aircraft_stays_on_the_ground_and_a_plan_over_the_endurance_limit_is_not_started(general_client, sim, monkeypatch):
     client, _ = general_client
     sim.state["vehicles"].append(vehicle(id="px4-2", system_id=2))
-    _s, _v, two = deployed(client, count=2, title="Two aircraft")
+    _s, _v, two = deployed(client, count=2, title="Two aircraft")                     # primary + standby
     preflight = client.get(f"/api/mission-control/executions/preflight?deployment_id={two}").json()
-    assert checks(preflight)["single_aircraft"]["ok"] is False and "not built yet" in checks(preflight)["single_aircraft"]["detail"]
-    assert start(client, two).status_code == 409
+    assert checks(preflight)["aircraft_count"]["ok"] is True and "stay on the ground (standby)" in checks(preflight)["aircraft_count"]["detail"]
+    assert [(item["aircraft_id"], item["role"], item["flies"]) for item in preflight["fleet"]] == [("px4-1", "primary", True), ("px4-2", "standby", False)]
+    started = start(client, two)
+    assert started.status_code == 201 and "executions" not in started.json() and [call for call in sim.calls if call[0] == "start"] and len(sim.runs) == 1
     _s, _v, one = deployed(client, title="Tight limit")
     from app import config
     monkeypatch.setattr(config, "MP_MAX_FLIGHT_MINUTES", 1)
     tight = client.get(f"/api/mission-control/executions/preflight?deployment_id={one}").json()
     assert checks(tight)["endurance"]["ok"] is False and checks(tight)["plan_valid"]["ok"] is False
     assert "the aircraft limit is 1 min" in checks(tight)["plan_valid"]["detail"]
-    assert start(client, one).status_code == 409 and sim.calls == []
+    starts = lambda: [call for call in sim.calls if call[0] == "start"]      # noqa: E731  (status polls of the running aircraft do not count)
+    before = len(starts())
+    assert start(client, one).status_code == 409 and len(starts()) == before
+
+
+def test_a_primary_and_a_decoy_fly_together_each_with_its_own_run(general_client, sim):
+    client, _ = general_client
+    sim.state["vehicles"].append(vehicle(id="px4-2", system_id=2))
+    deployment_id = deployed_roles(client, ["primary", "decoy"], "Decoy plan")
+    preflight = client.get(f"/api/mission-control/executions/preflight?deployment_id={deployment_id}").json()
+    assert preflight["can_start"] is True and [item["flies"] for item in preflight["fleet"]] == [True, True]
+    response = start(client, deployment_id)
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["aircraft_id"] == "px4-1" and [item["aircraft_id"] for item in body["executions"]] == ["px4-1", "px4-2"] and body["not_started"] == []
+    assert len({item["id"] for item in body["executions"]}) == 2 and sorted(sim.runs) == [0, 1]
+    sim.fly(0)                                                           # (the fake PX4 peer only models system 1: the second run is checked as started, not flown)
+    first = client.get(f"/api/mission-control/executions/{body['executions'][0]['id']}").json()
+    second = client.get(f"/api/mission-control/executions/{body['executions'][1]['id']}").json()
+    assert first["state"] == "executing" and second["state"] not in ("failed", "aborted") and first["aircraft_id"] != second["aircraft_id"]
+    assert client.post(f"/api/mission-control/executions/{body['executions'][0]['id']}/pause").status_code == 200       # each run has its own controls
+    sim.advance(3, instance=0)
+    assert client.get(f"/api/mission-control/executions/{body['executions'][0]['id']}").json()["state"] == "paused"
+    assert client.get(f"/api/mission-control/executions/{body['executions'][1]['id']}").json()["state"] != "paused"
+    fleet = client.get(f"/api/mission-control/executions/fleet?deployment_id={deployment_id}").json()
+    assert [(row["aircraft_id"], row["role"]) for row in fleet["executions"]] == [("px4-1", "primary"), ("px4-2", "decoy")] and fleet["on_the_ground"] == []
+    assert fleet["executions"][0]["controls"]["resume"]["allowed"] is True and fleet["executions"][1]["controls"]["resume"]["allowed"] is False   # separate controls
+
+
+def test_a_decoy_that_cannot_start_does_not_stop_the_primary_and_is_reported(general_client, sim):
+    client, _ = general_client
+    sim.state["vehicles"].append(vehicle(id="px4-2", system_id=2))
+    deployment_id = deployed_roles(client, ["primary", "decoy"], "Decoy fail plan")
+    real = sim.__call__
+
+    def flaky(action, **kwargs):
+        if action == "start" and kwargs.get("instance") == 1:
+            return {"failure": "px4-2 would not arm", "failure_code": "executor_error"}
+        return real(action, **kwargs)
+    from app import execution_routes
+    import pytest as _pytest
+    with _pytest.MonkeyPatch.context() as patch:
+        patch.setattr(execution_routes, "invoke_mission_executor", flaky)
+        body = start(client, deployment_id).json()
+    assert [item["aircraft_id"] for item in body["executions"]] == ["px4-1"] if "executions" in body else body["aircraft_id"] == "px4-1"
+    assert body["not_started"][0]["aircraft_id"] == "px4-2" and "would not arm" in body["not_started"][0]["reason"]
+
+
+def test_a_missing_decoy_blocks_the_whole_start_and_commands_nothing(general_client, sim):
+    client, _ = general_client                                           # px4-2 has no telemetry
+    deployment_id = deployed_roles(client, ["primary", "decoy"], "Missing decoy")
+    refused = start(client, deployment_id)
+    assert refused.status_code == 409 and any(text.startswith("px4-2:") for text in refused.json()["detail"]["blocking"]) and not [call for call in sim.calls if call[0] == "start"]
 
 
 # --- OPERATOR: approval per version ----------------------------------------------------------------------------------------
@@ -476,3 +548,47 @@ def test_legacy_deployments_and_unknown_ids_are_refused(general_client, sim):
     assert start(client, "missing").status_code == 404
     assert client.get("/api/mission-control/executions/preflight?deployment_id=missing").status_code == 404
     assert client.get("/api/mission-control/executions/" + "0" * 32).status_code == 404
+
+
+# --- mission switching: the active execution's deployment is served beside the latest one ---------------------------------
+
+def test_latest_deployment_also_serves_the_deployment_of_the_newest_execution(general_client, sim):
+    client, _ = general_client
+    empty = client.get("/api/mission-control/deployments/latest").json()
+    assert empty == {"deployment": None, "execution": None, "execution_deployment": None}
+    _s1, _v1, first_id = deployed(client, title="First flight")
+    idle = client.get("/api/mission-control/deployments/latest").json()
+    assert idle["deployment"]["id"] == first_id and idle["execution"] is None and idle["execution_deployment"] is None
+    execution_id = start(client, first_id).json()["id"]
+    sim.fly()
+    # a second deployment while the flight is running is always allowed and does not touch the flight
+    _s2, _v2, second_id = deployed(client, title="Second mission")
+    assert second_id != first_id
+    during = client.get("/api/mission-control/deployments/latest").json()
+    assert during["deployment"]["id"] == second_id                                    # the latest deployment is the new one ...
+    assert during["execution"]["id"] == execution_id and during["execution"]["active"] is True
+    assert during["execution_deployment"]["id"] == first_id                           # ... and the flight's own deployment is served with it
+    assert during["execution_deployment"]["scenario_version_number"] == 1 and during["execution_deployment"]["legacy"] is False
+    assert client.get(f"/api/mission-control/executions/{execution_id}").json()["active"] is True    # the flight was not disturbed
+    # starting the new mission while the first flies stays refused, with the reason
+    refused = start(client, second_id)
+    assert refused.status_code == 409 and "already" in refused.json()["detail"]["message"]
+    # after an abort and landing the execution is final: the client may offer "Switch to new mission"
+    assert client.post(f"/api/mission-control/executions/{execution_id}/abort").status_code == 200
+    sim.advance(3)
+    sim.runs[0]["fake"].armed = False
+    sim.advance(3)
+    assert client.get(f"/api/mission-control/executions/{execution_id}").json()["active"] is False
+    after = client.get("/api/mission-control/deployments/latest").json()
+    assert after["execution"]["active"] is False and after["execution"]["state"] == "aborted" and after["execution_deployment"]["id"] == first_id
+    assert after["deployment"]["id"] == second_id
+
+
+def test_the_deployment_overview_follows_ownership(general_client, operator_client, sim):
+    client, _ = general_client
+    _s, _v, deployment_id = deployed(client, title="General flight")
+    start(client, deployment_id)
+    other = operator_client[0] if isinstance(operator_client, tuple) else operator_client
+    body = other.get("/api/mission-control/deployments/latest").json()
+    assert body["deployment"] is None and body["execution"] is None and body["execution_deployment"] is None        # an operator does not see the General's data
+    assert client.get("/api/mission-control/deployments/latest").json()["execution_deployment"]["id"] == deployment_id

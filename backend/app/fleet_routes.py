@@ -17,14 +17,17 @@ from .mission_planning.validation import start_to_area_distance_m
 from .persistence.database import add_audit_event, get_scenario
 from .security import AuthContext
 from .telemetry.fleet_manager import FLEET_CAPACITY, invoke_fleet_manager
+from .mission_planning.quick import capacity_message, capacity_options
 
 router = APIRouter()
 
-RELOCATION_VERIFY_TIMEOUT_S = 90.0
+# How long the verification (PX4 telemetry + Gazebo pose of every aircraft) waits WITHOUT any further aircraft coming up. It is a stall window, not a fixed
+# overall timer: while aircraft keep coming up the wait goes on (the whole restart is capped by restart.start_budget_s).
+RELOCATION_VERIFY_TIMEOUT_S = 120.0
 
 
 class FleetActivationRequest(BaseModel):
-    required_uav_count: int = Field(ge=1, le=FLEET_CAPACITY)
+    required_uav_count: int = Field(ge=1)       # the capacity rule (capacity_exceeded, with the plain sentence) is checked in the route
     # Optional saved version whose mission start becomes the home of any instance this request has to START.
     # A running instance is never restarted here; use POST /api/fleet/relocate for that.
     scenario_id: Optional[str] = Field(default=None, min_length=1, max_length=64)
@@ -57,7 +60,7 @@ class FleetStopRequest(BaseModel):
 def _fleet_snapshot() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     from .main import gazebo_pose_store, px4_telemetry_store
 
-    vehicles = px4_telemetry_store.snapshot()["vehicles"]
+    vehicles = px4_telemetry_store.snapshot(include_trails=False)["vehicles"]
     models = gazebo_pose_store.snapshot()["models"]
     return vehicles, models
 
@@ -141,10 +144,10 @@ def simulation_location(plan: MissionPlan, vehicles: list[dict[str, Any]]) -> di
         message = "No aircraft of this plan reports a valid position, so its distance from the mission start is unknown."
     elif far:
         message = (f"The aircraft is about {worst_area / 1000:.0f} km from the mission area. The simulation is running at a "
-                   "different location than this mission. Use Move simulation to mission start.")
+                   "different location than this mission. Use Restart at mission start.")
     elif recommended:
         message = (f"The aircraft is {worst_start / 1000:.1f} km from the mission start. "
-                   "Use Move simulation to mission start to restart the simulation there.")
+                   "Use Restart at mission start to restart the simulation there.")
     else:
         message = f"The aircraft is {worst_start:.0f} m from the mission start."
     return {"mission_start": start, "aircraft": rows, "max_distance_to_start_m": worst_start,
@@ -331,6 +334,11 @@ def activate_fleet(
                  "gazebo": app_main.gazebo_pose_udp_transport is not None}
     configured_ips = {"px4_telemetry": PX4_UDP_ALLOWED_SOURCE_IP, "gazebo_pose": GAZEBO_POSE_UDP_ALLOWED_SOURCE_IP}
     requested = payload.required_uav_count
+    if requested > FLEET_CAPACITY:
+        message = capacity_message(requested, FLEET_CAPACITY)
+        raise _structured_failure(409, "capacity_exceeded", message,
+                                  {"capacity": _check("blocked", message, requested=requested, capacity=FLEET_CAPACITY)},
+                                  required_uav_count=requested, capacity=FLEET_CAPACITY, options=capacity_options(requested, FLEET_CAPACITY))
     if not all(receivers.values()):
         raise _structured_failure(
             503, "receivers_unavailable",
@@ -342,28 +350,42 @@ def activate_fleet(
     home = None
     if payload.scenario_id and payload.scenario_version_id:
         home = mission_start(_version_plan(context, payload.scenario_id, payload.scenario_version_id)[2])
-    process_result = invoke_fleet_manager("activate", count=requested, request_id=correlation_id, timeout_seconds=35,
-                                          **({"home": home} if home else {}))
+    staged = requested >= 2
+    if staged:
+        # Several aircraft: the manager's staged start (Gazebo server first, PX4 in small batches, each waited for), followed by its progress. Running instances are adopted.
+        import sys
+        from .mission_execution.restart import follow_staged_start, legacy_process_result
+
+        followed = follow_staged_start(sys.modules[__name__], requested, home, correlation_id, instances=None, stop_first=False, step=lambda *args: None, on_aircraft=None)
+        process_result = legacy_process_result(followed["state"], followed["answer"], requested)
+        if (followed["state"].get("result") or {}).get("partial"):
+            process_result["failure"], process_result["failure_code"] = None, None          # the verification below reports which aircraft are missing
+    else:
+        process_result = invoke_fleet_manager("activate", count=requested, request_id=correlation_id, timeout_seconds=35,
+                                              **({"home": home} if home else {}))
     verified, rows = _verified_fleet(requested)
     checks = build_activation_checks(requested, process_result, rows, receivers=receivers, configured_ips=configured_ips)
     failure = classify_activation_failure(requested, process_result, checks, final=False)
-    deadline = time.monotonic() + 45
-    while failure is None and len(verified) < requested and time.monotonic() < deadline:
+    window = float(RELOCATION_VERIFY_TIMEOUT_S) if staged else 45.0
+    last_change, best = time.monotonic(), len(verified)
+    while failure is None and len(verified) < requested and time.monotonic() - last_change < window:
         time.sleep(0.5)
         verified, rows = _verified_fleet(requested)
+        if len(verified) > best:
+            best, last_change = len(verified), time.monotonic()           # one more aircraft came up: keep waiting
     if failure is None:
         checks = build_activation_checks(requested, process_result, rows, receivers=receivers, configured_ips=configured_ips)
         failure = classify_activation_failure(requested, process_result, checks, final=True)
     if process_result.get("profile_mismatch"):
         checks["long_range_profile"] = _check(
             "differs", "A running instance was started with different long-range parameters and was not restarted. "
-            "Use Move simulation to mission start to restart it with the current profile.", aircraft=process_result["profile_mismatch"])
+            "Use Restart at mission start to restart it with the current profile.", aircraft=process_result["profile_mismatch"])
     if home is not None:
         mismatch = process_result.get("home_mismatch") or []
         checks["simulation_home"] = _check(
             "differs" if mismatch else "ok",
             ("The running simulation was started at a different home and was not restarted. "
-             "Use Move simulation to mission start to restart it there.") if mismatch
+             "Use Restart at mission start to restart it there.") if mismatch
             else "Instances started by this request use the mission start as their home.",
             requested=home, aircraft=mismatch)
     body = {"required_uav_count": requested, "activated_uav_count": len(verified),
@@ -466,53 +488,26 @@ def relocate_simulation(
             {"receivers": _check("unavailable", "A backend UDP receiver is not bound.",
                                  px4=receivers["px4"], gazebo=receivers["gazebo"])},
             required_uav_count=requested, relocated=False, simulation_stopped=False)
-    # The restart kills PX4, so an aircraft that is armed but standing on the ground is no reason to refuse (the armed flag is lost
-    # with the process). Only an aircraft that may be flying blocks it: abort it first.
-    from .mission_execution.ground import ground_state
+    from .mission_execution.restart import restart_simulation
 
-    flying = sorted(str(vehicle.get("id")) for vehicle in _fleet_snapshot()[0]
-                    if vehicle.get("status") == "connected" and vehicle.get("armed") is True and ground_state(vehicle)["on_ground"] is not True)
-    if flying:
-        raise _structured_failure(
-            409, "aircraft_armed",
-            f"{', '.join(flying)} is armed and not confirmed on the ground. Abort (return to launch) first and let it land; nothing was changed.",
-            {"armed": _check("failed", "An armed aircraft that is not on the ground was reported by PX4 telemetry.", aircraft=flying)},
-            required_uav_count=requested, relocated=False, simulation_stopped=False)
+    # A restart is available in every aircraft state: it ends an active run (reason "simulation restarted"), stops the executor and restarts PX4 and Gazebo.
     correlation_id = getattr(request.state, "request_id", None) or uuid.uuid4().hex
-    process_result = invoke_fleet_manager("relocate", count=requested, request_id=correlation_id, timeout_seconds=75, home=home)
-    stopped = bool(process_result.get("stopped_instances") or process_result.get("gazebo_stopped"))
-    verified, rows = _verified_fleet(requested)
-    checks = build_activation_checks(requested, process_result, rows, receivers=receivers, configured_ips=configured_ips)
-    checks["simulation_home"] = _check("pending", "Waiting for PX4 to report a position at the mission start.", requested=home)
-    failure = classify_activation_failure(requested, process_result, checks, final=False)
-    deadline = time.monotonic() + RELOCATION_VERIFY_TIMEOUT_S
-    while failure is None:
-        verified, rows = _verified_fleet(requested)
-        checks["simulation_home"] = _home_check(plan, home)
-        if (len(verified) >= requested and checks["simulation_home"]["status"] == "ok") or time.monotonic() >= deadline:
-            break
-        time.sleep(0.5)
-    if failure is None:
-        home_check = checks["simulation_home"]
-        checks = build_activation_checks(requested, process_result, rows, receivers=receivers, configured_ips=configured_ips)
-        checks["simulation_home"] = home_check
-        failure = classify_activation_failure(requested, process_result, checks, final=True)
-        if failure is None and home_check["status"] != "ok":
-            failure = (502, "home_not_applied", (
-                "PX4 and Gazebo restarted, but the reported position is not at the mission start: " + home_check["detail"]
-                + " The simulation is running; you can try again."))
-    if failure is not None:
-        status_code, code, message = failure
-        raise _structured_failure(status_code, code, message, checks, request_id=correlation_id,
-                                  required_uav_count=requested, activated_uav_count=len(verified), instances=rows,
-                                  manager_error=process_result.get("failure"), relocated=False, mission_start=home,
-                                  simulation_stopped=stopped,
-                                  recovery="Run Activate and verify to start the simulation again, then retry." if stopped else
-                                  "Nothing was stopped. Fix the reported check and retry.")
+    result = restart_simulation(plan, home, requested, correlation_id=correlation_id, purpose="restart", context=context)
+    if not result["ok"]:
+        status_code, code, message = result["failure"]
+        if result.get("partial"):
+            status_code = 502                                   # this older endpoint has no "partial" answer: some aircraft came up, the rest did not
+        stopped = bool(result.get("simulation_stopped"))
+        raise _structured_failure(status_code, code, message, result.get("checks", {}), request_id=correlation_id, required_uav_count=requested,
+                                  activated_uav_count=0, instances=result.get("instances", []), manager_error=message, relocated=False, mission_start=home,
+                                  simulation_stopped=stopped, failed_step=result.get("failed_step"),
+                                  recovery="Press Restart at mission start again, or Activate and verify, to start the simulation." if stopped else "Nothing was stopped. Fix the reported check and retry.")
+    verified, rows, checks, process_result = result["vehicles"], result["instances"], result["checks"], {"stopped_instances": result["stopped_instances"]}
     _audit(request, context, "px4_sitl_simulation_relocated", {
         "request_id": correlation_id, "scenario_id": payload.scenario_id, "scenario_version_id": payload.scenario_version_id,
         "home": {key: home[key] for key in ("latitude", "longitude", "altitude_m")},
         "stopped_instances": process_result.get("stopped_instances", []), "system_ids": [item["system_id"] for item in verified],
+        "ended_executions": result["ended_executions"],
     })
     return {"relocated": True, "verified": True, "mission_start": home, "required_uav_count": requested,
             "activated_uav_count": len(verified), "vehicles": verified, "instances": rows, "checks": checks,

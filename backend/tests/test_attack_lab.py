@@ -54,7 +54,7 @@ def test_general_creates_lists_reads_and_edits_drafts_pinned_to_the_version(gene
     assert created.status_code == 201, created.text
     record = created.json()
     assert record["status"] == "draft" and record["scenario_version_id"] == version_id and record["executed"] is False
-    assert len(record["config_hash"]) == 64 and record["superseded"] is False and "not executed" in record["note"]
+    assert len(record["config_hash"]) == 64 and record["superseded"] is False and record["implemented"] is False and "does nothing until Implement is switched on" in record["implement_note"]
     assert client.get(f"/api/attack-lab/experiments/{record['id']}").json()["config"]["attacks"][0]["type"] == "drift"
     assert [item["id"] for item in client.get("/api/attack-lab/experiments").json()["experiments"]] == [record["id"]]
     edited = client.put(f"/api/attack-lab/experiments/{record['id']}", json=experiment(scenario_id, version_id, name="Renamed", seed=9))
@@ -271,7 +271,7 @@ def test_never_run_experiment_is_edited_in_place_and_deleted_outright(general_cl
     assert record["result_count"] == 0 and record["edit_mode"] == "in_place" and record["delete_keeps_results"] is False
     assert client.put(f"/api/attack-lab/experiments/{record['id']}", json=experiment(scenario_id, version_id, seed=5)).status_code == 200
     assert client.delete(f"/api/attack-lab/experiments/{record['id']}").status_code == 204
-    assert client.get("/api/attack-lab/results").json() == {"results": [], "runner_available": False, "results_storage": "available"}
+    assert client.get("/api/attack-lab/results").json() == {"results": [], "runner_available": True, "results_storage": "available"}
 
 
 def test_experiment_with_results_is_saved_as_a_copy_and_delete_keeps_the_results(general_client, flight):

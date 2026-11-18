@@ -14,7 +14,7 @@ from typing import Any
 from .fleet_manager import FLEET_CAPACITY, PX4_ROOT, WSL_DISTRIBUTION
 
 WSL_EXECUTOR_PATH = "/mnt/d/TRINETRA/backend/tools/wsl_mission_executor.py"
-_ACTIONS = {"start", "status", "pause", "resume", "abort", "disarm"}
+_ACTIONS = {"start", "status", "pause", "resume", "abort", "land", "disarm", "cleanup"}
 _EXECUTION_ID = re.compile(r"^[0-9a-f]{32}$")
 
 
@@ -26,7 +26,7 @@ def build_executor_command(action: str, *, instance: int = 0, execution_id: str 
         raise ValueError("instance must be within the fleet capacity")
     command = ["wsl.exe", "--distribution", WSL_DISTRIBUTION, "--exec", "python3", WSL_EXECUTOR_PATH, action,
                "--instance", str(instance), "--px4-root", PX4_ROOT]
-    if action in {"pause", "resume", "abort"}:
+    if action in {"pause", "resume", "abort"} or (action == "land" and execution_id is not None):
         if execution_id is None or not _EXECUTION_ID.fullmatch(execution_id):
             raise ValueError("a control command needs the execution id (32 lowercase hex characters)")
         command.extend(("--execution-id", execution_id))

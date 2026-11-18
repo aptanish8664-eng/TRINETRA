@@ -32,6 +32,7 @@ from .config import (
     GAZEBO_POSE_UDP_BIND_PORT,
     GAZEBO_POSE_UDP_ENABLED,
     MAX_HTTP_BODY_BYTES,
+    PLAN_MAX_HTTP_BODY_BYTES,
     OPENAI_API_KEY,
     PROJECT_ROOT,
     PX4_UDP_ALLOWED_SOURCE_IP,
@@ -68,7 +69,10 @@ from .mission_plan_routes import router as mission_plan_router
 from .attack_lab_routes import router as attack_lab_router
 from . import research_routes
 from .research_routes import router as research_router
+from .general_scenario_routes import router as general_scenario_router
 from .execution_routes import router as execution_router
+from .response_routes import router as response_router
+from .restart_routes import router as restart_router
 from .simulation.detector import DETECTOR_VERSION
 from .simulation.engine import SIMULATION_VERSION, Simulation, SimulationConfig
 from .simulation.response import reassignment_block_reason, reassign_tasks
@@ -120,6 +124,9 @@ app = FastAPI(
     description="Software-only, deterministic multi-UAV GPS resilience research demonstrator.",
     lifespan=app_lifespan,
 )
+from starlette.middleware.gzip import GZipMiddleware
+STREAM_INTERVAL_S = 0.25      # telemetry and pose streams send 4 times a second (10 per second used to starve the UDP receiver that shares this event loop)
+app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=3)       # JSON compresses about 10x; level 3 keeps the CPU cost low
 app.add_middleware(
     CORSMiddleware,
     allow_origins=list(ALLOWED_ORIGINS),
@@ -136,6 +143,9 @@ app.include_router(mission_plan_router)
 app.include_router(attack_lab_router)
 app.include_router(research_router)
 app.include_router(execution_router)
+app.include_router(response_router)
+app.include_router(restart_router)
+app.include_router(general_scenario_router)
 
 
 class ManagedRun:
@@ -324,11 +334,14 @@ async def request_id_middleware(request: Request, call_next):
             except ValueError:
                 response = JSONResponse(status_code=400, content={"detail": "Invalid Content-Length."})
             else:
-                if parsed_content_length > MAX_HTTP_BODY_BYTES:
+                # Scenario saves and route previews carry every aircraft's generated route: they use the larger plan limit.
+                plan_route = request.url.path.startswith(("/api/scenarios", "/api/mission-plans"))
+                body_limit = PLAN_MAX_HTTP_BODY_BYTES if plan_route else MAX_HTTP_BODY_BYTES
+                if parsed_content_length > body_limit:
                     response = JSONResponse(
                         status_code=413,
                         content={"detail": "Request body exceeds the configured size limit.", "code": "request_body_too_large",
-                                 "limit_bytes": MAX_HTTP_BODY_BYTES,
+                                 "limit_bytes": body_limit,
                                  "hint": "Send a shorter window, or use GET /api/research/live: live assessments are computed on the server and need no body."},
                     )
                 else:
@@ -550,20 +563,23 @@ def health() -> dict:
 
 @app.get("/api/telemetry/px4")
 def get_px4_telemetry(
+    trails: bool = True,
     context: AuthContext = Depends(require_permission(Permission.MISSION_READ_OWN)),
 ) -> dict:
+    """`trails=false` leaves out the 3000-point flight trails (the page's polls do not need them; the stream sends trail deltas)."""
     if px4_udp_transport is None:
         raise HTTPException(status_code=503, detail="PX4 telemetry receiver is not enabled")
-    return px4_telemetry_store.snapshot()
+    return px4_telemetry_store.snapshot(include_trails=trails)
 
 
 @app.get("/api/telemetry/gazebo")
 def get_gazebo_pose_snapshot(
+    trails: bool = True,
     context: AuthContext = Depends(require_permission(Permission.MISSION_READ_OWN)),
 ) -> dict:
     if gazebo_pose_udp_transport is None:
         raise HTTPException(status_code=503, detail="Gazebo pose receiver is not enabled")
-    return gazebo_pose_store.snapshot()
+    return gazebo_pose_store.snapshot(include_trails=trails)
 
 
 @app.post("/api/simulations")
@@ -1052,7 +1068,7 @@ async def stream_px4_telemetry(websocket: WebSocket) -> None:
             except asyncio.TimeoutError:
                 await websocket.close(code=1013, reason="PX4 telemetry client is too slow")
                 return
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(STREAM_INTERVAL_S)
     except WebSocketDisconnect:
         pass
 
@@ -1090,7 +1106,7 @@ async def stream_gazebo_pose(websocket: WebSocket) -> None:
             except asyncio.TimeoutError:
                 await websocket.close(code=1013, reason="Gazebo pose client is too slow")
                 return
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(STREAM_INTERVAL_S)
     except WebSocketDisconnect:
         pass
 

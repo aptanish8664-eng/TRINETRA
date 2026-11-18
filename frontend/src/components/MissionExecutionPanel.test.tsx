@@ -4,18 +4,18 @@ import { MissionExecutionPanel, clock } from './MissionExecutionPanel'
 import type { ExecutionEvent, ExecutionPreflight, ExecutionView } from '../services/api'
 import type { MissionDeployment } from '../services/auth'
 import type { AircraftRow } from './missionControlModel'
-import { IN_THE_AIR, disarmState } from './missionControlModel'
+import { landState } from './missionControlModel'
 
 const apiMock = vi.hoisted(() => ({
   latestExecution: vi.fn(), executionPreflight: vi.fn(), executionEvents: vi.fn(), startExecution: vi.fn(),
-  pauseExecution: vi.fn(), resumeExecution: vi.fn(), abortExecution: vi.fn(), disarmAircraft: vi.fn(),
+  attackLabLive: vi.fn(), fleetExecutions: vi.fn(), pauseExecution: vi.fn(), resumeExecution: vi.fn(), abortExecution: vi.fn(), landHere: vi.fn(),
 }))
 vi.mock('../services/api', () => ({ api: apiMock }))
 
 const CONFIRMATION = 'This runs your route in the PX4/Gazebo simulation. The aircraft will arm, take off and fly the plan.'
 const deployment = { id: 'deployment-1', scenario_id: 's1', scenario_version_id: 'v1', scenario_title: 'Coastal relief', scenario_version_hash: 'h', mission_id: 's1',
   execution_status: 'x', legacy: false, schema_version: 2, intent: { schema_version: 2, mission_plan: { aircraft: [] } } } as unknown as MissionDeployment
-const CHECK_KEYS = ['plan_valid', 'role', 'single_aircraft', 'fleet_verified', 'managed_instance', 'telemetry_fresh', 'gps_fix', 'disarmed_landed', 'at_mission_start', 'battery', 'no_execution_running', 'endurance']
+const CHECK_KEYS = ['plan_valid', 'role', 'aircraft_count', 'fleet_verified', 'managed_instance', 'telemetry_fresh', 'gps_fix', 'disarmed_landed', 'at_mission_start', 'battery', 'no_execution_running', 'endurance']
 const preflight = (patch: Partial<ExecutionPreflight> = {}, failing: Record<string, string> = {}): ExecutionPreflight => ({
   deployment_id: 'deployment-1', aircraft_id: 'px4-1', can_start: Object.keys(failing).length === 0, confirmation: CONFIRMATION,
   role_rule: { allowed: true, code: 'general', message: 'General accounts deploy and start directly.' },
@@ -41,10 +41,12 @@ const finished = (state: 'completed' | 'aborted' | 'failed' | 'link_lost', reaso
 })
 const button = (name: RegExp | string) => screen.getByRole('button', { name }) as HTMLButtonElement
 const reasons = () => Object.fromEntries(Array.from(document.querySelectorAll('[aria-label="Why controls are unavailable"] li')).map(item => [item.querySelector('b')!.textContent, item.textContent!.slice(item.querySelector('b')!.textContent!.length)]))
+const restartSpy = vi.fn()
 const panel = (props: Partial<Parameters<typeof MissionExecutionPanel>[0]> = {}) =>
-  render(<MissionExecutionPanel deployment={deployment} rows={[]} activePollMs={25} idlePollMs={25} {...props}/>)
+  render(<MissionExecutionPanel deployment={deployment} rows={[]} activePollMs={25} idlePollMs={25} onRestart={restartSpy} {...props}/>)
 
 beforeEach(() => {
+  apiMock.attackLabLive.mockResolvedValue({ armed: 0, run_active: false, experiments_in_run: 0, note: '' })
   apiMock.latestExecution.mockResolvedValue(null)
   apiMock.executionPreflight.mockResolvedValue(preflight())
   apiMock.executionEvents.mockResolvedValue({ execution_id: 'e'.repeat(32), state: 'executing', events: [] })
@@ -54,13 +56,35 @@ afterEach(() => { cleanup(); vi.clearAllMocks() })
 describe('MissionExecutionPanel', () => {
   it('GENERAL: Start is enabled directly; the other controls are visible but disabled with their reasons', async () => {
     panel()
-    await waitFor(() => expect(button(/START IN SIMULATION/).disabled).toBe(false))
+    await waitFor(() => expect(button(/START IN SIMULATION/).disabled).toBe(false), { timeout: 5000 })
     for (const name of [/^PAUSE$/, /^RESUME$/, /ABORT \(RETURN TO LAUNCH\)/]) expect(button(name).disabled).toBe(true)   // never hidden
-    expect(reasons()).toEqual({ Pause: 'Nothing is running.', Resume: 'Nothing is running.', Abort: 'Nothing is running.', Disarm: 'No telemetry from the aircraft, so its armed state is unknown.' })
+    expect(reasons()).toEqual({ Pause: 'Nothing is running.', Resume: 'Nothing is running.', Abort: 'Nothing is running.', 'Land here': 'No telemetry from the aircraft, so its armed state is unknown.' })
     expect(screen.getByLabelText('Role rule').textContent).toBe('Role rule: General accounts deploy and start directly.')
     const lifecycle = screen.getByRole('list', { name: 'Mission lifecycle' })
     expect(Array.from(lifecycle.querySelectorAll('li')).map(item => item.textContent)).toEqual(['Deployed to Mission Control', 'Uploaded to PX4not started', 'Executingnot started'])
     expect(apiMock.executionPreflight).toHaveBeenCalledWith('deployment-1')
+  })
+
+  it('shows how many experiments are armed (a count only) and when they are running', async () => {
+    apiMock.attackLabLive.mockResolvedValue({ armed: 2, run_active: false, experiments_in_run: 0, note: '' })
+    panel()
+    const note = await screen.findByRole('status', { name: 'Experiments armed' }, { timeout: 5000 })
+    expect(note.textContent).toBe('2 experiments armed: they run automatically when this mission starts.')
+    expect(note.textContent).not.toMatch(/drift|offset|jump|px4-/i)
+  })
+
+  it('lists every started aircraft with its own run and its own controls (a standby stays on the ground)', async () => {
+    const running = execution({ state: 'executing', stage: 'executing', controls: { pause: { allowed: true, reason: null }, resume: { allowed: false, reason: 'Resume is possible while paused; the run is executing.' }, abort: { allowed: true, reason: null }, land: { allowed: true, reason: null } } })
+    apiMock.fleetExecutions.mockResolvedValue({ deployment_id: 'deployment-1', simulation_only: true, on_the_ground: [{ aircraft_id: 'px4-3', role: 'standby' }],
+      executions: [{ ...running, aircraft_id: 'px4-1', role: 'primary' }, { ...running, id: 'f'.repeat(32), aircraft_id: 'px4-2', role: 'decoy', state: 'paused' }] })
+    apiMock.pauseExecution.mockResolvedValue(running)
+    panel()
+    const table = await screen.findByRole('region', { name: 'Aircraft runs' }, { timeout: 5000 })
+    expect(within(table).getAllByRole('listitem')).toHaveLength(3)
+    expect(table.textContent).toContain('Not started: stays on the ground until it is needed.')
+    fireEvent.click(within(table).getByRole('button', { name: 'PAUSE px4-1' }))
+    await waitFor(() => expect(apiMock.pauseExecution).toHaveBeenCalledWith(running.id))
+    expect((within(table).getByRole('button', { name: 'RESUME px4-1' }) as HTMLButtonElement).disabled).toBe(true)
   })
 
   it('Start needs the in-page confirmation with the exact sentence and the pre-start checklist; nothing starts before START NOW', async () => {
@@ -236,7 +260,7 @@ describe('MissionExecutionPanel', () => {
 })
 
 
-describe('Disarm', () => {
+describe('Land here and Restart at mission start', () => {
   const row = (vehicle: Record<string, unknown> | null, id = 'px4-1'): AircraftRow => ({
     id, systemId: 1, gazeboModel: 'x500_0', pose: null, stale: false, plan: { uav_id: id, role: 'primary' } as AircraftRow['plan'],
     vehicle: vehicle && { id, system_id: 1, status: 'connected', ...vehicle } as unknown as AircraftRow['vehicle'],
@@ -244,67 +268,139 @@ describe('Disarm', () => {
   const ground = { armed: true, position: { relative_altitude_m: 0.1 }, velocity: { ground_speed_m_s: 0 } }
   const air = { armed: true, position: { relative_altitude_m: 30 }, velocity: { ground_speed_m_s: 8 } }
   const run = (state: string, active: boolean) => ({ active, state, aircraft_id: 'px4-1' })
+  const landed = (name: string, value: number, age = 0.5) => ({ landed_state: { value, name, age_s: age, received_at: 't' } })
 
-  it('disarmState follows the backend rule: armed + on the ground + nothing flying it', () => {
-    expect(disarmState(row(ground), null)).toMatchObject({ allowed: true, armedOnGround: true })
-    expect(disarmState(row(air), null)).toMatchObject({ allowed: false, reason: IN_THE_AIR, armedOnGround: false })
-    expect(IN_THE_AIR).toBe('In the air: abort (return to launch) first; it disarms itself after landing.')
-    expect(disarmState(row({ ...ground, velocity: { ground_speed_m_s: 3 } }), null).allowed).toBe(false)          // low but moving
-    expect(disarmState(row({ ...ground, armed: false }), null).reason).toBe('The aircraft is already disarmed.')
-    expect(disarmState(row({ ...ground, status: 'stale' }), null).reason).toMatch(/No telemetry/)
-    expect(disarmState(row({ armed: true, position: {} }), null).reason).toMatch(/altitude is unknown/)
-    expect(disarmState(null, null).allowed).toBe(false)
-    expect(disarmState(row(ground), run('returning', true))).toMatchObject({ allowed: false, reason: IN_THE_AIR })      // a run is flying it
-    expect(disarmState(row(ground), run('uploading', true)).reason).toBe('A run is uploading on this aircraft. Wait for it, or abort it first.')
-    expect(disarmState(row(ground), run('aborted', false)).allowed).toBe(true)
+  it('landState: allowed whenever the aircraft is connected and armed, in the air or on the ground, with or without a run', () => {
+    expect(landState(row(ground), null)).toMatchObject({ allowed: true, armedOnGround: true, phase: 'ground' })
+    expect(landState(row(air), null)).toMatchObject({ allowed: true, armedOnGround: false, phase: 'air' })
+    expect(landState(row(air), run('returning', true)).allowed).toBe(true)              // after Abort the aircraft can be landed at once
+    expect(landState(row(air), run('executing', true)).allowed).toBe(true)
+    expect(landState(row(ground), run('uploading', true)).allowed).toBe(true)
+    expect(landState(row({ ...ground, armed: false }), null)).toMatchObject({ allowed: false, reason: 'Already disarmed', phase: 'disarmed' })
+    expect(landState(row({ ...ground, status: 'stale' }), null).reason).toMatch(/No telemetry/)
+    expect(landState(row({ armed: null, position: {} }), null).reason).toBe('PX4 has not reported whether the aircraft is armed.')
+    expect(landState(null, null).allowed).toBe(false)
   })
 
-  it('in the air: the button is visible but disabled, with the abort-first reason', async () => {
+  it('landState: PX4\'s landed state wins; altitude and speed are only the fallback and the view says which was used', () => {
+    const far = row({ ...air, ...landed('on_ground', 1) })                              // 30 m "up" is the flat-world offset far from home
+    expect(landState(far, null)).toMatchObject({ onGround: true, source: 'px4_landed_state', phase: 'ground', landedState: 'on_ground' })
+    expect(landState(row({ ...ground, ...landed('in_air', 2) }), null)).toMatchObject({ onGround: false, source: 'px4_landed_state' })
+    expect(landState(row({ ...ground, ...landed('on_ground', 1, 30) }), null)).toMatchObject({ onGround: true, source: 'altitude_speed_fallback' })      // stale: fallback
+    expect(landState(row({ ...ground, velocity: { ground_speed_m_s: 3 } }), null)).toMatchObject({ onGround: false, source: 'altitude_speed_fallback' })     // low but moving
+    expect(landState(row({ armed: true, position: {} }), null)).toMatchObject({ allowed: true, onGround: null, source: null })
+  })
+
+  it('landState: landing is recognised from the run, PX4\'s landing state or the Land flight mode, and then the button is not offered again', () => {
+    expect(landState(row(air), run('landing', true))).toMatchObject({ landing: true, allowed: false, reason: 'The aircraft is already landing.', phase: 'landing' })
+    expect(landState(row({ ...air, ...landed('landing', 4) }), null).landing).toBe(true)
+    expect(landState(row({ ...air, heartbeat: { flight_mode: 'AUTO_LAND' } }), null).landing).toBe(true)
+  })
+
+  it('in the air the button is enabled and the confirmation says what it does: lands here, disarms, no return to launch', async () => {
     apiMock.latestExecution.mockResolvedValue(execution({ state: 'returning', stage: 'executing' }))
     panel({ rows: [row(air)] })
-    await waitFor(() => expect(reasons().Disarm).toBe(IN_THE_AIR))
-    expect(button(/^DISARM$/).disabled).toBe(true)
-    expect(screen.queryByLabelText('Armed on the ground')).toBeNull()
+    await waitFor(() => expect(button(/^LAND HERE$/).disabled).toBe(false))
+    expect(button(/^LAND HERE$/).title).toBe('Lands at the current position and disarms')
+    expect(screen.getByText(/Abort = return to launch · Land here = land at the current position and disarm · Restart = reset the simulation to the mission start/)).toBeTruthy()
+    fireEvent.click(button(/^LAND HERE$/))
+    const dialog = await screen.findByRole('dialog', { name: 'Confirm land here' })
+    expect(dialog.textContent).toMatch(/lands the aircraft where it is now and disarms it\. It does not return to launch and it is not a motor kill/)
+    expect(apiMock.landHere).not.toHaveBeenCalled()                                     // nothing is sent before the confirmation
+    fireEvent.click(within(dialog).getByRole('button', { name: 'CANCEL' }))
+    expect(apiMock.landHere).not.toHaveBeenCalled()
+    expect(screen.queryByRole('dialog', { name: 'Confirm land here' })).toBeNull()
   })
 
-  it('a finished run with the aircraft still armed on the ground shows "Armed on the ground" and disarms after the in-page confirmation', async () => {
+  it('Land here sends one request for the aircraft, shows the landing progress, then "Landed and disarmed at hh:mm"', async () => {
+    apiMock.latestExecution.mockResolvedValue(null)
+    apiMock.landHere.mockResolvedValue({ aircraft_id: 'px4-1', already_landing: false, mode: 'air', state: 'landing', simulation_only: true })
+    const view = panel({ rows: [row(air)] })
+    await waitFor(() => expect(button(/^LAND HERE$/).disabled).toBe(false))
+    fireEvent.click(button(/^LAND HERE$/))
+    fireEvent.click(within(await screen.findByRole('dialog', { name: 'Confirm land here' })).getByRole('button', { name: 'CONFIRM LAND HERE' }))
+    await waitFor(() => expect(apiMock.landHere).toHaveBeenCalledWith('px4-1'))
+    expect(apiMock.landHere).toHaveBeenCalledTimes(1)
+    expect(await screen.findByText('px4-1 is landing at its current position.')).toBeTruthy()
+    expect((await screen.findByRole('status', { name: 'Landing status' })).textContent).toMatch(/Landing… 30 m/)
+    view.rerender(<MissionExecutionPanel deployment={deployment} rows={[row({ ...air, ...landed('landing', 4), position: { relative_altitude_m: 0.5 } })]} activePollMs={25} idlePollMs={25} onRestart={restartSpy}/>)
+    expect((await screen.findByRole('status', { name: 'Landing status' })).textContent).toMatch(/touching down/)
+    view.rerender(<MissionExecutionPanel deployment={deployment} rows={[row({ ...ground, armed: false })]} activePollMs={25} idlePollMs={25} onRestart={restartSpy}/>)
+    expect((await screen.findByRole('status', { name: 'Landing status' })).textContent).toMatch(/Landed and disarmed at \d{1,2}[:.]\d{2}/)
+  })
+
+  it('while the aircraft is landing the button shows LANDING… and cannot be pressed again', async () => {
+    apiMock.latestExecution.mockResolvedValue(execution({ state: 'landing', stage: 'executing' }))
+    panel({ rows: [row(air)] })
+    await waitFor(() => expect(button(/LANDING…/).disabled).toBe(true))
+    expect((await screen.findByRole('status', { name: 'Execution state' })).textContent).toBe('Landing at the current position')
+    await waitFor(() => expect(reasons()['Land here']).toBe('The aircraft is already landing.'))
+  })
+
+  it('armed on the ground: the confirmation says normal disarm, and a finished run still armed on the ground gets a notice with LAND HERE…', async () => {
     apiMock.latestExecution.mockResolvedValue(finished('aborted', 'Aborted by Test General.'))
-    apiMock.disarmAircraft.mockResolvedValue({ aircraft_id: 'px4-1', disarmed: true, armed: false, forced: false, px4_messages: [] })
+    apiMock.landHere.mockResolvedValue({ aircraft_id: 'px4-1', already_landing: false, mode: 'ground', state: 'disarmed', simulation_only: true })
     panel({ rows: [row(ground)] })
     const notice = await screen.findByLabelText('Armed on the ground')
     expect(notice.textContent).toMatch(/Armed on the ground.*still reports it armed/)
-    expect(button(/^DISARM$/).disabled).toBe(false)
-    fireEvent.click(within(notice).getByRole('button', { name: /DISARM…/ }))
-    const confirmation = await screen.findByRole('dialog', { name: 'Confirm disarm' })
-    expect(confirmation.textContent).toMatch(/normal disarm \(not forced\)/)
-    expect(apiMock.disarmAircraft).not.toHaveBeenCalled()                    // nothing is sent before the confirmation
-    fireEvent.click(within(confirmation).getByRole('button', { name: 'CANCEL' }))
-    expect(apiMock.disarmAircraft).not.toHaveBeenCalled()
-    fireEvent.click(button(/^DISARM$/))
-    fireEvent.click(within(await screen.findByRole('dialog', { name: 'Confirm disarm' })).getByRole('button', { name: 'CONFIRM DISARM' }))
-    await waitFor(() => expect(apiMock.disarmAircraft).toHaveBeenCalledWith('px4-1'))
-    expect(await screen.findByText(/px4-1 is disarmed \(normal disarm, not forced\)/)).toBeTruthy()
+    fireEvent.click(within(notice).getByRole('button', { name: /LAND HERE…/ }))
+    const dialog = await screen.findByRole('dialog', { name: 'Confirm land here' })
+    expect(dialog.textContent).toMatch(/armed on the ground: this sends a normal disarm \(not forced\)/)
+    fireEvent.click(within(dialog).getByRole('button', { name: 'CONFIRM LAND HERE' }))
+    await waitFor(() => expect(apiMock.landHere).toHaveBeenCalledWith('px4-1'))
+    expect(await screen.findByText(/px4-1 was armed on the ground: normal disarm sent \(not forced\)\./)).toBeTruthy()
   })
 
-  it('a refusal from PX4 is shown with its reason and the aircraft stays armed', async () => {
-    apiMock.latestExecution.mockResolvedValue(finished('completed'))
-    apiMock.disarmAircraft.mockRejectedValue(Object.assign(new Error('PX4 refused to disarm (DENIED). PX4 said: Disarming denied: not landed'), { status: 409, detail: { code: 'disarm_refused' } }))
-    panel({ rows: [row(ground)] })
-    fireEvent.click(await screen.findByRole('button', { name: /^DISARM$/ }))
-    fireEvent.click(within(await screen.findByRole('dialog', { name: 'Confirm disarm' })).getByRole('button', { name: 'CONFIRM DISARM' }))
-    expect((await screen.findByRole('alert')).textContent).toMatch(/PX4 refused to disarm \(DENIED\)\. PX4 said: Disarming denied: not landed \(HTTP 409 · disarm_refused\)/)
+  it('a refusal from PX4 is shown with its exact reason and the values', async () => {
+    apiMock.latestExecution.mockResolvedValue(execution())
+    apiMock.landHere.mockRejectedValue(Object.assign(new Error('PX4 answered Land with MAV_RESULT_DENIED (PX4 said: Land denied: no position estimate); values used: AUTO LAND at relative altitude 30.0 m'), { status: 409, detail: { code: 'land_refused' } }))
+    panel({ rows: [row(air)] })
+    fireEvent.click(await screen.findByRole('button', { name: /^LAND HERE$/ }))
+    fireEvent.click(within(await screen.findByRole('dialog', { name: 'Confirm land here' })).getByRole('button', { name: 'CONFIRM LAND HERE' }))
+    expect((await screen.findByRole('alert')).textContent).toMatch(/MAV_RESULT_DENIED \(PX4 said: Land denied: no position estimate\); values used: AUTO LAND at relative altitude 30\.0 m \(HTTP 409 · land_refused\)/)
   })
 
-  it('no notice while disarmed, and no notice while a run is still active', async () => {
+  it('disarmed: disabled with "Already disarmed"; no notice while a run is still active', async () => {
     apiMock.latestExecution.mockResolvedValue(finished('completed'))
     const { unmount } = panel({ rows: [row({ ...ground, armed: false })] })
-    await waitFor(() => expect(reasons().Disarm).toBe('The aircraft is already disarmed.'))
+    await waitFor(() => expect(reasons()['Land here']).toBe('Already disarmed'))
+    expect(button(/^LAND HERE$/).disabled).toBe(true)
     expect(screen.queryByLabelText('Armed on the ground')).toBeNull()
     unmount()
     apiMock.latestExecution.mockResolvedValue(execution({ state: 'executing' }))
     panel({ rows: [row(ground)] })
-    await waitFor(() => expect(reasons().Disarm).toBe(IN_THE_AIR))
+    await waitFor(() => expect(button(/^LAND HERE$/).disabled).toBe(false))
     expect(screen.queryByLabelText('Armed on the ground')).toBeNull()
+  })
+
+  it('the final state of a landed-in-place run reads "Aborted: landed in place"', async () => {
+    apiMock.latestExecution.mockResolvedValue(finished('aborted', 'landed in place'))
+    panel()
+    const lifecycle = await screen.findByRole('list', { name: 'Mission lifecycle' })
+    await waitFor(() => expect(lifecycle.textContent).toMatch(/Aborted: landed in place/))
+    expect(lifecycle.textContent).not.toMatch(/Aborted: landed in placelanded in place/)
+  })
+
+  it('Restart at mission start is enabled in every state: idle, armed on the ground, flying; the dialog is opened by the page', async () => {
+    for (const [latest, vehicle] of [[null, null], [finished('completed'), ground], [execution(), air], [execution({ state: 'paused' }), air]] as const) {
+      apiMock.latestExecution.mockResolvedValue(latest)
+      restartSpy.mockClear()
+      const view = panel({ rows: vehicle ? [row(vehicle)] : [] })
+      await waitFor(() => expect(button(/RESTART AT MISSION START/).disabled).toBe(false))
+      expect(button(/RESTART AT MISSION START/).title).toMatch(/restarts PX4 and Gazebo.*a flight in progress ends/)
+      fireEvent.click(button(/RESTART AT MISSION START/))
+      expect(restartSpy).toHaveBeenCalledTimes(1)
+      view.unmount()
+    }
+  })
+
+  it('Restart is disabled only without a deployed mission or for a legacy deployment, with the reason', async () => {
+    panel({ deployment: null })
+    expect(screen.getByText('No deployed mission.')).toBeTruthy()                       // nothing to restart at: no controls at all
+    expect(screen.queryByRole('button', { name: /RESTART AT MISSION START/ })).toBeNull()
+    cleanup()
+    panel({ deployment: { ...deployment, legacy: true } as unknown as MissionDeployment })
+    await waitFor(() => expect(button(/RESTART AT MISSION START/).disabled).toBe(true))
   })
 })
 

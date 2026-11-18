@@ -365,3 +365,37 @@ def test_mirror_ports_are_shown_in_the_bridge_check_without_blocking_verificatio
     checks = build_activation_checks(1, result, rows, receivers={"px4": True, "gazebo": True}, configured_ips={"px4": "172.23.85.230", "gazebo": "172.23.85.230"})
     assert checks["telemetry_bridge"] == {"status": "running", "detail": "Bridge process already running (adopted). It also mirrors to 14620 (another receiver)."}
     assert checks["verification"]["status"] == "ok"
+
+
+# --- the telemetry bridge must accept every PX4 instance slot (it used to reject aircraft 6 and above) ----------------------------------
+
+def test_the_telemetry_bridge_ports_are_read_and_an_old_five_instance_bridge_is_replaced(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    monkeypatch.setattr(_manager.os, "getuid", lambda: 1000, raising=False)
+    wanted = tuple(range(18570, 18570 + _manager.FLEET_CAPACITY))
+    assert len(wanted) == _manager.FLEET_CAPACITY and 18575 in wanted                       # aircraft 6 (instance 5) sends from 18575
+    _fake_proc(tmp_path, 40, "python3", str(_manager.TELEMETRY_BRIDGE_SCRIPT), "--windows-host", "172.23.80.1", "--forward-port", "14600", "--source-port", "14601")
+    assert _manager.bridge_px4_ports(40, tmp_path) == _manager.OLD_BRIDGE_GCS_PORTS           # no explicit list: the old default, instances 1-5 only
+    _fake_proc(tmp_path, 41, "python3", str(_manager.TELEMETRY_BRIDGE_SCRIPT), "--windows-host", "172.23.80.1", "--px4-source-port", "18570", "--px4-source-port=18571")
+    assert _manager.bridge_px4_ports(41, tmp_path) == frozenset({18570, 18571})
+    stopped, launched = [], []
+
+    def terminate(pid, still_running, grace_s=3.0):
+        stopped.append(pid)
+        import shutil
+        shutil.rmtree(tmp_path / str(pid))
+        return not still_running()
+
+    import shutil
+    shutil.rmtree(tmp_path / "41")
+    expected = {"forward_port": 14600, "source_port": 14601, "windows_host": "172.23.80.1", "px4_ports": wanted}
+    argv = ["--windows-host", "172.23.80.1", "--forward-port", "14600", "--source-port", "14601", *[item for port in wanted for item in ("--px4-source-port", str(port))]]
+    result = _manager.ensure_bridge("telemetry", _manager.TELEMETRY_BRIDGE_SCRIPT, argv, proc_root=tmp_path, settle_s=0.2, spawn=_spawn_recorder(launched), expected=expected, terminate=terminate)
+    assert stopped == [40] and result["restarted"] is True and "accepts only PX4 instances 1-5" in result["replaced"]
+    assert launched[0][2:] == argv and launched[0].count("--px4-source-port") == len(wanted)
+    # a bridge that already accepts every slot is kept
+    _fake_proc(tmp_path, 42, "python3", str(_manager.TELEMETRY_BRIDGE_SCRIPT), "--windows-host", "172.23.80.1", "--forward-port", "14600", "--source-port", "14601",
+               *[item for port in wanted for item in ("--px4-source-port", str(port))])
+    kept = _manager.ensure_bridge("telemetry", _manager.TELEMETRY_BRIDGE_SCRIPT, argv, proc_root=tmp_path, expected=expected,
+                                  spawn=lambda *a, **k: (_ for _ in ()).throw(AssertionError("a bridge that accepts every instance is kept")))
+    assert kept["status"] == "running" and kept["pid"] == 42

@@ -60,3 +60,9 @@ backend/research_artifacts/*
 !backend/research_artifacts/.gitkeep
 !backend/research_artifacts/model_card.md
 !backend/research_artifacts/metrics.json
+
+# Generated exports (spreadsheets, large CSV); recreate with backend/tools/export_dataset.py
+exports/
+
+# Source videos for the Login/Overview backgrounds (large; never committed)
+/media/

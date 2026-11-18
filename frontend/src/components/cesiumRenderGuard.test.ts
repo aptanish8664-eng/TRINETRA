@@ -50,16 +50,36 @@ describe('Cesium render guard', () => {
     expect(viewer.resize).toHaveBeenCalledTimes(1)
   })
 
-  it('turns a render error into a notice, stops the loop, and recovers on the next non-zero size', () => {
+  it('a repeating render error shows the notice, keeps the loop stopped, and clears it after the map has rendered cleanly again', () => {
+    vi.useFakeTimers()
     const { viewer, host, listeners, notices, observer } = setup(640, 480)
     expect(viewer.useDefaultRenderLoop).toBe(true)
-    listeners[0](viewer.scene, new Error('Expected width to be greater than 0, actual value was 0'))
+    const boom = () => listeners[0](viewer.scene, new Error('Expected width to be greater than 0, actual value was 0'))
+    boom()
+    expect(viewer.useDefaultRenderLoop).toBe(false)
+    expect(notices).toEqual([])                                   // one transient frame: no warning
+    vi.advanceTimersByTime(1600)                                  // automatic recovery restarts the loop ...
+    expect(viewer.useDefaultRenderLoop).toBe(true)
+    boom()                                                        // ... and the error comes back: a real failure
     expect(viewer.useDefaultRenderLoop).toBe(false)
     expect(notices[notices.length - 1]).toMatch(/Map rendering paused \(Expected width to be greater than 0/)
     Object.assign(host, { clientWidth: 700, clientHeight: 500 })
     observer.fire()
     expect(viewer.useDefaultRenderLoop).toBe(true)
+    vi.advanceTimersByTime(3100)
     expect(notices[notices.length - 1]).toBe('')
+  })
+
+  it('a transient zero-size error that recovers by itself never shows the "Map rendering paused" notice', () => {
+    vi.useFakeTimers()
+    const { viewer, host, listeners, notices, observer } = setup(640, 480)
+    Object.assign(host, { clientWidth: 0, clientHeight: 0 })
+    listeners[0](viewer.scene, new Error('Expected width to be greater than 0, actual value was 0'))
+    Object.assign(host, { clientWidth: 640, clientHeight: 480 })
+    observer.fire()
+    vi.advanceTimersByTime(10_000)
+    expect(viewer.useDefaultRenderLoop).toBe(true)
+    expect(notices.filter(Boolean)).toEqual([])
   })
 
   it('retries on a timer so the map is never left permanently dead', () => {
@@ -71,7 +91,7 @@ describe('Cesium render guard', () => {
     Object.assign(host, { clientWidth: 320, clientHeight: 200 })
     vi.advanceTimersByTime(1600)
     expect(viewer.useDefaultRenderLoop).toBe(true)
-    expect(notices[notices.length - 1]).toBe('')
+    expect(notices.filter(Boolean)).toEqual([])
   })
 
   it('does nothing after dispose or after the viewer is destroyed', () => {
@@ -95,5 +115,23 @@ describe('Cesium render guard', () => {
     Object.assign(host, { clientWidth: 200, clientHeight: 200 })
     vi.advanceTimersByTime(600)
     expect(viewer.useDefaultRenderLoop).toBe(true)
+  })
+})
+
+describe('context loss and on-demand rendering', () => {
+  it('calls back once per lost WebGL context, prevents the default handling, and stops after cleanup', async () => {
+    const { watchContextLoss, ON_DEMAND_RENDER_OPTIONS } = await import('./cesiumRenderGuard')
+    const canvas = document.createElement('canvas')
+    const lost = vi.fn()
+    const stop = watchContextLoss(canvas, lost)
+    const event = new Event('webglcontextlost', { cancelable: true })
+    canvas.dispatchEvent(event)
+    expect(lost).toHaveBeenCalledTimes(1)
+    expect(event.defaultPrevented).toBe(true)
+    stop()
+    canvas.dispatchEvent(new Event('webglcontextlost'))
+    expect(lost).toHaveBeenCalledTimes(1)
+    expect(ON_DEMAND_RENDER_OPTIONS.requestRenderMode).toBe(true)
+    expect(() => watchContextLoss(null, lost)()).not.toThrow()
   })
 })

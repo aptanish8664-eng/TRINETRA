@@ -1,0 +1,44 @@
+/* Shared design tokens (FE-A): one spacing scale, one page container, one 12-column grid, one control height, and the status and tier colours defined once.
+   Pages use these through the classes below; nothing here changes the Mission Control layout. */
+:root {
+  --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px; --sp-5: 20px; --sp-6: 24px; --sp-8: 32px; --sp-10: 40px; --sp-12: 48px;
+  --page-width: 1180px;
+  --page-gutter: var(--sp-6);
+  --control-h: 40px;
+  --card-pad: var(--sp-5);
+  --card-radius: 4px;
+  --surface-0: #07111c; --surface-1: #0b1a29; --surface-2: #102335; --border-1: #24394d; --border-2: #35516a;
+  --text-1: #eaf4fb; --text-2: #b6c9d6; --text-3: #8ea6b8;
+  --status-ok: #4fcf9a; --status-warn: #f0c04a; --status-bad: #ff6b72; --status-info: #6cc6f2;
+  --tier-low: #4fcf9a; --tier-medium: #f0c04a; --tier-high: #ff9a4a; --tier-critical: #ff5a62;
+}
+
+/* one container and one grid */
+.ui-container { width: min(var(--page-width), calc(100% - 2 * var(--page-gutter))); margin-inline: auto; }
+.ui-grid { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: var(--sp-5); align-items: stretch; }
+.ui-span-4 { grid-column: span 4; } .ui-span-6 { grid-column: span 6; } .ui-span-8 { grid-column: span 8; } .ui-span-12 { grid-column: span 12; }
+@media (max-width: 900px) { .ui-span-4, .ui-span-6, .ui-span-8 { grid-column: span 12; } }
+
+/* one Card: same padding, radius, border and header style; its footer (actions) sits at the bottom so a row of cards lines up */
+.ui-card { display: flex; flex-direction: column; gap: var(--sp-2); padding: var(--card-pad); border: 1px solid var(--border-1); border-radius: var(--card-radius); background: var(--surface-1); min-width: 0; }
+.ui-card > .ui-card-actions { margin-top: auto; display: flex; flex-wrap: wrap; gap: var(--sp-2); align-items: center; padding-top: var(--sp-2); }
+.ui-section-heading { margin: 0; font-size: 20px; line-height: 1.25; letter-spacing: -.02em; font-weight: 600; }
+.ui-eyebrow { font: 10px var(--mono, monospace); letter-spacing: .15em; text-transform: uppercase; color: var(--text-3); }
+
+/* one button and input height on the pages that use the tokens */
+.ui-controls button, .ui-controls input:not([type="checkbox"]):not([type="radio"]), .ui-controls select { min-height: var(--control-h); box-sizing: border-box; }
+
+/* keyboard focus is always visible */
+:where(a, button, input, select, textarea, [tabindex]):focus-visible { outline: 2px solid #8fdcff; outline-offset: 2px; }
+
+/* skeletons and empty states */
+.skeleton { display: block; height: 14px; border-radius: 3px; background: linear-gradient(90deg, #12283b 25%, #1a3550 50%, #12283b 75%); background-size: 200% 100%; animation: skeleton-shimmer 1.4s linear infinite; }
+.skeleton-row { display: grid; gap: var(--sp-2); }
+.visuals-static .skeleton, .skeleton-static .skeleton { animation: none; }
+@keyframes skeleton-shimmer { to { background-position: -200% 0; } }
+@media (prefers-reduced-motion: reduce) { .skeleton { animation: none; } }
+.empty-state { margin: 0; padding: var(--sp-5); border: 1px dashed var(--border-2); border-radius: var(--card-radius); color: var(--text-2); font-size: 13px; line-height: 1.6; }
+.empty-state button { margin-top: var(--sp-2); }
+
+/* tier colours, defined once */
+.tier-low { color: var(--tier-low); } .tier-medium { color: var(--tier-medium); } .tier-high { color: var(--tier-high); } .tier-critical { color: var(--tier-critical); }

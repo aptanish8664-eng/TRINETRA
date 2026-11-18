@@ -76,7 +76,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=udp_port,
         action="append",
         dest="px4_source_ports",
-        help="Expected PX4 local GCS source port; repeat for additional SITL instances (defaults to 18570-18574)",
+        help="Expected PX4 local GCS source port; repeat for additional SITL instances (defaults to 18570-18585: instances 1-16)",
     )
     parser.add_argument("--no-stream-requests", action="store_true", help="Do not ask PX4 for the detector's message rates")
     return parser
@@ -93,7 +93,9 @@ def udp_port(value: str) -> int:
 
 
 def px4_source_ports(configured: list[int] | None) -> frozenset[int]:
-    ports = configured if configured else list(range(18570, 18575))
+    # PX4 instance N (0-based) sends from 18570 + N. The default covers the 16 instance slots the fleet manager addresses; it used to stop at 18574, so aircraft 6 and
+    # above were silently rejected ("No PX4 telemetry arrived") whatever the CPU or memory.
+    ports = configured if configured else list(range(18570, 18586))
     if not ports or any(not 1 <= port <= 65535 for port in ports):
         raise ValueError("At least one valid PX4 UDP source port is required")
     return frozenset(ports)

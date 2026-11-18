@@ -23,6 +23,7 @@ from .persistence.database import (
     latest_mission_deployment, list_attack_experiments, list_experiment_results, list_scenarios, save_attack_experiment,
 )
 import re
+from .research import live_experiments
 from .research.attacks import ATTACK_SPECS, ATTACK_LAB_NAME, AttackConfig, attack_limits
 from .schemas import ScenarioIntent
 from .security import AuthContext
@@ -78,6 +79,11 @@ class ExperimentRequest(StrictModel):
     seed: int = Field(default=1, ge=0, le=SEED_MAX)
     config: ExperimentConfig = Field(default_factory=ExperimentConfig)
     status: Literal["draft", "ready"] = "draft"
+
+    @field_validator("status", mode="before")
+    @classmethod
+    def implemented_is_not_requested(cls, value: Any) -> Any:
+        return "ready" if value == "implemented" else value      # "implemented" is only set by the Implement switch
 
     @field_validator("preset_id")
     @classmethod
@@ -261,7 +267,11 @@ def _view(record: dict[str, Any], latest_version_by_scenario: dict[str, str], re
             "latest_version_id": latest, "result_count": count, "has_results": count > 0,
             # never run: edit in place or delete outright. Has results: edits are saved as a copy; delete keeps the results.
             "edit_mode": "copy" if count else "in_place", "delete_keeps_results": count > 0,
-            "note": "Defines a simulated, software-only attack. It is not executed until the experiment runner exists."}
+            "implemented": record.get("status") == live_experiments.IMPLEMENTED,
+            "implement_note": ("Implemented: it runs automatically in the next flight of this exact mission version and cannot be edited or deleted until Implement is switched off."
+                               if record.get("status") == live_experiments.IMPLEMENTED else
+                               "Not implemented: it does nothing until Implement is switched on. It then runs automatically in a flight of this exact version."),
+            "note": "Defines a simulated, software-only attack on the monitor's copy of the GPS data; it never reaches the aircraft."}
 
 
 def _latest_versions(context: AuthContext, scenario_ids: set[str]) -> dict[str, str]:
@@ -366,7 +376,7 @@ def list_experiments(context: AuthContext = Depends(require_permission(Permissio
 def list_results(context: AuthContext = Depends(require_permission(Permission.MISSION_READ_OWN))) -> dict:
     """Stored results, including those whose experiment was deleted (marked `from a deleted experiment`)."""
     return {"results": list_experiment_results(context.user.id, include_all=has_permission(context.user.role, Permission.MISSION_READ_ALL)),
-            "runner_available": False, **_results_storage()}
+            "runner_available": True, **_results_storage()}
 
 
 def _results_storage() -> dict[str, Any]:
@@ -436,6 +446,8 @@ def update_experiment(experiment_id: str, request: Request, body: dict = Body(..
     if experiment_result_counts([experiment_id]).get(experiment_id):
         raise HTTPException(status_code=409, detail={"code": "has_results", "message": "This experiment has results, so it cannot be edited in place. Save your changes as a copy instead.",
                                                      "copy_url": f"/api/attack-lab/experiments/{experiment_id}/copy"})
+    if existing.get("status") == live_experiments.IMPLEMENTED:
+        raise HTTPException(status_code=409, detail={"code": "implemented", "message": "This experiment is implemented, so it cannot be edited. Switch Implement off first (or save a copy)."})
     parsed = _parse(body)
     _checked(context, parsed)
     saved = save_attack_experiment(existing["owner_user_id"], parsed.name, parsed.scenario_id, parsed.scenario_version_id, parsed.preset_id,
@@ -450,6 +462,8 @@ def remove_experiment(experiment_id: str, request: Request, context: AuthContext
     existing = get_attack_experiment(experiment_id)
     if existing is None:
         raise HTTPException(status_code=404, detail="Experiment not found.")
+    if existing.get("status") == live_experiments.IMPLEMENTED:
+        raise HTTPException(status_code=409, detail={"code": "implemented", "message": "This experiment is implemented, so it cannot be deleted. Switch Implement off first."})
     delete_attack_experiment(experiment_id)      # results, if any, are kept and marked as from a deleted experiment
     add_audit_event(action="attack_experiment_deleted", outcome="success", reason="Experiment definition deleted; any stored results were kept.",
                     request_id=getattr(request.state, "request_id", "request-unavailable"), actor_id=context.user.id, actor_name=context.user.full_name,
@@ -522,3 +536,52 @@ def repin_experiment(experiment_id: str, request: Request, context: AuthContext 
                     request_id=getattr(request.state, "request_id", "request-unavailable"), actor_id=context.user.id, actor_name=context.user.full_name,
                     target_type="attack_experiment", target_id=experiment_id, metadata={"from_version": source["scenario_version_id"], "to_version": latest})
     return _view(saved, _latest_versions(context, {saved["scenario_id"]}), 0)
+
+
+class ImplementRequest(StrictModel):
+    enabled: bool
+
+
+@router.post("/api/attack-lab/experiments/{experiment_id}/implement")
+def implement_experiment(experiment_id: str, payload: ImplementRequest, request: Request, context: AuthContext = Depends(require_permission(Permission.SCENARIO_CREATE)),
+                         _csrf: AuthContext = Depends(require_csrf)) -> dict:
+    """Switches the experiment's Implement switch. On: it runs automatically in every flight of its exact mission version (the schedule stays
+    hidden until the run ends). Off: it is a plain definition again and can be edited or deleted."""
+    _require_general(context)
+    source = _visible_experiment(experiment_id, context)
+    implemented = source["status"] == live_experiments.IMPLEMENTED
+    if payload.enabled and not implemented:
+        if not source["config"].get("attacks"):
+            raise HTTPException(status_code=409, detail={"code": "nothing_to_run", "message": "This experiment has no attack to run, so there is nothing to implement. Add an attack first."})
+        request_body = ExperimentRequest.model_validate({k: source[k] for k in EXPERIMENT_FIELDS})
+        _checked(context, request_body)                       # the attacks must still fit the pinned version
+        conflict = live_experiments.overlap_conflict(experiment_id, source["owner_user_id"], source["scenario_version_id"], source["config"]["attacks"])
+        if conflict:
+            raise HTTPException(status_code=409, detail={"code": "overlapping_experiments", "message": conflict})
+    status = live_experiments.IMPLEMENTED if payload.enabled else "ready"
+    if payload.enabled != implemented:
+        saved = save_attack_experiment(source["owner_user_id"], source["name"], source["scenario_id"], source["scenario_version_id"], source["preset_id"],
+                                       source["seed"], status, source["config"], experiment_id=experiment_id)
+        add_audit_event(action="attack_experiment_implemented" if payload.enabled else "attack_experiment_unimplemented", outcome="success",
+                        reason="Implement switched " + ("on: the experiment runs automatically in flights of its exact version." if payload.enabled else "off."),
+                        request_id=getattr(request.state, "request_id", "request-unavailable"), actor_id=context.user.id, actor_name=context.user.full_name,
+                        target_type="attack_experiment", target_id=experiment_id, metadata={"scenario_version_id": source["scenario_version_id"]})
+    else:
+        saved = source
+    return _view(saved, _latest_versions(context, {saved["scenario_id"]}))
+
+
+@router.get("/api/attack-lab/live")
+def live_status(context: AuthContext = Depends(require_permission(Permission.MISSION_READ_OWN))) -> dict:
+    """For Mission Control: how many experiments are armed for the deployed mission version. Never the schedule, types or targets."""
+    deployment = latest_mission_deployment(context.user.id, include_all=has_permission(context.user.role, Permission.MISSION_READ_ALL))
+    return live_experiments.status_for_viewer(deployment["scenario_version_id"] if deployment else None)
+
+
+@router.get("/api/attack-lab/results/export")
+def export_results(context: AuthContext = Depends(require_permission(Permission.MISSION_READ_OWN))) -> Response:
+    """Excel workbook of the stored run records the viewer may see (README, Runs, Attacks, Operator responses, Timeline). Read-only."""
+    from .research.run_export import build_workbook
+    results = list_experiment_results(context.user.id, include_all=has_permission(context.user.role, Permission.MISSION_READ_ALL), limit=1000)
+    return Response(content=build_workbook(results), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition": 'attachment; filename="trinetra_run_records.xlsx"', "Cache-Control": "no-store"})

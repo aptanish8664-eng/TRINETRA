@@ -63,6 +63,18 @@ AI_MAX_OUTPUT_TOKENS = env_int("TRINETRA_AI_MAX_OUTPUT_TOKENS", 1800, 128, 6000)
 AI_REQUESTS_PER_HOUR = env_int("TRINETRA_AI_REQUESTS_PER_HOUR", 20, 1, 500)
 AI_DAILY_OUTPUT_TOKEN_LIMIT = env_int("TRINETRA_AI_DAILY_OUTPUT_TOKEN_LIMIT", 20000, 128, 1000000)
 MAX_HTTP_BODY_BYTES = env_int("TRINETRA_MAX_HTTP_BODY_BYTES", 65536, 1024, 1000000)
+# Scenario saves and route previews carry every generated route of every aircraft, so they get their own, larger body limit
+# (a 100-aircraft plan is about 1 MB). Every other request keeps the small limit above.
+PLAN_MAX_HTTP_BODY_BYTES = env_int("TRINETRA_PLAN_MAX_HTTP_BODY_BYTES", 16_000_000, 65536, 64_000_000)
+# SIMULATION CAPACITY: how many PX4 SITL + Gazebo aircraft this machine runs reliably. It limits only ACTIVATING and STARTING simulated
+# aircraft. Planning and saving a mission with more aircraft is always allowed (the mission is then a plan only until enough aircraft run).
+# The value is set from measurements on this machine (docs/FLEET_CAPACITY.md); do not raise it on assumption.
+# MEASURED on this machine (8 logical CPUs, 7.6 GB WSL memory, WSL on D:): 6 aircraft started 3 of 3 times at about 48 s with Gazebo real-time factor 0.99; 7 aircraft only 1 of 3
+# times (real-time factor 0.84-0.97). docs/FLEET_CAPACITY.md has the table. Do not raise it on assumption.
+SIM_MAX_AIRCRAFT_DEFAULT = 6
+SIM_MAX_AIRCRAFT = env_int("TRINETRA_SIM_MAX_AIRCRAFT", SIM_MAX_AIRCRAFT_DEFAULT, 1, 64)
+# PX4 instances the staged start brings up together (each batch is waited for until its aircraft are ready). Measured in docs/FLEET_CAPACITY.md.
+FLEET_START_BATCH = env_int("TRINETRA_FLEET_START_BATCH", 2, 1, 16)
 # Threat monitor: the server refuses a handover to an aircraft below this battery level; live assessments are computed at most this often.
 MIN_HANDOVER_BATTERY_PCT = env_int("TRINETRA_MIN_HANDOVER_BATTERY_PCT", 40, 0, 100)
 LIVE_ASSESSMENT_INTERVAL_S = 1.0
@@ -101,6 +113,11 @@ LONG_RANGE_TILT_DEG = env_int("TRINETRA_LONG_RANGE_TILT_DEG", 60, 20, 85)
 LONG_RANGE_GROUND_EXTENT_M = env_int("TRINETRA_LONG_RANGE_GROUND_EXTENT_M", 2_100_000, 1000, 20_000_000)
 MP_MIN_SPEED_MPS = env_int("TRINETRA_MP_MIN_SPEED_MPS", 1, 1, 150)
 MP_MAX_SPEED_MPS = env_int("TRINETRA_MP_MAX_SPEED_MPS", 90, 1, 150)  # measured ceiling ~100 m/s on the simulated X500 (tilt cap 60 deg), minus ~10%
+# Quick mission defaults (mission_planning/quick.py). 8 m/s: the live threat-detector baseline is validated only at that speed.
+# The long-range profile's waypoint acceptance radius (PX4 switches to the next leg inside it): the tightest corner radius the speed rule assumes.
+LONG_RANGE_ACCEPTANCE_M = env_int("TRINETRA_LONG_RANGE_ACCEPTANCE_M", 25, 1, 500)
+QUICK_SPEED_MPS = env_int("TRINETRA_QUICK_SPEED_MPS", 8, 1, 150)
+QUICK_ALTITUDE_M = env_int("TRINETRA_QUICK_ALTITUDE_M", 50, 1, 500)
 MP_MIN_ALTITUDE_M = env_int("TRINETRA_MP_MIN_ALTITUDE_M", 2, 1, 100)
 MP_MAX_ALTITUDE_M = env_int("TRINETRA_MP_MAX_ALTITUDE_M", 120, 5, 500)
 MP_MIN_HOVER_S = env_int("TRINETRA_MP_MIN_HOVER_S", 1, 0, 600)

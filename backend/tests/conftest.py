@@ -29,6 +29,8 @@ else:
 # The HTTP test client uses plain localhost; production defaults to Secure cookies.
 os.environ["TRINETRA_SESSION_COOKIE_SECURE"] = "false"
 os.environ["TRINETRA_AUTO_START_DEFAULT_SITL"] = "false"
+# The tests describe the capacity rule with 5 aircraft whatever the measured default of the machine is (tests/test_multi_aircraft_planning.py pins the default itself).
+os.environ["TRINETRA_SIM_MAX_AIRCRAFT"] = "5"
 # Real process environment overrides .env (load_dotenv uses override=False), so a local
 # .env that enables the PX4/Gazebo UDP receivers must not bind real ports during tests.
 # Tests that exercise the receivers configure their own transports explicitly.
@@ -129,6 +131,62 @@ def operator_client(general_client):
         yield client, operator
     finally:
         client.close()
+
+
+@pytest.fixture(autouse=True)
+def block_real_wsl(monkeypatch):
+    """Safety guard: no test may ever reach the real WSL executor or fleet manager (a real `cleanup`, `land` or `relocate` would act on the
+    user's live simulator). Two layers, both active in every test:
+
+    1. the adapters' `subprocess` is replaced, so even a test that bypasses the route-level stubs cannot start `wsl.exe`: the call is
+       recorded in the returned list (`blocked_wsl_calls`) and answers like an unreachable WSL;
+    2. the route-level functions get harmless defaults (`cleanup` succeeds with nothing killed, everything else is "unreachable").
+
+    A test that needs an executor or manager installs its own fake after this fixture ran.
+    """
+    import subprocess
+    import types
+
+    from app import execution_routes, fleet_routes
+    from app.telemetry import fleet_manager, mission_executor
+
+    class Blocked(list):
+        """The recorded would-be WSL commands; also keeps the real (unpatched) adapter functions so a test can prove the layer-1 block."""
+
+    blocked = Blocked()
+    blocked.real_invoke_fleet_manager = fleet_manager.invoke_fleet_manager
+    blocked.real_invoke_mission_executor = mission_executor.invoke_mission_executor
+
+    def blocked_run(command, *args, **kwargs):
+        blocked.append([str(part) for part in command])
+        return subprocess.CompletedProcess(command, 1, stdout="", stderr="blocked: tests never start the real WSL executor or fleet manager")
+
+    def blocked_popen(*args, **kwargs):
+        blocked.append(["Popen"])
+        raise OSError("blocked: tests never start the real WSL executor or fleet manager")
+
+    stub = types.SimpleNamespace(run=blocked_run, Popen=blocked_popen, TimeoutExpired=subprocess.TimeoutExpired, CalledProcessError=subprocess.CalledProcessError,
+                                 CompletedProcess=subprocess.CompletedProcess, PIPE=subprocess.PIPE, DEVNULL=subprocess.DEVNULL, STDOUT=subprocess.STDOUT)
+    monkeypatch.setattr(mission_executor, "subprocess", stub)
+    monkeypatch.setattr(fleet_manager, "subprocess", stub)
+
+    def refuse_executor(action, **kwargs):
+        if action == "cleanup":
+            return {"cleanup": True, "killed": []}
+        return {"failure": "No executor in tests.", "failure_code": "executor_unreachable"}
+
+    def refuse_manager(*args, **kwargs):
+        return {"failure": "No fleet manager in tests.", "failure_code": "manager_unavailable"}
+
+    monkeypatch.setattr(execution_routes, "invoke_mission_executor", refuse_executor)
+    monkeypatch.setattr(fleet_routes, "invoke_fleet_manager", refuse_manager)
+    monkeypatch.setattr(fleet_manager, "invoke_fleet_manager", refuse_manager)
+    return blocked
+
+
+@pytest.fixture
+def blocked_wsl_calls(block_real_wsl):
+    return block_real_wsl
 
 
 @pytest.fixture(scope="session", autouse=True)

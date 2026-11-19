@@ -10,7 +10,7 @@ vi.mock('../services/api', () => ({
   ApiError: class ApiError extends Error { status: number; constructor(status: number) { super('API error'); this.status = status } },
   api: {
     px4Telemetry: vi.fn(), px4TelemetrySocket: vi.fn(), latestMissionDeployment: vi.fn(), missionDeployments: vi.fn(), landHere: vi.fn(), startRestart: vi.fn(), restartJob: vi.fn(), retryMissingAircraft: vi.fn(), continueWithReady: vi.fn(), latestRestart: vi.fn(async () => null), deploymentRoleRule: vi.fn(async () => ({ allowed: true, code: 'general', message: 'General accounts deploy and start directly.' })), simulationLocation: vi.fn(), relocateSimulation: vi.fn(),
-    health: vi.fn(), fleetStatus: vi.fn(), gazeboPoses: vi.fn(),
+    health: vi.fn(), fleetStatus: vi.fn(), gazeboPoses: vi.fn(), threatSummary: vi.fn(), aircraftSummary: vi.fn(), continueMonitoring: vi.fn(), resumePreview: vi.fn(), resumeOnTrack: vi.fn(), reassignOptions: vi.fn(), reassign: vi.fn(), switchPrimary: vi.fn(), respond: vi.fn(), reconfigurations: vi.fn(async () => []),
     latestExecution: vi.fn(), executionPreflight: vi.fn(), executionEvents: vi.fn(), startExecution: vi.fn(), pauseExecution: vi.fn(), resumeExecution: vi.fn(), abortExecution: vi.fn(),
     researchModelInfo: vi.fn(async () => ({ available: false, formula: '', live_residual_inputs_available: false })), researchDecisions: vi.fn(async () => []), recordDecision: vi.fn(),
   },
@@ -110,6 +110,8 @@ describe('Mission Control live dashboard', () => {
     // Mission Control reads one overview; most tests only care about the latest deployment, so it is derived from that mock.
     apiMock.missionDeployments.mockImplementation(async () => ({ deployment: await apiMock.latestMissionDeployment(), execution: null, execution_deployment: null }))
     apiMock.health.mockResolvedValue(health())
+    apiMock.threatSummary.mockResolvedValue({ deployment_id: 'd', level: 'clear', headline: 'Clear', probability: 0, aircraft_id: null, tier: null, threat_active: false, suggestion: null, acknowledged: null, raised_again: false, acknowledgements: [], thresholds: { watch: 0.3, act: 0.6, confirmed: 0.85 }, explanation: { clear: 'Below 30%: nothing is suggested. All actions stay available.', watch: 'w', suspected: 's', confirmed: 'c' }, probability_series: [], story: [], monitor_ready: true, note: '' } as never)
+    apiMock.aircraftSummary.mockResolvedValue({ deployment_id: 'd', aircraft: [], counts: { with_mission: 0, verified: 0, not_verified: [] }, safe_maximum: 6 } as never)
     apiMock.fleetStatus.mockResolvedValue({ capacity: 5, verified_count: 1, instances: [], manager_error: null, bridges: { telemetry: { status: 'running' }, pose: { status: 'running' } } } as never)
     apiMock.gazeboPoses.mockResolvedValue(poses(['x500_0']))
     apiMock.latestExecution.mockResolvedValue(null)
@@ -127,7 +129,7 @@ describe('Mission Control live dashboard', () => {
     render(<Px4MissionControl />)
     expect(await screen.findByText('No aircraft reported or deployed.')).toBeTruthy()
     expect(screen.getByText('No deployed mission.')).toBeTruthy()
-    expect(screen.getByText('No reassignments yet.')).toBeTruthy()
+    expect(screen.getByText('Deploy a mission to start the GPS threat monitor.')).toBeTruthy()      // the threat panel is first and says what it needs
     expect(screen.getByText('No transitions observed yet.')).toBeTruthy()
     expect(screen.getByText('No alerts from backend-reported state.')).toBeTruthy()
     expect(screen.getByText('NOT DEPLOYED')).toBeTruthy()
@@ -140,14 +142,17 @@ describe('Mission Control live dashboard', () => {
     apiMock.px4Telemetry.mockResolvedValue(snapshot([vehicle(1), vehicle(2, { battery: null, gps_raw: null, velocity: null })]))
     render(<Px4MissionControl />)
     const first = await screen.findByRole('button', { name: 'Select aircraft px4-1' })
-    expect(within(first).getByText('x500_0')).toBeTruthy()
-    expect(within(first).getByText('80%')).toBeTruthy()
-    expect(within(first).getByText('12.97170, 77.59460')).toBeTruthy()
-    expect(within(first).getByText('fix 3 · 12 sats')).toBeTruthy()
-    expect(within(first).getByText('91°')).toBeTruthy()
-    const second = screen.getByRole('button', { name: 'Select aircraft px4-2' })
+    expect(within(first).getByText('80 %')).toBeTruthy()                                   // the compact card: name, role, state, link, battery, altitude
+    fireEvent.click(screen.getByRole('button', { name: 'Show details of px4-1' }))          // everything else opens on click
+    expect(screen.getByText(/Gazebo x500_0/)).toBeTruthy()
+    const drawer = screen.getByRole('region', { name: 'Details for px4-1' })
+    expect(within(drawer).getByText('fix 3 · 12 sats')).toBeTruthy()
+    expect(within(drawer).getByText('91°')).toBeTruthy()
+    expect(within(drawer).getByText('12.97170, 77.59460')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Show details of px4-2' }))
+    const second = screen.getByRole('region', { name: 'Details for px4-2' })
     expect(within(second).getAllByText('no data').length).toBeGreaterThanOrEqual(3)
-    expect(within(second).getByText('not planned')).toBeTruthy()
+    expect(within(second).getAllByText('not planned').length).toBeGreaterThanOrEqual(1)
     for (const control of screen.queryAllByRole('button')) expect(control.textContent ?? '').not.toMatch(/\barm\b|take.?off|upload|start mission|execute|command/i)
   })
 
@@ -196,6 +201,7 @@ describe('Mission Control live dashboard', () => {
       vehicle(3, { battery: { voltage_v: 13, current_a: 1, remaining_percent: 10, source_message: 'SYS_STATUS', received_at: 'x' } }), vehicle(4, { battery: null }),
     ]))
     render(<Px4MissionControl />)
+    fireEvent.click(await screen.findByRole('tab', { name: 'Batteries' }))
     const panel = await screen.findByRole('region', { name: 'Battery status' })
     const items = within(panel).getAllByRole('listitem')
     expect(items.map(item => item.className)).toEqual(['tone-ok', 'tone-warn', 'tone-critical', 'tone-none'])
@@ -210,10 +216,12 @@ describe('Mission Control live dashboard', () => {
     apiMock.px4Telemetry.mockResolvedValue(snapshot([vehicle(1), vehicle(2)]))
     apiMock.gazeboPoses.mockResolvedValue(poses(['x500_1']))
     render(<Px4MissionControl />)
+    fireEvent.click(await screen.findByRole('tab', { name: 'Pose verification' }))
     const table = await screen.findByRole('table', { name: 'Gazebo pose per aircraft' })
     await waitFor(() => expect(within(table).getAllByRole('row')[2].textContent).toMatch(/px4-2x500_1yes0\.00, 2\.00, 0\.50/))
     expect(within(table).getAllByRole('row')[1].textContent).toMatch(/px4-1x500_0nono data/)
-    expect(within(screen.getByRole('button', { name: 'Select aircraft px4-2' })).getByText('x500_1')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Show details of px4-2' }))
+    expect(within(screen.getByRole('region', { name: 'Details for px4-2' })).getByText(/Gazebo x500_1/)).toBeTruthy()
     expect(screen.getByText(/native Gazebo window runs separately/i)).toBeTruthy()
     expect(screen.getByText(/Reserved for a future embedded view/)).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: 'Select Gazebo x500_1' }))
@@ -226,6 +234,7 @@ describe('Mission Control live dashboard', () => {
     render(<Px4MissionControl />)
     fireEvent.click(await screen.findByRole('button', { name: 'Select aircraft px4-2' }))
     expect(screen.getByTestId('map-selected').textContent).toBe('px4-2')
+    fireEvent.click(screen.getByRole('tab', { name: 'Pose verification' }))
     expect(screen.getByTestId('gazebo-selected-model').textContent).toBe('x500_1')
     fireEvent.click(screen.getByRole('button', { name: 'Select aircraft px4-1' }))
     expect(screen.getByTestId('map-selected').textContent).toBe('px4-1')
@@ -267,27 +276,26 @@ describe('Mission Control live dashboard', () => {
     })
     const rule = (selector: string) => css.split(/\r?\n/).find(line => line.startsWith(selector)) ?? ''
 
-    it('places the panels in three named columns, with the threat monitor, flight log and Gazebo pose below', async () => {
+    it('puts the GPS threat assessment first, then the aircraft rail, the map and the controls, then the detector details and one tabbed diagnostics area', async () => {
       render(<Px4MissionControl />)
       await screen.findByTestId('cesium-live-map')
       const dashboard = screen.getByRole('region', { name: 'Live PX4 mission control' })
-      const main = dashboard.querySelector('.mc-main') as HTMLElement
-      const left = main.querySelector('.mc-rail-left') as HTMLElement
-      const right = main.querySelector('.mc-rail-right') as HTMLElement
       const labels = (node: Element) => Array.from(node.children).map(child => child.getAttribute('aria-label'))
-      expect(labels(left)).toEqual(['Active aircraft', 'System status', 'Battery status'])
-      expect(labels(right)).toEqual(['Alerts', 'Mission status'])
-      expect(main.contains(screen.getByRole('region', { name: 'Mission map' }))).toBe(true)
-      // The selected-aircraft strip stays directly under the map, inside the map panel.
+      const order = Array.from(dashboard.children).map(child => child.getAttribute('aria-label') || child.className)
+      expect(order.indexOf('GPS threat assessment')).toBeGreaterThanOrEqual(0)
+      expect(order.indexOf('GPS threat assessment')).toBeLessThan(order.indexOf('mc-main'))        // the threat assessment is above the map
+      const main = dashboard.querySelector('.mc-main') as HTMLElement
+      expect(labels(main.querySelector('.mc-rail-left') as HTMLElement)).toEqual(['Active aircraft'])
+      expect(labels(main.querySelector('.mc-rail-right') as HTMLElement)).toEqual(['Mission status', 'More actions', 'Alerts'])      // the selected aircraft's controls are one separate panel
       const mapPanel = screen.getByRole('region', { name: 'Mission map' })
-      expect(mapPanel.contains(screen.getByTestId('cesium-live-map'))).toBe(true)
-      const lower = dashboard.querySelector('.mc-lower') as HTMLElement
-      // The left column stacks the flight log and the reassignments list; the tall Gazebo panel sits beside it.
-      expect(labels(lower)).toEqual([null, 'Gazebo panel'])
-      expect(labels(lower.querySelector('.mc-lower-stack') as HTMLElement)).toEqual(['Flight log', 'Mission handoffs'])
-      const order = Array.from(dashboard.children).map(child => child.className || child.getAttribute('aria-label'))
-      expect(order.indexOf('mc-main')).toBeLessThan(order.findIndex(item => String(item).includes('threat-monitor')))
-      expect(order.findIndex(item => String(item).includes('threat-monitor'))).toBeLessThan(order.indexOf('mc-lower'))
+      expect(main.contains(mapPanel) && mapPanel.contains(screen.getByTestId('cesium-live-map'))).toBe(true)
+      expect(order.indexOf('mc-main')).toBeLessThan(order.indexOf('Diagnostics'))
+      expect(screen.getAllByRole('tab').map(tab => tab.textContent)).toEqual(['Flight log', 'Pose verification', 'System status', 'Batteries'])
+      expect(screen.getByRole('tab', { name: 'Flight log' }).getAttribute('aria-selected')).toBe('true')       // only one diagnostic is open at a time
+      expect(screen.queryByRole('region', { name: 'Battery status' })).toBeNull()
+      fireEvent.click(screen.getByRole('tab', { name: 'System status' }))
+      expect(screen.getByRole('region', { name: 'System status' })).toBeTruthy()
+      expect(screen.queryByRole('region', { name: 'Flight log' })).toBeNull()
     })
 
     it('defines grid areas and a bounded map height instead of a content-driven one', () => {

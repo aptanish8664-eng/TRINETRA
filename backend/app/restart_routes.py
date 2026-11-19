@@ -32,6 +32,7 @@ from .mission_planning.start import mission_start
 from .persistence.database import add_audit_event
 from .security import AuthContext
 from .telemetry.fleet_manager import FLEET_CAPACITY
+from .capacity import assess as assess_capacity
 
 router = APIRouter()
 
@@ -89,7 +90,7 @@ def _view(job: dict[str, Any]) -> dict[str, Any]:
     aircraft = job.get("aircraft") or []
     return {key: job[key] for key in ("id", "status", "purpose", "deployment_id", "scenario_id", "scenario_version_id", "steps", "failure", "started_at", "finished_at",
                                       "started_by_name", "reason", "result")} | {
-        "aircraft": aircraft, "requested_count": job.get("requested", 0), "ready_count": sum(1 for row in aircraft if row["state"] == "ready"),
+        "aircraft": aircraft, "capacity": job.get("capacity"), "requested_count": job.get("requested", 0), "ready_count": sum(1 for row in aircraft if row["state"] == "ready"),
         "summary": summary_line(aircraft) if aircraft else "", "partial": job["status"] == "partial", "accepted_partial": bool(job.get("accepted")),
         "missing": [row["aircraft_id"] for row in aircraft if row["state"] != "ready"] if job["status"] in ("partial", "failed") else [],
         "can_retry_missing": job["status"] == "partial" and not job.get("accepted"), "can_continue": job["status"] == "partial" and not job.get("accepted"),
@@ -165,7 +166,7 @@ def _launch(context: AuthContext, deployment: dict[str, Any], plan: Any, purpose
         job = {"id": uuid.uuid4().hex, "status": "running", "purpose": purpose, "deployment_id": deployment["id"], "scenario_id": deployment["scenario_id"],
                "scenario_version_id": deployment["scenario_version_id"], "steps": new_steps(), "failure": None, "started_at": _now_iso(), "finished_at": None,
                "started_by_name": context.user.full_name, "reason": REASONS[purpose], "result": None, "started_mono": time.monotonic(), "last_change_mono": time.monotonic(),
-               "elapsed_s": 0.0, "requested": requested, "aircraft": [], "retry_of": retry_of}
+               "elapsed_s": 0.0, "requested": requested, "aircraft": [], "retry_of": retry_of, "capacity": assess_capacity(requested)}
         _jobs[job["id"]] = job
         for old in list(_jobs)[:-20]:
             _jobs.pop(old, None)

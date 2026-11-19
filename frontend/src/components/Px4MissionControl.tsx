@@ -8,6 +8,8 @@ import { CesiumLiveMap, DEFAULT_LAYERS, type Basemap, type MapLayers } from './C
 import { GazeboPoseMirror } from './GazeboPoseMirror'
 import { MapErrorBoundary } from './MapErrorBoundary'
 import { ThreatMonitor } from './ThreatMonitor'
+import { ContinuityPanel } from './ContinuityPanel'
+import { AircraftRail, DiagnosticsTabs, OperatorActions, ThreatPanel, useVisiblePolling } from './MissionControlRedesign'
 import { SimulationLocationNotice } from './SimulationLocationNotice'
 import { MissionExecutionPanel } from './MissionExecutionPanel'
 import { MissionSwitchBanner } from './MissionSwitchBanner'
@@ -17,7 +19,7 @@ import type { ExecutionEvent } from '../services/api'
 import type { Tier } from './attackLabTypes'
 import { mergePx4TelemetryStream } from '../services/telemetryStreams'
 import {
-  AircraftCards, AlertsPanel, BatteryPanel, DetailDrawer, FlightLog, GazeboPanel, HandoffsPanel, HeaderStrip, MapToolbar,
+  AlertsPanel, BatteryPanel, FlightLog, GazeboPanel, HeaderStrip, MapToolbar,
   SystemStatus, type ChipState, type StatusChip,
 } from './MissionControlPanels'
 import {
@@ -25,6 +27,7 @@ import {
 } from './missionControlModel'
 import './px4-mission-control.css'
 import './mission-control-dashboard.css'
+import './mission-control-redesign.css'
 
 type LinkState = 'checking' | 'connecting' | 'connected' | 'disabled' | 'stale' | 'offline' | 'unauthorized'
 
@@ -39,10 +42,17 @@ function linkState(snapshot: Px4TelemetrySnapshot | null): LinkState {
   return 'connecting'
 }
 
-/** Polls a read-only endpoint while the page is visible; failures are reported to the caller, never papered over. */
-function usePolling<T>(load: () => Promise<T>, intervalMs: number): { value: T | null; failed: boolean } {
+/** Polls a read-only endpoint while the page is visible; failures are reported to the caller, never papered over. `waiting` counts the seconds until the first answer. */
+function usePolling<T>(load: () => Promise<T>, intervalMs: number): { value: T | null; failed: boolean; waiting: number } {
   const [value, setValue] = useState<T | null>(null)
   const [failed, setFailed] = useState(false)
+  const [waiting, setWaiting] = useState(0)
+  useEffect(() => {
+    if (value !== null || failed) { setWaiting(0); return }
+    const started = Date.now()
+    const timer = window.setInterval(() => setWaiting(Math.floor((Date.now() - started) / 1000)), 1000)
+    return () => window.clearInterval(timer)
+  }, [value, failed])
   const loadRef = useRef(load)
   loadRef.current = load
   useEffect(() => {
@@ -53,10 +63,15 @@ function usePolling<T>(load: () => Promise<T>, intervalMs: number): { value: T |
     }
     tick()
     const timer = window.setInterval(tick, intervalMs)
-    return () => { stopped = true; window.clearInterval(timer) }
+    const onVisible = () => { if (!document.hidden) tick() }          // a tab that was hidden refreshes the moment it is shown again
+    document.addEventListener('visibilitychange', onVisible)
+    return () => { stopped = true; window.clearInterval(timer); document.removeEventListener('visibilitychange', onVisible) }
   }, [intervalMs])
-  return { value, failed }
+  return { value, failed, waiting }
 }
+
+/** What a status row says while its first answer is pending: never "checking" for ever. */
+const pendingText = (seconds: number) => (seconds >= 15 ? 'no answer (15 s+)' : seconds >= 6 ? `slow (${seconds} s)` : 'checking')
 
 const chipFor = (state: ChipState, key: string, label: string, detail: string): StatusChip => ({ key, label, state, detail })
 const receiverState = (status: string | undefined): ChipState =>
@@ -77,7 +92,7 @@ export function Px4MissionControl({ notice = '', onDismissNotice, onOpenScenario
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [error, setError] = useState('')
   // Mission switching: the deployment the newest execution belongs to stays shown (pinned) while a newer one waits; the user switches explicitly.
-  const { overview, loaded: deploymentLoaded, refresh: refreshOverview } = useDeploymentOverview(true)
+  const { overview, loaded: deploymentLoaded, refresh: refreshOverview, error: overviewError, waiting: overviewWaiting } = useDeploymentOverview(true)
   const [switchedTo, setSwitchedTo] = useState<string | null>(null)
   const latestDeployment = overview?.deployment ?? null
   const executionDeployment = overview?.execution_deployment ?? null
@@ -100,6 +115,7 @@ export function Px4MissionControl({ notice = '', onDismissNotice, onOpenScenario
   const previousObserved = useRef<Observed | null>(null)
   const [threatAlerts, setThreatAlerts] = useState<Alert[]>([])
   const [threatTiers, setThreatTiers] = useState<Record<string, Tier>>({})
+  const [dialog, setDialog] = useState<{ kind: 'resume' | 'reassign' | 'switch' | 'respond'; aircraftId: string; taker?: string; action?: 'hold' | 'return_to_launch' } | null>(null)
   const addThreatAlerts = useCallback((entries: Alert[]) => setThreatAlerts(current => [...current, ...entries].slice(-30)), [])
 
   useEffect(() => {
@@ -142,6 +158,7 @@ export function Px4MissionControl({ notice = '', onDismissNotice, onOpenScenario
           return
         }
         if (event.code === 1013) { setStatus('disabled'); return }
+        if (document.hidden) return                       // closed on purpose while the tab is hidden; reopened when it is shown
         setStatus('offline')
         retryTimer = window.setTimeout(() => connect(currentSnapshot?.generated_at ?? since), 2000)
       }
@@ -167,8 +184,21 @@ export function Px4MissionControl({ notice = '', onDismissNotice, onOpenScenario
       }
     })
 
+    // Nobody is looking at a hidden tab: close the live stream and open it again (from where it stopped) when the tab is shown.
+    const onVisibility = () => {
+      if (stopped) return
+      if (document.hidden) {
+        if (retryTimer !== undefined) window.clearTimeout(retryTimer)
+        socket?.close()
+        socket = null
+      } else if (!socket || socket.readyState === WebSocket.CLOSED) {
+        connect(currentSnapshot?.generated_at ?? '')
+      }
+    }
+    document.addEventListener('visibilitychange', onVisibility)
     return () => {
       stopped = true
+      document.removeEventListener('visibilitychange', onVisibility)
       if (retryTimer !== undefined) window.clearTimeout(retryTimer)
       socket?.close()
     }
@@ -189,6 +219,9 @@ export function Px4MissionControl({ notice = '', onDismissNotice, onOpenScenario
   const health = usePolling<HealthPayload>(useCallback(() => api.health() as Promise<HealthPayload>, []), HEALTH_POLL_MS)
   const fleet = usePolling<FleetPayload>(useCallback(() => api.fleetStatus() as Promise<FleetPayload>, []), FLEET_POLL_MS)
   const gazebo = usePolling<GazeboPoseSnapshot>(useCallback(() => api.gazeboPoses({ trails: false }), []), GAZEBO_POLL_MS)
+  // One small summary per aircraft (verified or why not, role, battery, route progress): the checks panel and the rail use it, so "verified" and "with a mission" always add up.
+  const summaryLoad = useCallback(() => api.aircraftSummary(deployment!.id), [deployment])
+  const summary = useVisiblePolling(deployment ? summaryLoad : null, 4000)
 
   const vehicles = snapshot?.vehicles ?? []
   const plan = deploymentPlan(deployment)
@@ -229,13 +262,16 @@ export function Px4MissionControl({ notice = '', onDismissNotice, onOpenScenario
   const bridgeState: ChipState = !bridges ? 'unknown'
     : bridges.telemetry?.status === 'running' && bridges.pose?.status === 'running' ? 'ok' : 'warn'
   const chips: StatusChip[] = [
-    chipFor(health.failed ? 'bad' : health.value ? (health.value.status === 'ready' ? 'ok' : 'warn') : 'unknown', 'backend', 'Backend', health.failed ? 'unreachable' : health.value?.status ?? 'checking'),
-    chipFor(fleet.failed ? 'bad' : !fleet.value ? 'unknown' : fleet.value.manager_error ? 'bad' : 'ok', 'fleet', 'WSL fleet manager', fleet.failed ? 'unreachable' : !fleet.value ? 'checking' : fleet.value.manager_error ? 'error' : 'responding'),
+    chipFor(health.failed ? 'bad' : health.value ? (health.value.status === 'ready' ? 'ok' : 'warn') : health.waiting >= 15 ? 'bad' : health.waiting >= 6 ? 'warn' : 'unknown', 'backend', 'Backend', health.failed ? 'unreachable' : health.value?.status ?? pendingText(health.waiting)),
+    chipFor(fleet.failed ? 'bad' : !fleet.value ? (fleet.waiting >= 15 ? 'bad' : fleet.waiting >= 6 ? 'warn' : 'unknown') : fleet.value.manager_error ? 'bad' : 'ok', 'fleet', 'WSL fleet manager', fleet.failed ? 'unreachable' : !fleet.value ? pendingText(fleet.waiting) : fleet.value.manager_error ? 'error' : 'responding'),
     chipFor(receiverState(components?.px4?.status ?? (status === 'connected' ? 'receiving' : undefined)), 'px4', 'PX4 receiver', components?.px4?.status ?? statusLabel[status]),
     chipFor(receiverState(components?.gazebo?.status), 'gazebo', 'Gazebo pose', components?.gazebo?.status ?? 'no data'),
     chipFor(bridgeState, 'bridges', 'Bridges', !bridges ? 'no data' : `telemetry ${bridges.telemetry?.status ?? '?'} · pose ${bridges.pose?.status ?? '?'}`),
   ]
 
+  const summaryData = summary.value
+  const changed = () => { summary.refresh(); void refreshOverview() }
+  const hasPlan = Boolean(deployment && !isLegacyDeployment(deployment))
   return <section className="mc-dashboard" aria-label="Live PX4 mission control">
     {notice && <div className="mc-deploy-notice" role="status"><CheckCircle2 size={15}/><span>{notice}</span>
       {onDismissNotice && <button type="button" onClick={onDismissNotice}>DISMISS</button>}</div>}
@@ -244,54 +280,56 @@ export function Px4MissionControl({ notice = '', onDismissNotice, onOpenScenario
       execution={{ active: executionSummary.active, state: executionSummary.state, aircraft_id: executionSummary.aircraft_id }}
       row={rows.find(item => item.id === executionSummary.aircraft_id) ?? null} onSwitch={() => setSwitchedTo(latestDeployment.id)}
       onSwitchAndRestart={() => setRestart({ purpose: 'switch', deployment: latestDeployment, resume: null })}/>}
-    <HeaderStrip deployment={deployment} loading={!deploymentLoaded} chips={chips} onOpenScenarioLab={onOpenScenarioLab}/>
+    <HeaderStrip deployment={deployment} loading={!deploymentLoaded} chips={chips} onOpenScenarioLab={onOpenScenarioLab} loadingSeconds={overviewWaiting} loadError={overviewError} onRetryLoad={() => void refreshOverview()}/>
     {error && <div className="px4-inline-error" role="status"><AlertTriangle size={15}/>{error}</div>}
+
+    {/* The GPS threat assessment is the first thing on the page, above the map. */}
+    <ThreatPanel deploymentId={hasPlan ? deployment!.id : null} onReassign={(aircraftId, taker) => setDialog({ kind: 'reassign', aircraftId, taker })} onRespond={(aircraftId, action) => setDialog({ kind: 'respond', aircraftId, action })}/>
+
     {/* Where the simulated aircraft is relative to the deployed mission; the restart is always an explicit, confirmed action. */}
-    {deployment && !isLegacyDeployment(deployment) && <section className="panel mc-location" aria-label="Mission location">
-      <SimulationLocationNotice key={locationKey} scenarioId={deployment.scenario_id} versionId={deployment.scenario_version_id} canRelocate={canManageFleet} inFlight={Boolean(executionSummary?.active)}
-        onRestart={() => setRestart({ purpose: 'restart', deployment, resume: null })}/>
+    {hasPlan && <section className="panel mc-location" aria-label="Mission location">
+      <SimulationLocationNotice key={locationKey} scenarioId={deployment!.scenario_id} versionId={deployment!.scenario_version_id} canRelocate={canManageFleet} inFlight={Boolean(executionSummary?.active)}
+        onRestart={() => setRestart({ purpose: 'restart', deployment: deployment!, resume: null })}/>
     </section>}
 
     <div className="mc-main">
       <div className="mc-rail mc-rail-left">
-        <AircraftCards rows={rows} selectedId={selectedRow?.id ?? null} onSelect={select} threatTiers={threatTiers}/>
-        <SystemStatus chips={chips} verified={fleet.value?.verified_count ?? null} withMission={rows.filter(row => row.plan).length} openAlerts={openAlerts}/>
-        <BatteryPanel rows={rows}/>
+        <AircraftRail rows={rows} selectedId={selectedRow?.id ?? null} onSelect={select} threatTiers={threatTiers} summary={summaryData}/>
       </div>
       <section className="panel mc-map-panel" aria-label="Mission map">
         <div className="panel-heading"><div><span className="eyebrow">LIVE GEOSPATIAL PICTURE <span className={status === 'connected' ? 'live-dot' : 'px4-link-dot'}/></span><h3>Mission map · CesiumJS 3D</h3></div><span className="px4-map-caption">WGS84 · {statusLabel[status]}</span></div>
         <MapToolbar layers={layers} onLayers={setLayers} basemap={basemap} onBasemap={chooseBasemap} follow={follow} onFollow={setFollow}
           onFit={() => setFitSignal(value => value + 1)} selectedId={selectedVehicleId}/>
-        <MapErrorBoundary label="The mission map"><CesiumLiveMap vehicles={vehicles} selected={selectedVehicleId} onSelect={select} overlay={overlay} layers={layers} basemap={basemap} follow={follow} fitSignal={fitSignal}/></MapErrorBoundary>
-        <DetailDrawer row={selectedRow}/>
+        <div className="mc-map-frame"><MapErrorBoundary label="The mission map"><CesiumLiveMap vehicles={vehicles} selected={selectedVehicleId} onSelect={select} overlay={overlay} layers={layers} basemap={basemap} follow={follow} fitSignal={fitSignal}/></MapErrorBoundary>
+          {vehicles.length === 0 && overlay === null && <div className="mc-map-empty" role="note">No aircraft position and no mission route to draw yet. The map fills in as soon as telemetry or a deployed mission arrives.</div>}</div>
       </section>
       <div className="mc-rail mc-rail-right">
-        <AlertsPanel alerts={alerts} acknowledged={acknowledged} onAcknowledge={id => setAcknowledged(current => new Set(current).add(id))}/>
         <MissionExecutionPanel deployment={deployment} rows={rows} onEvents={addExecutionEvents}
-          onRestart={deployment && !isLegacyDeployment(deployment) ? () => setRestart({ purpose: 'restart', deployment, resume: null }) : undefined}/>
+          onRestart={hasPlan ? () => setRestart({ purpose: 'restart', deployment: deployment!, resume: null }) : undefined}/>
+        <OperatorActions deploymentId={hasPlan ? deployment!.id : null} selected={selectedRow} summary={summaryData} dialog={dialog} onDialog={setDialog} onChanged={changed}/>
+        <AlertsPanel alerts={alerts} acknowledged={acknowledged} onAcknowledge={id => setAcknowledged(current => new Set(current).add(id))}/>
       </div>
     </div>
 
-    <ThreatMonitor canRecord onTierTransitions={addThreatAlerts} onTiers={setThreatTiers}
-      onRestart={deployment && !isLegacyDeployment(deployment) ? () => setRestart({ purpose: 'restart', deployment, resume: null }) : undefined}/>
+    {/* The detector's own per-aircraft cards (evidence, ranked responses) stay one click away. */}
+    <details className="panel mc-details">
+      <summary>GPS threat details by aircraft</summary>
+      <ThreatMonitor canRecord onTierTransitions={addThreatAlerts} onTiers={setThreatTiers}
+        onRestart={hasPlan ? () => setRestart({ purpose: 'restart', deployment: deployment!, resume: null }) : undefined}/>
+    </details>
 
-    <div className="mc-lower">
-      {/* The log and the (rarely filled) reassignments list share one column beside the tall Gazebo panel. */}
-      <div className="mc-lower-stack">
-        <FlightLog entries={mergeLog(log, executionLog)}/>
-        <HandoffsPanel/>
-      </div>
-      <GazeboPanel rows={rows} snapshot={gazebo.value} error={gazebo.failed ? 'Gazebo pose data could not be read from the backend.' : ''}>
-      <GazeboPoseMirror
-        selectedModel={selectedRow?.gazeboModel ?? null}
-        onSelect={modelName => {
+    <DiagnosticsTabs panels={{
+      log: <><FlightLog entries={mergeLog(log, executionLog)}/><ContinuityPanel/></>,
+      pose: <GazeboPanel rows={rows} snapshot={gazebo.value} error={gazebo.failed ? 'Gazebo pose data could not be read from the backend.' : ''}>
+        <GazeboPoseMirror selectedModel={selectedRow?.gazeboModel ?? null} onSelect={modelName => {
           const systemId = systemIdForGazeboModel(modelName)
           const row = systemId === null ? null : rows.find(item => item.systemId === systemId)
           if (row) select(row.id)
-        }}
-      />
-      </GazeboPanel>
-    </div>
+        }}/>
+      </GazeboPanel>,
+      status: <SystemStatus chips={chips} verified={summaryData?.counts.verified ?? fleet.value?.verified_count ?? null} withMission={summaryData?.counts.with_mission ?? rows.filter(row => row.plan).length} openAlerts={openAlerts} notVerified={summaryData?.counts.not_verified}/>,
+      batteries: <BatteryPanel rows={rows}/>,
+    }}/>
     {restart && <RestartDialog deploymentId={restart.deployment.id} purpose={restart.purpose} resumeJob={restart.resume}
       missionLabel={`${restart.deployment.scenario_title} v${restart.deployment.scenario_version_number ?? '?'}`} onClose={() => setRestart(null)}
       missionAircraft={deploymentPlan(restart.deployment)?.aircraft.length} runningAircraft={vehicles.filter(item => item.status === 'connected').length}

@@ -107,6 +107,38 @@ export interface LandResult {
   execution_id?: string | null; execution?: ExecutionView | null; started_at?: string; px4_messages?: string[]; simulation_only: true
 }
 /** `skipped` = not run: an earlier step failed (it is never left on running or waiting). */
+
+/** Part E: the GPS threat summary (headline, probability, suggestion, story) and the operator actions. Software-only. */
+export type ThreatLevel = 'clear' | 'watch' | 'suspected' | 'confirmed'
+export interface StoryEvent { at: string; t: number; kind: string; aircraft_id: string | null; by: string | null; text: string; data: Record<string, unknown> }
+export interface ThreatSuggestion { action: 'continue_monitoring' | 'reassign' | 'hold' | 'return_to_launch'; label: string; reason: string; level: ThreatLevel; taker?: string }
+export interface ThreatSummary {
+  deployment_id: string; level: ThreatLevel; headline: string; probability: number | null; aircraft_id: string | null; tier: string | null; threat_active: boolean
+  suggestion: ThreatSuggestion | null; acknowledged: { at: string; by: string; reminder_probability: number } | null; raised_again: boolean
+  acknowledgements: Array<{ aircraft_id: string; at: string; by: string; reminder_probability: number }>
+  thresholds: { watch: number; act: number; confirmed: number }; explanation: Record<ThreatLevel, string>
+  probability_series: Array<{ t: number; p: number }>; story: StoryEvent[]; monitor_ready: boolean; note: string
+}
+export interface RejoinPoint { index: number; waypoint_number: number; of: number; latitude: number; longitude: number; altitude_m: number; distance_m: number | null; why: string; is_landing: boolean; remaining_waypoints: number }
+export interface ResumePreview { aircraft_id: string; deployment_id: string; run_state: string | null; airborne: boolean | null; rejoin: RejoinPoint; how: string; allowed: boolean; reason: string | null }
+export interface ReassignCandidate {
+  aircraft_id: string; role: string | null; state: string; has_active_run: boolean; run_state: string | null; battery_percent: number | null; link: string
+  distance_from_task_m: number | null; monitor_state: string | null; ready: boolean; not_ready_reasons: string[]; verified: boolean
+}
+export type OriginalChoice = 'hold' | 'return_to_launch' | 'land' | 'decoy'
+export interface ReassignOptions {
+  aircraft_id: string; role: string | null; run_state: string | null; rejoin: RejoinPoint; candidates: ReassignCandidate[]
+  original_choices: Array<{ value: OriginalChoice; label: string; meaning: string }>; what_happens: string
+}
+export interface AircraftSummaryRow {
+  aircraft_id: string; role: string | null; plan_role?: string | null; link: string; gazebo: string | null; armed: boolean | null; mode: string | null; landed_state: string | null
+  battery_percent: number | null; altitude_m: number | null; latitude: number | null; longitude: number | null; gps_valid: boolean | null
+  pose_m: { x: number | null; y: number | null; z: number | null } | null; execution_state: string | null; route_reached: number | null; route_total: number | null
+  verified: boolean; not_verified_reason: string | null; telemetry_age_s: number | null
+}
+export interface AircraftSummary { deployment_id: string; aircraft: AircraftSummaryRow[]; counts: { with_mission: number; verified: number; not_verified: Array<{ aircraft_id: string; reason: string }> }; safe_maximum: number }
+export interface CapacityAssessment { level: 'ok' | 'warn' | 'overload'; requested: number; running: number; safe_maximum: number; host_free_mb: number | null; host_total_mb: number | null; estimated_needed_mb: number; reasons: string[]; advice: string }
+
 export interface RestartStep { key: string; label: string; status: 'pending' | 'running' | 'ok' | 'failed' | 'skipped'; detail: string }
 /** One aircraft of a (re)start: starting -> telemetry_ok / pose_ok -> ready, or failed with the reason. */
 export interface RestartAircraft { aircraft_id: string; state: 'starting' | 'telemetry_ok' | 'pose_ok' | 'ready' | 'failed'; detail: string; manager_state?: string; telemetry?: boolean; pose?: boolean }
@@ -340,6 +372,22 @@ export const api = {
   resumeExecution: (id: string) => request<ExecutionView>(`/api/mission-control/executions/${encodeURIComponent(id)}/resume`, { method: 'POST' }),
   disarmAircraft: (aircraftId: string) => request<{ aircraft_id: string; disarmed: boolean; armed: boolean; forced: false; px4_messages: string[] }>(`/api/mission-control/aircraft/${encodeURIComponent(aircraftId)}/disarm`, { method: 'POST' }),
   landHere: (aircraftId: string) => request<LandResult>(`/api/mission-control/aircraft/${encodeURIComponent(aircraftId)}/land`, { method: 'POST', body: JSON.stringify({ confirm: true }) }),
+  // Part E: the operator is always in control. Each of these is an explicit, confirmed action (never pressed for the user).
+  threatSummary: (deploymentId: string) => request<ThreatSummary>(`/api/mission-control/threat-summary?deployment_id=${encodeURIComponent(deploymentId)}`),
+  continueMonitoring: (aircraftId: string, deploymentId: string, reminderProbability?: number) =>
+    request<{ message: string; reminder_probability: number }>(`/api/mission-control/aircraft/${encodeURIComponent(aircraftId)}/continue-monitoring`, { method: 'POST', body: JSON.stringify({ deployment_id: deploymentId, ...(reminderProbability === undefined ? {} : { reminder_probability: reminderProbability }) }) }),
+  resumePreview: (aircraftId: string, deploymentId: string) => request<ResumePreview>(`/api/mission-control/aircraft/${encodeURIComponent(aircraftId)}/resume-preview?deployment_id=${encodeURIComponent(deploymentId)}`),
+  resumeOnTrack: (aircraftId: string, deploymentId: string) =>
+    request<{ message: string; rejoin: RejoinPoint }>(`/api/mission-control/aircraft/${encodeURIComponent(aircraftId)}/resume-on-track`, { method: 'POST', body: JSON.stringify({ deployment_id: deploymentId, confirm: true }) }),
+  reassignOptions: (aircraftId: string, deploymentId: string) => request<ReassignOptions>(`/api/mission-control/aircraft/${encodeURIComponent(aircraftId)}/reassign-options?deployment_id=${encodeURIComponent(deploymentId)}`),
+  reassign: (aircraftId: string, deploymentId: string, taker: string, original: OriginalChoice) =>
+    request<{ message: string; steps: string[]; original_result: string; new_roles: Record<string, string> }>(`/api/mission-control/aircraft/${encodeURIComponent(aircraftId)}/reassign`, { method: 'POST', body: JSON.stringify({ deployment_id: deploymentId, taker, original, confirm: true }) }),
+  respond: (aircraftId: string, action: 'hold' | 'return_to_launch' | 'land_here' | 'resume') =>
+    request<{ message: string }>('/api/research/responses', { method: 'POST', body: JSON.stringify({ aircraft_id: aircraftId, action, confirm: true }) }),
+  switchPrimary: (aircraftId: string, candidate: string) =>
+    request<{ message: string }>('/api/research/responses', { method: 'POST', body: JSON.stringify({ aircraft_id: aircraftId, action: 'switch_primary', candidate, confirm: true }) }),
+  aircraftSummary: (deploymentId: string) => request<AircraftSummary>(`/api/mission-control/aircraft-summary?deployment_id=${encodeURIComponent(deploymentId)}`),
+  fleetCapacity: (count: number) => request<CapacityAssessment>(`/api/fleet/capacity?count=${count}`),
   startRestart: (deploymentId: string, purpose: 'restart' | 'switch' = 'restart') =>
     request<RestartJob>('/api/mission-control/restart', { method: 'POST', body: JSON.stringify({ deployment_id: deploymentId, confirm: true, purpose }) }),
   restartJob: (id: string) => request<RestartJob>(`/api/mission-control/restart/${encodeURIComponent(id)}`),

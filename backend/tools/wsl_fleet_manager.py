@@ -266,6 +266,61 @@ def discover_gazebo_processes_any(proc_root: Path = Path("/proc")) -> list[int]:
     return found
 
 
+# Gazebo options for this process, set once from the command line (the backend passes them as fixed flags). `gui`: also open the Gazebo window (gz sim -g);
+# off by default, because the window costs CPU and memory on a laptop and nothing in TRINETRA reads it. `light`: run the server with a trimmed plugin list.
+GAZEBO_OPTIONS: dict[str, bool] = {"gui": False, "light": False}
+
+# Where each instance is spawned in Gazebo: east/north metres from the world origin (the simulation home). Set once from `--spawn-pose=INSTANCE:EAST:NORTH` flags. An instance with no
+# entry is placed on the old fixed line (0 m east, 3 m north per instance), which is only a fallback for a start that was requested without a plan.
+SPAWN_POSES: dict[int, tuple[float, float]] = {}
+SPAWN_LIMIT_M = 1_500_000.0
+
+
+def parse_spawn_pose(text: str) -> tuple[int, float, float]:
+    parts = text.split(":")
+    if len(parts) != 3:
+        raise ValueError("--spawn-pose must be INSTANCE:EAST:NORTH")
+    instance = int(parts[0])
+    east, north = float(parts[1]), float(parts[2])
+    if not 0 <= instance < FLEET_CAPACITY or not all(math.isfinite(value) and abs(value) <= SPAWN_LIMIT_M for value in (east, north)):
+        raise ValueError("--spawn-pose is out of range")
+    return instance, east, north
+
+
+def spawn_pose_text(instance: int) -> str:
+    east, north = SPAWN_POSES.get(instance, (0.0, instance * 3.0))
+    return f"{east:.2f},{north:.2f},0,0,0,0"
+
+# PX4's own server.config loads a rendering sensor system (ogre2), optical-flow and GStreamer camera plugins, wind effects, air speed, link wrench and contact.
+# An x500 multicopter only has an IMU, barometer, magnetometer and GPS (all non-rendering), so a light config keeps physics, user commands, the scene broadcaster
+# (the pose bridge reads it) and the four sensor systems, and leaves the rest out. The PX4 tree is not edited: the file is written next to the manager's state.
+LIGHT_SERVER_CONFIG = """<server_config>
+  <plugins>
+    <plugin entity_name="*" entity_type="world" filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>
+    <plugin entity_name="*" entity_type="world" filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"/>
+    <plugin entity_name="*" entity_type="world" filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
+    <plugin entity_name="*" entity_type="world" filename="gz-sim-imu-system" name="gz::sim::systems::Imu"/>
+    <plugin entity_name="*" entity_type="world" filename="gz-sim-air-pressure-system" name="gz::sim::systems::AirPressure"/>
+    <plugin entity_name="*" entity_type="world" filename="gz-sim-navsat-system" name="gz::sim::systems::NavSat"/>
+    <plugin entity_name="*" entity_type="world" filename="gz-sim-magnetometer-system" name="gz::sim::systems::Magnetometer">
+      <use_units_gauss>false</use_units_gauss>
+      <use_earth_frame_ned>false</use_earth_frame_ned>
+    </plugin>
+  </plugins>
+</server_config>
+"""
+
+
+def light_server_config_path() -> Path:
+    path = Path(os.environ.get("TRINETRA_STATE_DIR", str(Path.home() / ".trinetra"))) / "gz_server_light.config"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.is_file() or path.read_text(encoding="utf-8") != LIGHT_SERVER_CONFIG:
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(LIGHT_SERVER_CONFIG, encoding="utf-8")
+        os.replace(temporary, path)
+    return path
+
+
 def start_gazebo_with_world(px4_root: Path, world: Path, *, headless: bool = False, proc_root: Path = Path("/proc"), timeout_s: float = 30.0,
                             spawn=subprocess.Popen) -> dict[str, Any]:
     """Start the Gazebo server (and the GUI) from the runtime world, with the environment px4-rc.gzsim would use."""
@@ -275,9 +330,12 @@ def start_gazebo_with_world(px4_root: Path, world: Path, *, headless: bool = Fal
     env = os.environ.copy()
     env["GZ_IP"] = "127.0.0.1"
     log = _log_path("gazebo-runtime")
-    script = '. "$1"; exec gz sim --verbose=1 -r -s "$2"'
+    # `$3` is the trimmed server config when the light option is on, otherwise empty (PX4's own config from gz_env.sh stays in force).
+    script = '. "$1"; if [ -n "$3" ]; then export GZ_SIM_SERVER_CONFIG_PATH="$3"; fi; exec gz sim --verbose=1 -r -s "$2"'
+    light = str(light_server_config_path()) if GAZEBO_OPTIONS["light"] else ""
+    headless = headless and not GAZEBO_OPTIONS["gui"]
     with log.open("ab") as handle:
-        server = spawn(["sh", "-c", script, "sh", str(gz_env), str(world)], env=env, stdin=subprocess.DEVNULL, stdout=handle,
+        server = spawn(["sh", "-c", script, "sh", str(gz_env), str(world), light], env=env, stdin=subprocess.DEVNULL, stdout=handle,
                        stderr=subprocess.STDOUT, start_new_session=True)
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
@@ -699,7 +757,7 @@ def _spawn(px4_root: Path, instance: int, home: dict[str, float] | None = None, 
     env.update({
         "PX4_SIM_MODEL": MODEL,
         "PX4_GZ_WORLD": "default",
-        "PX4_GZ_MODEL_POSE": f"0,{instance * 3.0},0,0,0,0",
+        "PX4_GZ_MODEL_POSE": spawn_pose_text(instance),
         "GZ_IP": "127.0.0.1",
     })
     for name in HOME_ENV:  # never inherit a home from the caller's shell; it is explicit or absent
@@ -892,6 +950,90 @@ def stop_managed(instances: list[int], *, px4_root: Path = DEFAULT_PX4_ROOT,
     return {"stopped_instances": stopped, "errors": errors, "manager": "px4_wsl_fleet_v1"}
 
 
+
+# --- stale-process inventory and clean-up ----------------------------------------------------------------------------------------------
+# After an interrupted run a Gazebo server, a bridge or a PX4 instance can stay alive with nothing driving it (the doctor once found a Gazebo server, two
+# bridges and one PX4 instance). A new start would adopt them, with an old world origin or wrong ports. Only processes this tool can PROVE are TRINETRA's
+# are ever touched: PX4 instances of this checkout's binary running gz_x500, Gazebo servers/GUIs started from this checkout's worlds or the runtime world,
+# and the two TRINETRA bridge scripts. Nothing else is stopped, whatever its name.
+def process_alive(pid: int, proc_root: Path = Path("/proc")) -> bool:
+    """A process that has exited but not yet been collected by its parent (a zombie, state Z) is gone for every practical purpose."""
+    try:
+        stat = (proc_root / str(pid) / "stat").read_text()
+    except OSError:
+        return False
+    try:
+        return stat.rsplit(")", 1)[1].split()[0] != "Z"
+    except IndexError:
+        return True
+
+
+def discover_supervisors(proc_root: Path = Path("/proc")) -> list[int]:
+    """Other staged-start supervisors of this tool that are running (never this process)."""
+    found = []
+    try:
+        entries = list(proc_root.iterdir())
+    except OSError:
+        return found
+    for entry in entries:
+        if not entry.name.isdigit() or int(entry.name) == os.getpid():
+            continue
+        words = _cmdline(entry)
+        if any(Path(item).name == Path(__file__).name for item in words) and "supervise" in words and process_alive(int(entry.name), proc_root):
+            found.append(int(entry.name))
+    return found
+
+
+def inventory(px4_root: Path, proc_root: Path = Path("/proc")) -> dict[str, Any]:
+    root = px4_root.resolve()
+    px4 = discover_px4_instances(root, proc_root)
+    gazebo = discover_gazebo_processes(root, proc_root, any_world=True)
+    bridges = {name: discover_script_process(script, proc_root) for name, script in (("telemetry", TELEMETRY_BRIDGE_SCRIPT), ("pose", POSE_BRIDGE_SCRIPT))}
+    return {"px4": {f"px4-{instance + 1}": pid for instance, pid in sorted(px4.items())}, "gazebo_server": list(gazebo["server"]), "gazebo_gui": list(gazebo["gui"]),
+            "bridges": {name: pid for name, pid in bridges.items() if pid}, "supervisors": discover_supervisors(proc_root)}
+
+
+def stale_processes(found: dict[str, Any]) -> list[str]:
+    """What is alive without the rest of a simulation: a Gazebo server with no aircraft, aircraft with no Gazebo server, bridges with neither."""
+    stale: list[str] = []
+    aircraft, server = found["px4"], found["gazebo_server"]
+    if server and not aircraft:
+        stale += [f"gazebo-server pid {pid}" for pid in server] + [f"gazebo-gui pid {pid}" for pid in found["gazebo_gui"]]
+    if aircraft and not server:
+        stale += [f"{name} pid {pid}" for name, pid in aircraft.items()]
+    if not aircraft and not server:
+        stale += [f"{name}-bridge pid {pid}" for name, pid in found["bridges"].items()] + [f"gazebo-gui pid {pid}" for pid in found["gazebo_gui"]]
+    return stale
+
+
+def clean_processes(px4_root: Path, mode: str = "stale", proc_root: Path = Path("/proc")) -> dict[str, Any]:
+    """Stop stale TRINETRA processes (`mode` "stale") or every TRINETRA simulation process ("all"). Returns what was found and what was stopped."""
+    if mode not in {"stale", "all"}:
+        raise ValueError("clean mode must be stale or all")
+    found = inventory(px4_root, proc_root)
+    targets: dict[str, int] = {}
+    if mode == "all":
+        targets.update({f"start-supervisor {pid}": pid for pid in found.get("supervisors", [])})      # first: a running supervisor would start the aircraft again
+        targets.update({name: pid for name, pid in found["px4"].items()})
+        targets.update({f"gazebo-server {pid}": pid for pid in found["gazebo_server"]})
+        targets.update({f"gazebo-gui {pid}": pid for pid in found["gazebo_gui"]})
+        targets.update({f"{name}-bridge": pid for name, pid in found["bridges"].items()})
+    else:
+        wanted = set(stale_processes(found))
+        for name, pid in found["px4"].items():
+            if f"{name} pid {pid}" in wanted: targets[name] = pid
+        for pid in found["gazebo_server"]:
+            if f"gazebo-server pid {pid}" in wanted: targets[f"gazebo-server {pid}"] = pid
+        for pid in found["gazebo_gui"]:
+            if f"gazebo-gui pid {pid}" in wanted: targets[f"gazebo-gui {pid}"] = pid
+        for name, pid in found["bridges"].items():
+            if f"{name}-bridge pid {pid}" in wanted: targets[f"{name}-bridge"] = pid
+    stopped, left = [], []
+    for name, pid in targets.items():
+        alive = lambda pid=pid: process_alive(pid, proc_root)
+        (stopped if _terminate(pid, alive) else left).append(name)
+    return {"mode": mode, "found": found, "stale": stale_processes(found), "stopped": stopped, "left_running": left}
+
 # --- staged start (Part F) ---------------------------------------------------------------------------------------------------
 # Why: starting Gazebo with its GUI and every PX4 instance at once makes them fight for the same CPU while the world is still loading. On a busy host the
 # virtual machine gets about half its CPUs, Gazebo's real-time factor falls from 0.99 to 0.4 and the aircraft need minutes instead of seconds; a fixed
@@ -1061,6 +1203,7 @@ class StagedStart:
         self.root, self.count, self.targets, self.progress = root, count, targets, progress
         self.home, self.profile, self.ports, self.stop_first, self.batch = home, profile, ports, stop_first, max(1, batch)
         self.proc_root, self.clock, self.sleep = proc_root, clock, sleep
+        self.skip_stale_clean = start_gazebo is not None or spawn is not None      # tests replace the outside effects and must not scan the real /proc
         self.spawn = spawn or (lambda instance: _spawn(root, instance, home, profile))
         self.start_gazebo = start_gazebo or self._start_gazebo
         self.gazebo_ready = gazebo_ready or gazebo_world_answers
@@ -1136,6 +1279,13 @@ class StagedStart:
                 return self.finish("stop_failed", f"PX4 or Gazebo could not be stopped (still running: {gone['left']}); nothing was restarted.")
             progress.part("stop", "ok", f"PX4 and Gazebo are gone ({gone['seconds']:g} s).")
             progress.timing("stopped")
+        elif not self.skip_stale_clean:
+            leftovers = clean_processes(self.root, "stale", self.proc_root)
+            if leftovers["stale"]:
+                progress.part("stale", "ok" if not leftovers["left_running"] else "failed",
+                              "Stopped leftovers of an earlier run: " + ", ".join(leftovers["stopped"]) + ("; could not stop: " + ", ".join(leftovers["left_running"]) if leftovers["left_running"] else ""))
+                if leftovers["stopped"]:
+                    wait_processes_gone(self.root, self.proc_root, sleep=self.sleep, clock=self.clock)
         running = discover_px4_instances(self.root, self.proc_root)
         for instance in range(self.count):                         # a retry of some aircraft: the ones that are not its targets and already run stay as they are
             if instance not in self.targets and instance in running:
@@ -1308,6 +1458,8 @@ def start_fleet(count: int, *, instances: list[int] | None, home: dict[str, floa
         command += ["--request-id", request_id]
     if home is not None:
         command += [f"--home-lat={home['latitude']}", f"--home-lon={home['longitude']}", f"--home-alt={home['altitude_m']}"]
+    command += ["--gazebo-gui", "on" if GAZEBO_OPTIONS["gui"] else "off", "--gazebo-config", "light" if GAZEBO_OPTIONS["light"] else "stock"]
+    command += [f"--spawn-pose={instance}:{east}:{north}" for instance, (east, north) in sorted(SPAWN_POSES.items())]
     if profile is not None:
         command += ["--long-range-profile", "on" if profile["enabled"] else "off"]
         for key, option in (("speed_cap_mps", "--speed-cap"), ("accel_mps2", "--accel-cap"), ("tilt_deg", "--tilt-max"), ("ground_extent_m", "--ground-extent")):
@@ -1347,7 +1499,8 @@ def supervise(args: Any, home: dict[str, float] | None, profile: dict[str, Any] 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("status", "activate", "stop", "relocate", "start", "progress", "supervise"))
+    parser.add_argument("action", choices=("status", "activate", "stop", "relocate", "start", "progress", "supervise", "inventory", "clean"))
+    parser.add_argument("--clean-mode", choices=("stale", "all"), default="stale", help="clean: stop only stale TRINETRA processes (default) or every TRINETRA simulation process")
     parser.add_argument("--count", type=int)
     parser.add_argument("--instances", type=int, nargs="*")
     parser.add_argument("--request-id")
@@ -1363,10 +1516,19 @@ def main() -> int:
     parser.add_argument("--accel-cap", type=float)
     parser.add_argument("--tilt-max", type=float)
     parser.add_argument("--ground-extent", type=float, help="metres of ground collision in the runtime Gazebo world (profile on only)")
+    parser.add_argument("--gazebo-gui", choices=("on", "off"), default="off", help="also open the Gazebo window (default off: server only)")
+    parser.add_argument("--gazebo-config", choices=("light", "stock"), default="stock", help="light: trimmed Gazebo plugin list for x500 multicopters; stock: PX4's own server.config")
+    parser.add_argument("--spawn-pose", action="append", default=[], metavar="INSTANCE:EAST:NORTH", help="spawn this instance at an east/north offset (metres) from the simulation home")
     parser.add_argument("--default-home", action="store_true",
                         help="relocate only: restart at the stock world origin instead of a given home")
     parser.add_argument("--px4-root", type=Path, default=Path(os.environ.get("TRINETRA_PX4_ROOT", str(DEFAULT_PX4_ROOT))))
     args = parser.parse_args()
+    GAZEBO_OPTIONS["gui"] = args.gazebo_gui == "on"
+    GAZEBO_OPTIONS["light"] = args.gazebo_config == "light"
+    SPAWN_POSES.clear()
+    for text in args.spawn_pose:
+        instance, east, north = parse_spawn_pose(text)
+        SPAWN_POSES[instance] = (east, north)
     try:
         if args.request_id is not None:
             uuid.UUID(args.request_id)
@@ -1390,6 +1552,11 @@ def main() -> int:
         }.items() if value is not None}
         if args.action == "progress":
             result = read_start_progress()
+        elif args.action == "inventory":
+            found = inventory(args.px4_root)
+            result = {"inventory": found, "stale": stale_processes(found), "manager": "px4_wsl_fleet_v1"}
+        elif args.action == "clean":
+            result = {**clean_processes(args.px4_root, args.clean_mode), "manager": "px4_wsl_fleet_v1"}
         elif args.action in {"start", "supervise"}:
             if args.count is None:
                 raise ValueError(f"{args.action} requires --count")

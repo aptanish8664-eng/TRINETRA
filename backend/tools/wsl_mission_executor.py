@@ -113,7 +113,7 @@ def validate_mission(payload: Any) -> dict[str, Any]:
     """Strict check of the mission the backend sends. Returns a normalised copy; raises MissionError otherwise."""
     if not isinstance(payload, dict):
         raise MissionError("mission must be an object")
-    unknown = set(payload) - {"execution_id", "instance", "system_id", "items", "route_total"}
+    unknown = set(payload) - {"execution_id", "instance", "system_id", "items", "route_total", "in_air"}
     if unknown:
         raise MissionError(f"unexpected mission field(s): {', '.join(sorted(unknown))}")
     execution_id = payload.get("execution_id")
@@ -169,7 +169,10 @@ def validate_mission(payload: Any) -> dict[str, Any]:
     route_total = payload.get("route_total")
     if route_total != len(route_seqs):
         raise MissionError("route_total must equal the number of route waypoints")
-    return {"execution_id": execution_id, "instance": instance, "system_id": instance + 1, "items": items, "route_total": route_total}
+    in_air = payload.get("in_air", False)
+    if not isinstance(in_air, bool):
+        raise MissionError("in_air must be true or false")
+    return {"execution_id": execution_id, "instance": instance, "system_id": instance + 1, "items": items, "route_total": route_total, "in_air": in_air}
 
 
 def item_fields(item: dict[str, Any]) -> dict[str, Any]:
@@ -200,6 +203,8 @@ class MissionExecutor:
                  on_event: Optional[Callable[[dict[str, Any]], None]] = None) -> None:
         self.link = link
         self.mission = mission
+        # `in_air`: a hand-over or a resume from the air. The aircraft is already armed and flying: the run does not arm and does not refuse an armed aircraft.
+        self.in_air = bool(mission.get("in_air"))
         self.items: list[dict[str, Any]] = mission["items"]
         self.target_system = int(mission["system_id"])
         self.clock = clock
@@ -511,6 +516,12 @@ class MissionExecutor:
 
     def _armed_changed(self, armed: bool) -> None:
         if armed and self.state == "connecting":
+            if self.in_air:
+                self.armed = True
+                self.was_armed = True
+                self.armed_at_wall = self.wall_clock()
+                self._emit("armed", "PX4 reports armed: this run continues from the air (a hand-over or a resume).")
+                return
             self._fail_unarmed("already_armed", "The aircraft is already armed; a run only starts from a disarmed, landed aircraft.")
             return
         if armed == self.armed:
@@ -706,6 +717,11 @@ class MissionExecutor:
 
     def _mission_start_ok(self) -> None:
         self._emit("mission_mode", "PX4 accepted MISSION_START (Mission mode; it does not arm by itself).")
+        if self.in_air and self.armed:                     # already flying: nothing to arm; the mission is running
+            self._set_state("executing")
+            self._expected_mode = "mission"
+            self._emit("mission_started", "Mission started from the air: the aircraft flies the remaining route.")
+            return
         self._set_state("arming")
         self._command(MAV_CMD_COMPONENT_ARM_DISARM, (1.0,), "arm", lambda: self._emit("arm_accepted", "PX4 accepted the arm command."),
                       lambda result: self._fail_unarmed("arm_rejected", f"PX4 answered the arm command with {result}." + (f" PX4 said: {'; '.join(self._statustexts[-3:])}" if self._statustexts else "")))
@@ -1080,8 +1096,8 @@ def run_land(instance: int) -> int:
     return 1
 
 
-def cleanup_processes(proc_root: Path = Path("/proc")) -> dict[str, Any]:
-    """Stop every mission-executor and land process of this checkout (they hold the onboard UDP ports) and report what was stopped."""
+def cleanup_processes(proc_root: Path = Path("/proc"), instance: Optional[int] = None) -> dict[str, Any]:
+    """Stop every mission-executor and land process of this checkout (they hold the onboard UDP ports) and report what was stopped. With `instance`, only that instance's processes."""
     killed: list[dict[str, Any]] = []
     me = os.getpid()
     for entry in proc_root.iterdir():
@@ -1094,13 +1110,15 @@ def cleanup_processes(proc_root: Path = Path("/proc")) -> dict[str, Any]:
         if not any(part and Path(part).name == Path(__file__).name for part in argv[:4]) or not set(argv) & {"run", "land-run"}:
             continue
         pid = int(entry.name)
+        if instance is not None and ("--instance" not in argv or argv[argv.index("--instance") + 1] != str(instance)):
+            continue
         try:
             os.kill(pid, getattr(signal, "SIGKILL", 9))
             killed.append({"kind": "land" if "land-run" in argv else "executor", "pid": pid, "instance": argv[argv.index("--instance") + 1] if "--instance" in argv else None})
         except OSError:
             pass
-    for instance in range(FLEET_CAPACITY):
-        directory = runtime_dir(instance)
+    for number in range(FLEET_CAPACITY) if instance is None else [instance]:
+        directory = runtime_dir(number)
         for name in ("daemon.pid", "land.pid"):
             try:
                 (directory / name).unlink()
@@ -1273,7 +1291,7 @@ def cli_control(instance: int, execution_id: str, command: str) -> dict[str, Any
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("start", "status", "pause", "resume", "abort", "land", "disarm", "run", "land-run", "cleanup"))
+    parser.add_argument("action", choices=("start", "status", "pause", "resume", "abort", "land", "disarm", "run", "land-run", "cleanup", "end"))
     parser.add_argument("--instance", type=int, default=0, choices=range(FLEET_CAPACITY))
     parser.add_argument("--execution-id")
     parser.add_argument("--events-after", type=int, default=-1)
@@ -1288,7 +1306,9 @@ def main() -> int:
             return run_daemon(args.instance, args.execution_id)
         if args.action == "land-run":
             return run_land(args.instance)
-        if args.action == "cleanup":
+        if args.action == "end":
+            result = {**cleanup_processes(instance=args.instance), "ended_instance": args.instance}      # one aircraft's executor only; PX4 stays in whatever mode it is in
+        elif args.action == "cleanup":
             result = cleanup_processes()
         elif args.action == "land":
             result = cli_land(args.instance, args.px4_root, args.execution_id)

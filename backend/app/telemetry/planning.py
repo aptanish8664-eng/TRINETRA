@@ -9,7 +9,7 @@ def current_planning_aircraft() -> list[dict[str, Any]] | None:
 
     if px4_udp_transport is None:
         return None
-    snapshot = px4_telemetry_store.snapshot()
+    snapshot = px4_telemetry_store.snapshot(include_trails=False)
     return [
         vehicle for vehicle in snapshot["vehicles"]
         if vehicle["status"] == "connected"

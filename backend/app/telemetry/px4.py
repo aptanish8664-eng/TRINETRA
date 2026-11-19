@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import math
+import threading
 import time
 from collections import deque
-from copy import deepcopy
+from ._copy import copy_trail, copy_value
 from datetime import datetime, timezone
 from typing import Any
 
@@ -50,6 +52,15 @@ def _updated_imu_value(value: float, fields_updated: int, field_flag: int) -> fl
     return None if result is None else float(result)
 
 
+def _locked(method):
+    """Run a store method while holding the store's lock: the MAVLink receiver may ingest on its own thread while the API thread reads snapshots."""
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+    return wrapper
+
+
 class Px4TelemetryStore:
     """Decode MAVLink frames into an in-memory, explicitly sourced PX4 view."""
 
@@ -58,6 +69,7 @@ class Px4TelemetryStore:
             raise ValueError("Telemetry freshness thresholds are invalid")
         self.stale_after_seconds = stale_after_seconds
         self.disconnected_after_seconds = disconnected_after_seconds
+        self._lock = threading.RLock()
         self._parser = mavlink2.MAVLink(None)
         self._vehicles: dict[str, dict[str, Any]] = {}
         self._last_datagram_at: str | None = None
@@ -66,6 +78,7 @@ class Px4TelemetryStore:
         self.frames_decoded = 0
         self.invalid_datagrams = 0
 
+    @_locked
     def ingest_datagram(self, payload: bytes, source: tuple[str, int] | None = None) -> int:
         if not payload or payload[0] not in _MAVLINK_FRAME_STARTS:
             self.invalid_datagrams += 1
@@ -78,8 +91,21 @@ class Px4TelemetryStore:
         self._last_datagram_monotonic = now_monotonic
         decoded = 0
 
-        # UDP datagrams usually contain one MAVLink frame, but byte-wise parsing
-        # also handles multiple concatenated frames without dropping the tail.
+        # UDP datagrams usually contain one MAVLink frame; a datagram is parsed as one buffer (a byte-by-byte parse built a bytes object per byte and was
+        # about 12 % of the backend's CPU). If the buffer parse raises on malformed data, the datagram is re-read byte by byte so good frames are not lost.
+        try:
+            messages = self._parser.parse_buffer(payload) or []
+        except (ValueError, IndexError):
+            messages = self._parse_bytewise(payload)
+        for message in messages:
+            self._apply_message(message, now_utc, now_monotonic, source)
+            self.frames_decoded += 1
+            decoded += 1
+        return decoded
+
+    def _parse_bytewise(self, payload: bytes) -> list[Any]:
+        self._parser.buf = bytearray()
+        found = []
         for value in payload:
             try:
                 message = self._parser.parse_char(bytes((value,)))
@@ -87,12 +113,9 @@ class Px4TelemetryStore:
                 self.invalid_datagrams += 1
                 _LOGGER.debug("Discarded malformed MAVLink frame (%s)", type(exc).__name__)
                 continue
-            if message is None:
-                continue
-            self._apply_message(message, now_utc, now_monotonic, source)
-            self.frames_decoded += 1
-            decoded += 1
-        return decoded
+            if message is not None:
+                found.append(message)
+        return found
 
     def _apply_message(
         self,
@@ -342,11 +365,12 @@ class Px4TelemetryStore:
                 "received_at": received_at,
             }
 
+    @_locked
     def snapshot(self, *, now_monotonic: float | None = None, include_trails: bool = True) -> dict[str, Any]:
         now = time.monotonic() if now_monotonic is None else now_monotonic
         vehicles = []
         for current in self._vehicles.values():
-            vehicle = deepcopy({key: value for key, value in current.items() if not key.startswith("_")})
+            vehicle = {key: copy_value(value) for key, value in current.items() if not key.startswith("_")}
             message_time = current["_last_message_monotonic"]
             age = max(0.0, now - message_time)
             heartbeat_time = current["_last_heartbeat_monotonic"]
@@ -364,7 +388,7 @@ class Px4TelemetryStore:
             vehicle["telemetry_age_seconds"] = round(age, 3)
             vehicle["heartbeat_age_seconds"] = None if heartbeat_age is None else round(heartbeat_age, 3)
             if include_trails:
-                vehicle["flight_trail"] = deepcopy(current["_trail"])
+                vehicle["flight_trail"] = copy_trail(current["_trail"])
             vehicles.append(vehicle)
         vehicles.sort(key=lambda item: (item["system_id"], item["component_id"]))
         transport_age = (
@@ -398,6 +422,7 @@ class Px4TelemetryStore:
             "vehicles": vehicles,
         }
 
+    @_locked
     def detector_inputs(self, vehicle_id: str, *, now_monotonic: float | None = None) -> dict[str, Any] | None:
         """Raw detector streams for one aircraft since arming, with per-message ages and measured rates.
 
@@ -433,12 +458,13 @@ class Px4TelemetryStore:
             "flight_start_t": detector["flight_start_t"], "origin": detector["origin"],
             "armed_for_seconds": None if detector["armed_at_monotonic"] is None or not current["armed"] else round(now - detector["armed_at_monotonic"], 1),
             "disarmed_for_seconds": None if detector["disarmed_at_monotonic"] is None or current["armed"] else round(max(0.0, now - detector["disarmed_at_monotonic"]), 1),
-            "battery": deepcopy(current["battery"]), "mission": deepcopy(current["mission"]),
-            "gps_raw": deepcopy(current["gps_raw"]), "imu_raw": deepcopy(current["imu_raw"]),
-            "estimator_status": deepcopy(current["estimator_status"]), "vibration": deepcopy(current["vibration"]),
+            "battery": copy_value(current["battery"]), "mission": copy_value(current["mission"]),
+            "gps_raw": copy_value(current["gps_raw"]), "imu_raw": copy_value(current["imu_raw"]),
+            "estimator_status": copy_value(current["estimator_status"]), "vibration": copy_value(current["vibration"]),
             "flight_mode": (current["heartbeat"] or {}).get("flight_mode"),
         }
 
+    @_locked
     def forget_except(self, keep_ids: set[str]) -> list[str]:
         """Drops every aircraft that is not in `keep_ids` (a restarted simulation no longer has them). Returns what was dropped.
         The dict is replaced, not edited, so a reader that is iterating the old one is not disturbed."""
@@ -447,11 +473,13 @@ class Px4TelemetryStore:
             self._vehicles = {key: value for key, value in self._vehicles.items() if key in keep_ids}
         return dropped
 
+    @_locked
     def vehicle_ids(self) -> list[str]:
         """Aircraft that have sent a PX4 autopilot heartbeat (other MAVLink senders on the link are not aircraft)."""
         return sorted((key for key, item in self._vehicles.items() if item["_last_heartbeat_monotonic"] is not None),
                       key=lambda key: self._vehicles[key]["system_id"])
 
+    @_locked
     def stream_snapshot(self, *, since: str | None = None) -> dict[str, Any]:
         """Return a full first frame or compact trail deltas after a cursor."""
         cursor = _parse_trail_cursor(since)
@@ -463,7 +491,7 @@ class Px4TelemetryStore:
         snapshot = self.snapshot(include_trails=False)
         for vehicle in snapshot["vehicles"]:
             current = self._vehicles[vehicle["id"]]
-            vehicle["flight_trail_delta"] = deepcopy(_trail_points_after(current["_trail"], cursor))
+            vehicle["flight_trail_delta"] = _trail_points_after(current["_trail"], cursor)
         snapshot["stream_mode"] = "trail_delta_v1"
         return snapshot
 
@@ -492,27 +520,68 @@ def _trail_points_after(points: list[dict[str, Any]], cursor: datetime) -> list[
 
 
 class Px4MavlinkProtocol(asyncio.DatagramProtocol):
+    """UDP receiver for the PX4 telemetry bridge. With `threaded=True` (the API's startup) the event loop only appends each accepted datagram to a bounded queue and a
+    worker thread parses and ingests it, so MAVLink bursts from many aircraft never hold up API requests. When the queue is full the OLDEST datagram is dropped
+    (and counted in `dropped`): the newest telemetry matters, and the aircraft keep sending. With `threaded=False` (default; tests) ingestion is immediate."""
+    QUEUE_MAX = 4096
+
     def __init__(
         self,
         store: Px4TelemetryStore,
         *,
         allowed_source_ip: str,
         allowed_source_port: int,
+        threaded: bool = False,
     ):
         self.store = store
         self.allowed_source_ip = allowed_source_ip
         self.allowed_source_port = allowed_source_port
         self.rejected_sources = 0
         self.transport: asyncio.DatagramTransport | None = None
+        self.threaded = threaded
+        self.dropped = 0
+        self.queued_max = 0
+        self._queue: deque[tuple[bytes, tuple[str, int]]] = deque(maxlen=self.QUEUE_MAX)
+        self._wake = threading.Event()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
 
     def connection_made(self, transport: asyncio.BaseTransport) -> None:
         self.transport = transport  # type: ignore[assignment]
+        if self.threaded and self._thread is None:
+            self._thread = threading.Thread(target=self._drain, name="px4-mavlink-ingest", daemon=True)
+            self._thread.start()
+
+    def connection_lost(self, exc: Exception | None) -> None:
+        self._stop.set()
+        self._wake.set()
 
     def datagram_received(self, data: bytes, addr: tuple[str, int]) -> None:
         if addr != (self.allowed_source_ip, self.allowed_source_port):
             self.rejected_sources += 1
             return
-        self.store.ingest_datagram(data, addr)
+        if not self.threaded:
+            self.store.ingest_datagram(data, addr)
+            return
+        if len(self._queue) == self._queue.maxlen:
+            self.dropped += 1
+        self._queue.append((data, addr))
+        self.queued_max = max(self.queued_max, len(self._queue))
+        self._wake.set()
+
+    def _drain(self) -> None:
+        while not self._stop.is_set():
+            self._wake.wait(0.5)
+            self._wake.clear()
+            while self._queue:
+                try:
+                    data, addr = self._queue.popleft()
+                except IndexError:
+                    break
+                try:
+                    self.store.ingest_datagram(data, addr)
+                except Exception:       # one bad datagram must never stop the receiver
+                    _LOGGER.exception("PX4 telemetry datagram could not be processed")
 
     def error_received(self, exc: Exception) -> None:
         _LOGGER.warning("PX4 UDP telemetry socket error (%s)", type(exc).__name__)

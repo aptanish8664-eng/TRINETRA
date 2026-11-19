@@ -85,3 +85,10 @@ Extrapolating the measured trend (load1 about +2–3 per aircraft, RTF 1.0 at 6 
 * Sizes 8+ (never run). The 12-aircraft numbers are projections.
 * Behaviour on other machines with fewer cores.
 * Whether the intermittent "0 of 3 telemetry" case is only backend saturation.
+
+## 7. Run 19 update
+
+* The start guard uses `TRINETRA_SIM_MAX_AIRCRAFT` (default 6) and the free memory of the host (`GET /api/fleet/capacity`). Planning is not limited.
+* With Mission Control open in a browser the host collapsed (free Windows memory 119-346 MiB, API answers 3-76 s) before the fixes. Causes found: deep copies of large Gazebo snapshots (44.6 % of backend CPU), per-byte MAVLink parsing, and a WSL call per preflight. Fixes: snapshots without trails (240.5 ms to 0.17 ms, 1.1 MB to 1.4 KB), receiver thread with a bounded queue, cached fleet status (4 s), per-aircraft summary endpoint, polling paused for hidden tabs.
+* Three cold starts of the same 5-aircraft deployment: all connected at 37.7, 37.2 and 38.2 s with fresh telemetry.
+* Not done: a clean "after" table of host CPU/memory with the browser open (the machine had about 3.6 GB free at idle), a 3-aircraft comparison, and lazy standby start (not justified by the numbers: the 2 standby aircraft cost about 45 % of a core in total).

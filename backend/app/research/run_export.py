@@ -20,6 +20,7 @@ RUN_COLUMNS = ["result_id", "experiment", "experiment_deleted", "scenario_versio
 ATTACK_COLUMNS = ["result_id", "experiment", "target_aircraft", "type", "start_s", "duration_s", "magnitude", "direction_deg", "reached", "fully_run", "outcome",
                   "first_reaction_s", "first_reaction_tier", "latency_s", "first_alert_s", "first_alert_latency_s", "peak_score", "peak_tier"]
 RESPONSE_COLUMNS = ["result_id", "experiment", "at", "after_run_start_s", "aircraft_id", "action", "tier", "threat_score", "by"]
+STORY_COLUMNS = ["result_id", "experiment", "at", "kind", "aircraft", "by", "text"]
 TIMELINE_COLUMNS = ["result_id", "experiment", "aircraft_id", "flight_time_s", "threat_score", "tier", "attack_active"]
 
 
@@ -54,7 +55,7 @@ def build_workbook(results: list[dict[str, Any]]) -> bytes:
     live = [item for item in results if (item.get("result") or {}).get("kind") == "live_run"]
     readme.write(len(README_ROWS) + 1, 0, "Records", head)
     readme.write(len(README_ROWS) + 1, 1, f"{len(live)} live run record(s) of {len(results)} stored result(s).", wrap)
-    runs, attacks, responses, timeline = [], [], [], []
+    runs, attacks, responses, timeline, story = [], [], [], [], []
     for item in live:
         record = item["result"]
         name = item["experiment_name"]
@@ -66,12 +67,15 @@ def build_workbook(results: list[dict[str, Any]]) -> bytes:
             attacks.append([item["id"], name] + [attack.get(column) for column in ATTACK_COLUMNS[2:]])
         for response in record.get("operator_responses", []):
             responses.append([item["id"], name] + [response.get(column) for column in RESPONSE_COLUMNS[2:]])
+        for event in record.get("attack_story", []):
+            story.append([item["id"], name] + [event.get(column) for column in STORY_COLUMNS[2:]])
         for aircraft, points in (record.get("timeline") or {}).items():
             for point in points:
                 timeline.append([item["id"], name, aircraft, point["t"], point["score"], point["tier"], point["attacked"]])
     sheet("Runs", RUN_COLUMNS, runs)
     sheet("Attacks", ATTACK_COLUMNS, attacks)
     sheet("Operator responses", RESPONSE_COLUMNS, responses)
+    sheet("Attack story", STORY_COLUMNS, story, 30)
     sheet("Timeline", TIMELINE_COLUMNS, timeline, 14)
     book.close()
     return buffer.getvalue()

@@ -104,6 +104,10 @@ MP_GEODESIC_ABOVE_M = env_int("TRINETRA_MP_GEODESIC_ABOVE_M", 20_000, 1000, 100_
 
 # Long-range simulation profile: PX4 parameters applied to every SITL instance the fleet manager STARTS (never to a real
 # vehicle) so the simulated X500 can actually fly the planned speeds and distances. Off restores PX4's own defaults.
+# Gazebo options (passed to the WSL manager as fixed flags). GUI: open the Gazebo window as well as the server (default off: nothing in TRINETRA reads it and it costs
+# CPU and memory). LIGHT: run the server with a trimmed plugin list (no rendering sensor system, no camera plugins) for x500 multicopters; set 0 for PX4's stock config.
+GAZEBO_GUI = env_bool("TRINETRA_GAZEBO_GUI", False)
+GAZEBO_LIGHT_CONFIG = env_bool("TRINETRA_GAZEBO_LIGHT", True)
 LONG_RANGE_PROFILE_ENABLED = env_bool("TRINETRA_LONG_RANGE_PROFILE", True)
 LONG_RANGE_ACCEL_MPS2 = env_int("TRINETRA_LONG_RANGE_ACCEL_MPS2", 10, 1, 30)
 LONG_RANGE_TILT_DEG = env_int("TRINETRA_LONG_RANGE_TILT_DEG", 60, 20, 85)

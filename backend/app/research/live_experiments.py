@@ -299,7 +299,19 @@ def build_record(run: Run, experiment: ArmedExperiment, reason: str, ended_at: d
             "run_seconds": round((ended_at - run.started_at).total_seconds(), 1), "end_reason": reason, "seed": experiment.seed, "config_hash": experiment.config_hash,
             "roles": run.roles, "attacks": attacks, "false_alarms": false_alarms, "outcome": outcome, "operator_responses": decisions,
             "timeline": series, "assessments_recorded": sum(len(p) for p in run.samples.values()), "caveats": caveats,
-            "reconfigurations": list(_reconfigurations.get(run.execution_id, []))}
+            "reconfigurations": list(_reconfigurations.get(run.execution_id, [])), "attack_story": _attack_story(run, ended_at)}
+
+
+def _attack_story(run: Run, ended_at: datetime) -> list[dict[str, Any]]:
+    """The operator's attack story of the flight (what was seen, suggested, acknowledged and done), kept with the record. Empty if none was kept."""
+    try:
+        from ..operator_control import story_for
+    except Exception:  # the story is optional context; a record is never refused for lack of it
+        return []
+    start = run.started_at.isoformat().replace("+00:00", "Z")
+    end = ended_at.isoformat().replace("+00:00", "Z")
+    return [{"at": item.get("at"), "kind": item.get("kind"), "aircraft": item.get("aircraft_id"), "by": item.get("by"), "text": item.get("text")}
+            for item in story_for(run.deployment_id) if start <= str(item.get("at") or "") <= end]
 
 
 def close_run(execution_id: str, reason: str) -> list[dict[str, Any]]:

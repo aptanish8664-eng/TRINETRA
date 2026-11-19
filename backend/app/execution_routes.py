@@ -132,7 +132,7 @@ def run_preflight(context: AuthContext, deployment: dict, scenario: dict, plan: 
     `aircraft_id` selects which aircraft of a multi-aircraft plan is checked (default: the primary)."""
     from .fleet_routes import _fleet_snapshot, _verified_fleet, simulation_location
     from .scenario_routes import _plan_readiness
-    from .telemetry.fleet_manager import invoke_fleet_manager
+    from .telemetry.fleet_manager import STATUS_CACHE_SECONDS, invoke_fleet_manager
 
     rule = role_rule(context, scenario, deployment)
     checks: list[dict[str, Any]] = []
@@ -153,7 +153,7 @@ def run_preflight(context: AuthContext, deployment: dict, scenario: dict, plan: 
                 else next((item for item in plan.aircraft if item.role == "primary"), plan.aircraft[0] if plan.aircraft else None))
     uav_id = aircraft.uav_id if aircraft else "px4-1"
     system_id = int(uav_id[4:]) if uav_id[4:].isdigit() else 1
-    process_state = process_state if process_state is not None else invoke_fleet_manager("status", timeout_seconds=12)
+    process_state = process_state if process_state is not None else invoke_fleet_manager("status", timeout_seconds=12, max_age_seconds=STATUS_CACHE_SECONDS)
     instances = {int(item.get("system_id", -1)): item for item in process_state.get("instances", []) if isinstance(item, dict)} if not process_state.get("failure") else {}
     count = len(plan.aircraft)
     running_count = len(instances)
@@ -202,7 +202,9 @@ def run_preflight(context: AuthContext, deployment: dict, scenario: dict, plan: 
                          ("The aircraft is armed." if armed else "The aircraft state is unknown or it is not on the ground (relative altitude "
                           f"{relative if relative is not None else '?'} m).")))
     location = simulation_location(plan, vehicles)
-    distance = location["max_distance_to_start_m"]
+    # This aircraft's own distance from ITS planned start (not the worst of the whole fleet: another aircraft being elsewhere must not fail this aircraft's check).
+    own_row = next((row for row in location["aircraft"] if row["aircraft_id"] == uav_id), None)
+    distance = own_row["distance_to_start_m"] if own_row is not None else location["max_distance_to_start_m"]
     at_start = distance is not None and distance <= start_tolerance_m
     checks.append(_check("at_mission_start", "At the mission start", at_start,
                          f"The aircraft is {distance:.0f} m from the mission start (limit {start_tolerance_m:g} m)." if at_start else
@@ -373,9 +375,9 @@ def _audit(request: Request, context: AuthContext, action: str, execution_id: st
 def fleet_preflight(context: AuthContext, deployment: dict, scenario: dict, plan: Optional[MissionPlan]) -> dict[str, Any]:
     """The primary's pre-start result (unchanged shape) plus `fleet`: one entry per aircraft saying whether it can start. A multi-aircraft plan can
     start only when every flying aircraft (primary and decoys) can; standby aircraft are listed as staying on the ground."""
-    from .telemetry.fleet_manager import invoke_fleet_manager
+    from .telemetry.fleet_manager import STATUS_CACHE_SECONDS, invoke_fleet_manager
 
-    state = invoke_fleet_manager("status", timeout_seconds=12) if plan is not None and len(plan.aircraft) > 1 else None
+    state = invoke_fleet_manager("status", timeout_seconds=12, max_age_seconds=STATUS_CACHE_SECONDS) if plan is not None and len(plan.aircraft) > 1 else None
     base = run_preflight(context, deployment, scenario, plan, process_state=state)
     if plan is None or len(plan.aircraft) <= 1:
         base["fleet"] = [{"aircraft_id": base.get("aircraft_id"), "role": "primary", "flies": True, "can_start": base["can_start"], "blocking": base["blocking"]}] if plan is not None else []
@@ -484,11 +486,11 @@ def start_execution(payload: StartRequest, request: Request,
     return view
 
 
-def _start_one(request: Request, context: AuthContext, deployment: dict, aircraft: Any) -> dict:
+def _start_one(request: Request, context: AuthContext, deployment: dict, aircraft: Any, *, in_air: bool = False) -> dict:
     """Creates and starts the run of ONE aircraft through the managed executor. Raises HTTPException when it could not be started."""
     execution_id = uuid.uuid4().hex
     try:
-        mission = build_mission(aircraft, execution_id)
+        mission = build_mission(aircraft, execution_id, in_air=in_air)
     except MissionItemsError as error:
         raise _error(409, "route_not_flyable", f"The stored route of {aircraft.uav_id} cannot be flown: {error}.") from error
     try:

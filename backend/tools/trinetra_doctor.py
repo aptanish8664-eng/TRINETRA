@@ -136,6 +136,97 @@ def check_processes(d: Doctor, wsl_ok: bool) -> None:
             d.add("PX4 bridge forwards to", True, f"UDP {port} (the backend's PX4 receiver must be bound to this port)")
 
 
+
+MANAGER = "/mnt/d/TRINETRA/backend/tools/wsl_fleet_manager.py"
+PX4_ROOT = "/home/apt8055/uav-sim/PX4-Autopilot"
+
+
+def manager_json(args: list[str], timeout: float = 40.0) -> Optional[dict]:
+    """Runs the fixed WSL fleet manager with fixed arguments and parses its JSON answer (None when it cannot run)."""
+    code, out = run(["wsl.exe", "-d", DISTRO, "--exec", "python3", MANAGER, *args, "--px4-root", PX4_ROOT], timeout)
+    try:
+        return json.loads(out.strip().splitlines()[-1])
+    except (IndexError, ValueError):
+        return None
+
+
+def check_stale(d: Doctor, wsl_ok: bool, clean: bool) -> None:
+    """Reports TRINETRA processes alive with nothing driving them; --clean stops only those (provably TRINETRA's own: the manager checks each one)."""
+    if not wsl_ok:
+        return
+    found = manager_json(["inventory"])
+    if found is None:
+        d.add("Stale TRINETRA processes", False, "the fleet manager could not be read", "Run: wsl -d Ubuntu python3 /mnt/d/TRINETRA/backend/tools/wsl_fleet_manager.py inventory", warn=True)
+        return
+    stale = found.get("stale", [])
+    if not stale:
+        d.add("Stale TRINETRA processes", True, "none (every running simulation process belongs to a complete simulation, or nothing is running)")
+        return
+    if not clean:
+        d.add("Stale TRINETRA processes", False, "alive with nothing driving them: " + ", ".join(stale),
+              "Run this tool with --clean (it stops only these TRINETRA processes), or press RESTART AT MISSION START (it clears them first).", warn=True)
+        return
+    result = manager_json(["clean", "--clean-mode", "stale"])
+    stopped, left = (result or {}).get("stopped", []), (result or {}).get("left_running", [])
+    d.add("Stale TRINETRA processes", bool(result) and not left, ("stopped: " + ", ".join(stopped) if stopped else "nothing stopped") + (("; still running: " + ", ".join(left)) if left else ""),
+          "Stop the remaining processes by hand in WSL (kill <pid>) after checking they are TRINETRA's.")
+
+
+def windows_memory_gb() -> float:
+    """Total physical memory of this computer in GB (0 when it cannot be read)."""
+    if os.name != "nt":
+        return 0.0
+    import ctypes
+
+    class Status(ctypes.Structure):
+        _fields_ = [("length", ctypes.c_ulong), ("load", ctypes.c_ulong), ("total", ctypes.c_ulonglong), ("avail", ctypes.c_ulonglong), ("pt", ctypes.c_ulonglong),
+                    ("pa", ctypes.c_ulonglong), ("vt", ctypes.c_ulonglong), ("va", ctypes.c_ulonglong), ("ext", ctypes.c_ulonglong)]
+    status = Status(); status.length = ctypes.sizeof(Status)
+    ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status))
+    return status.total / 2**30
+
+
+def recommended_wslconfig(total_gb: float, logical_cpus: int, aircraft: int = 6) -> str:
+    """A .wslconfig sized to this computer, leaving enough for Windows. Measured on the reference laptop (15.4 GB, 8 threads): 5-6 aircraft use about 2.6 GB
+    of WSL memory and 2-4 threads (docs/FLEET_CAPACITY.md); the rest of the machine's memory is what Windows and the browser need."""
+    memory = max(3, min(int(total_gb * 0.30), 8))              # WSL peaked near 2.6 GB with 5 aircraft; 30 % of the machine, 3 to 8 GB
+    processors = max(2, min(logical_cpus - 2, 6))              # leave two threads for Windows
+    swap = 2
+    return ("[wsl2]\n" f"memory={memory}GB\n" f"processors={processors}\n" f"swap={swap}GB\n" "\n[experimental]\nautoMemoryReclaim=gradual\n\n")
+
+
+def wslconfig_path() -> Path:
+    return Path(os.environ.get("USERPROFILE", str(Path.home()))) / ".wslconfig"
+
+
+def check_wslconfig(d: Doctor, apply: bool) -> None:
+    """Prints the recommended .wslconfig. --apply-wslconfig writes it only when none exists, or after copying the old one to .wslconfig.bak (never silently:
+    it says what it wrote and that `wsl --shutdown` is needed afterwards)."""
+    total = windows_memory_gb()
+    cpus = os.cpu_count() or 4
+    path = wslconfig_path()
+    current = path.read_text(encoding="utf-8", errors="replace") if path.exists() else None
+    recommended = recommended_wslconfig(total, cpus) if total else None
+    if recommended is None:
+        d.add("WSL resource limits (.wslconfig)", False, "total memory could not be read", "Run this tool on Windows.", warn=True)
+        return
+    d.add("WSL resource limits (.wslconfig)", current is not None, f"{path} {'exists' if current is not None else 'does not exist: WSL takes up to half of the memory and every CPU'} (this computer: {total:.1f} GB, {cpus} threads)",
+          "Run this tool with --apply-wslconfig (it writes the recommended file below; then run: wsl --shutdown).", warn=True)
+    print("\nRecommended .wslconfig for this computer:\n" + "".join("    " + line + "\n" for line in recommended.splitlines()))
+    if apply:
+        if current is not None and current.strip() == recommended.strip():
+            print(f"  {path} already has exactly this content; nothing written.")
+            return
+        if current is not None:
+            backup = path.with_name(".wslconfig.bak")
+            if backup.exists():
+                backup = path.with_name(f".wslconfig.bak.{time.strftime('%Y%m%d-%H%M%S')}")
+            backup.write_text(current, encoding="utf-8")
+            print(f"  the existing file was copied to {backup}")
+        path.write_text(recommended, encoding="utf-8")
+        print(f"  WROTE {path}. It takes effect after:  wsl --shutdown   (close terminals and the simulation first).")
+
+
 def check_backend(d: Doctor) -> bool:
     status, body = http_json(d.api + "/api/health")
     up = status == 200
@@ -212,6 +303,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--web", default="http://127.0.0.1:5173", help="frontend URL")
     parser.add_argument("--start", action="store_true", help="start the backend and the frontend if they are not running (fixed local commands)")
     parser.add_argument("--no-wsl", action="store_true", help="skip the WSL checks (they take a few seconds)")
+    parser.add_argument("--clean", action="store_true", help="stop stale TRINETRA simulation processes (only ones the fleet manager can prove are TRINETRA's own)")
+    parser.add_argument("--apply-wslconfig", action="store_true", help="write the recommended .wslconfig (only if none exists, or after backing the old one up to .wslconfig.bak); needs wsl --shutdown afterwards")
     args = parser.parse_args(argv)
     d = Doctor(args.api.rstrip("/"), args.web.rstrip("/"))
     print(f"TRINETRA doctor - {time.strftime('%Y-%m-%d %H:%M:%S')} - software-only simulator checks\n")
@@ -220,6 +313,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         start_backend_and_frontend(d)
     wsl_ok = False if args.no_wsl else check_wsl(d)
     check_processes(d, wsl_ok)
+    check_stale(d, wsl_ok, args.clean)
+    check_wslconfig(d, args.apply_wslconfig)
     check_backend(d)
     check_frontend(d)
     return report(d)

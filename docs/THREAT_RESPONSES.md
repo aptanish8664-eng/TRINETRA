@@ -38,3 +38,10 @@ The visible alert now appears for **High and Critical** (it was Critical only), 
 * After Hold and Resume the live monitor restarts its data window and shows "collecting data" for about 10 s, so Acknowledge is disabled for a few seconds. This is existing monitor behaviour (a gap restarts the window); its cause was not investigated.
 * The refusal reasons come from the same checks as the Mission Control buttons; OPERATOR accounts need an approved version for Hold/Resume (role rule), as before.
 * Not tested live: a response chosen from an OPERATOR account; Return to launch at 1440x900 (the controls are the same component).
+
+## 4. Run 19: operator control (implemented; live results in the progress file)
+
+* **Always available:** Pause, Resume, RTL, Land here, Restart, plus **Resume on track** (shows the waypoint it rejoins, asks to confirm), **Reassign** (candidates with role, state, battery, link and distance; choose what the original does: hold, return to launch, land or continue as decoy; the new aircraft is started first and verified before the original is touched), **Switch primary** and **Keep monitoring** (acknowledgement with a reminder probability).
+* **Suggestions** are buttons and are never pressed for you. Thresholds are named constants in `backend/app/research/suggestions.py`: `SUGGEST_WATCH` 0.30, `SUGGEST_ACT` 0.60, `CONFIRMED_AT` 0.85, with plain explanations.
+* **Attack story:** the threat panel keeps a timeline of what was seen, suggested and done; it is stored in the run record (`attack_story`) and exported on the "Attack story" sheet.
+* **Limits:** roles, the story and acknowledgements are held in backend memory and are lost on a backend restart (the run record keeps the story once written). A rise of the probability past a reminder was shown live only with a lowered reminder (5 %); a natural rise past 60 % was not caught on that run. Degraded or failed continuity outcomes were not produced live.

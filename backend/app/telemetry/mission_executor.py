@@ -14,7 +14,7 @@ from typing import Any
 from .fleet_manager import FLEET_CAPACITY, PX4_ROOT, WSL_DISTRIBUTION
 
 WSL_EXECUTOR_PATH = "/mnt/d/TRINETRA/backend/tools/wsl_mission_executor.py"
-_ACTIONS = {"start", "status", "pause", "resume", "abort", "land", "disarm", "cleanup"}
+_ACTIONS = {"start", "status", "pause", "resume", "abort", "land", "disarm", "cleanup", "end"}
 _EXECUTION_ID = re.compile(r"^[0-9a-f]{32}$")
 
 

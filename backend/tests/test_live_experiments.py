@@ -198,7 +198,7 @@ def test_closing_a_run_stores_one_record_per_experiment_and_the_export_lists_it(
     import zipfile
     book = zipfile.ZipFile(io.BytesIO(exported.content))
     workbook = book.read("xl/workbook.xml").decode()
-    assert all(name in workbook for name in ("README", "Runs", "Attacks", "Operator responses", "Timeline"))
+    assert all(name in workbook for name in ("README", "Runs", "Attacks", "Operator responses", "Attack story", "Timeline"))
     assert "Drift test" in book.read("xl/sharedStrings.xml").decode()
 
 

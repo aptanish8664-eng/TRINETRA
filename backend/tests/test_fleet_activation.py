@@ -104,7 +104,8 @@ def test_bridge_start_failure_is_reported_by_name(tmp_path, monkeypatch):
 def test_bridge_ports_are_validated_and_passed_as_fixed_arguments():
     command = build_fleet_manager_command("activate", count=1,
                                           ports={"telemetry_forward": 14600, "pose_source": 14611})
-    assert command[-4:] == ["--telemetry-forward-port", "14600", "--pose-source-port", "14611"]
+    start = command.index("--telemetry-forward-port")
+    assert command[start:start + 4] == ["--telemetry-forward-port", "14600", "--pose-source-port", "14611"]
     with pytest.raises(ValueError, match="bridge ports"):
         build_fleet_manager_command("activate", count=1, ports={"pose_forward": 80})
 

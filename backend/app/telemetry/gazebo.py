@@ -5,8 +5,9 @@ import json
 import logging
 import math
 import re
+import threading
 import time
-from copy import deepcopy
+from ._copy import copy_trail, copy_value
 from datetime import datetime, timezone
 from typing import Any
 
@@ -31,6 +32,15 @@ def _finite_number(value: Any, *, limit: float = 100_000.0) -> float | None:
     return number
 
 
+def _locked(method):
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+    wrapper.__name__ = method.__name__
+    wrapper.__doc__ = method.__doc__
+    return wrapper
+
+
 class GazeboPoseStore:
     """Validated, read-only snapshots of X500 poses published by Gazebo."""
 
@@ -39,6 +49,7 @@ class GazeboPoseStore:
             raise ValueError("Gazebo freshness thresholds are invalid")
         self.stale_after_seconds = stale_after_seconds
         self.disconnected_after_seconds = disconnected_after_seconds
+        self._lock = threading.RLock()
         self._world: str | None = None
         self._models: dict[str, dict[str, Any]] = {}
         self._last_datagram_at: str | None = None
@@ -46,6 +57,7 @@ class GazeboPoseStore:
         self.datagrams_received = 0
         self.invalid_datagrams = 0
 
+    @_locked
     def ingest_datagram(self, payload: bytes) -> bool:
         if not payload or len(payload) > _MAX_DATAGRAM_BYTES:
             self.invalid_datagrams += 1
@@ -111,6 +123,7 @@ class GazeboPoseStore:
                 del trail[:-_TRAIL_MAX_POINTS]
         return True
 
+    @_locked
     def forget_except(self, keep_names: set[str]) -> list[str]:
         """Drops every model that is not in `keep_names` (a restarted simulation no longer has them). Returns what was dropped."""
         dropped = [key for key in self._models if key not in keep_names]
@@ -118,6 +131,7 @@ class GazeboPoseStore:
             self._models = {key: value for key, value in self._models.items() if key in keep_names}
         return dropped
 
+    @_locked
     def snapshot(self, *, now_monotonic: float | None = None, include_trails: bool = True) -> dict[str, Any]:
         now = time.monotonic() if now_monotonic is None else now_monotonic
         transport_age = None if self._last_datagram_monotonic is None else max(0.0, now - self._last_datagram_monotonic)
@@ -132,12 +146,12 @@ class GazeboPoseStore:
 
         models: list[dict[str, Any]] = []
         for current in self._models.values():
-            model = {key: deepcopy(value) for key, value in current.items() if not key.startswith("_")}
+            model = {key: copy_value(value) for key, value in current.items() if not key.startswith("_")}
             age = max(0.0, now - current["_last_monotonic"])
             model["status"] = "connected" if age <= self.stale_after_seconds else "stale" if age <= self.disconnected_after_seconds else "disconnected"
             model["telemetry_age_seconds"] = round(age, 3)
             if include_trails:
-                model["flight_trail"] = deepcopy(current["_trail"])
+                model["flight_trail"] = copy_trail(current["_trail"])
             models.append(model)
         models.sort(key=lambda item: item["model_name"])
         return {
@@ -154,6 +168,7 @@ class GazeboPoseStore:
             "models": models,
         }
 
+    @_locked
     def stream_snapshot(self, *, since: str | None = None) -> dict[str, Any]:
         """Return a full first frame or compact trail deltas after a cursor."""
         cursor = _parse_trail_cursor(since)
@@ -165,7 +180,7 @@ class GazeboPoseStore:
         snapshot = self.snapshot(include_trails=False)
         for model in snapshot["models"]:
             current = self._models[model["model_name"]]
-            model["flight_trail_delta"] = deepcopy(_trail_points_after(current["_trail"], cursor))
+            model["flight_trail_delta"] = _trail_points_after(current["_trail"], cursor)
         snapshot["stream_mode"] = "trail_delta_v1"
         return snapshot
 

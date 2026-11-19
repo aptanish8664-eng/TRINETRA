@@ -1,0 +1,89 @@
+/* Mission Control, calmer and threat first: the GPS threat assessment sits under the title, the map is a sensible height, aircraft are compact cards, the controls of the
+   selected aircraft are one separate panel, and the diagnostics share one tabbed area. One card style, more space, fewer borders, nothing removed. */
+.mc-dashboard { gap: 20px; }
+.mc-dashboard > .panel, .mc-dashboard .mc-rail > .panel, .mc-map-panel { border-radius: 2px; border-color: rgba(120, 150, 175, .22); background: #0a1623; }
+.mc-dashboard .panel-heading h3 { font-size: 15px; font-weight: 600; letter-spacing: 0; }
+.mc-dashboard .eyebrow { font: 500 10px var(--mono); letter-spacing: .16em; color: #9fb3c3; }
+
+/* ---- 1. the GPS threat assessment */
+.mc-threat { display: grid; gap: 12px; padding: 18px 22px; border-left: 4px solid #3b6f5c; }
+.mc-threat.level-watch { border-left-color: #d4a84a; }
+.mc-threat.level-suspected { border-left-color: #f0883a; }
+.mc-threat.level-confirmed { border-left-color: #ff5a62; }
+.mc-threat.band { background: linear-gradient(90deg, rgba(255, 90, 98, .11), rgba(10, 22, 35, 0) 55%), #0a1623; border-color: rgba(255, 120, 110, .5); }
+.mc-threat.level-suspected.band { background: linear-gradient(90deg, rgba(240, 136, 58, .12), rgba(10, 22, 35, 0) 55%), #0a1623; border-color: rgba(240, 160, 90, .5); }
+.mc-threat-top { display: flex; gap: 24px; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; }
+.mc-threat-id { display: grid; gap: 8px; min-width: 0; flex: 1 1 520px; }
+.mc-threat-status { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px 28px; }
+.mc-threat-headline { font-size: 30px; line-height: 1; font-weight: 700; letter-spacing: -.02em; color: #e8f1f8; }
+.level-watch .mc-threat-headline { color: #f0c860; } .level-suspected .mc-threat-headline { color: #ffa45c; } .level-confirmed .mc-threat-headline { color: #ff7b80; } .level-clear .mc-threat-headline { color: #7fdcb0; }
+.mc-threat-status span { display: grid; gap: 2px; } .mc-threat-status small { font: 9px var(--mono); letter-spacing: .14em; color: #8ea6b8; } .mc-threat-status span b { font: 600 18px var(--mono); font-variant-numeric: tabular-nums; color: #e8f1f8; }
+.mc-threat-explain { margin: 0; color: #b6c9d6; font-size: 13px; line-height: 1.5; max-width: 80ch; }
+.mc-threat-spark { width: 200px; height: 56px; flex: none; } .mc-threat-spark polyline { stroke: #67e8f9; } .mc-threat-spark line { stroke: rgba(160, 190, 210, .35); }
+.mc-threat-suggest { display: grid; gap: 8px; padding: 12px 14px; border: 1px solid rgba(103, 232, 249, .4); border-radius: 2px; background: rgba(103, 232, 249, .06); font-size: 13px; line-height: 1.5; }
+.mc-threat-buttons { display: flex; gap: 10px; flex-wrap: wrap; } .mc-threat-suggest small { color: #8ea6b8; }
+.mc-threat-raised { margin: 0; padding: 8px 12px; border: 1px solid #f0883a; color: #ffbf8f; font-size: 13px; display: flex; gap: 8px; align-items: center; }
+.mc-threat-ack { margin: 0; font-size: 12px; color: #9fb3c3; }
+.mc-story-toggle { justify-self: start; display: inline-flex; align-items: center; gap: 6px; border: 0; background: none; color: #9fdfff; font: 500 10px var(--mono); letter-spacing: .12em; cursor: pointer; padding: 2px 0; }
+.mc-story { list-style: none; margin: 0; padding: 0; display: grid; gap: 7px; max-height: 240px; overflow: auto; font-size: 13px; }
+.mc-story li { display: grid; grid-template-columns: 70px 1fr; gap: 12px; padding: 6px 0; border-top: 1px solid rgba(120, 150, 175, .16); }
+.mc-story time { font: 11px var(--mono); color: #8ea6b8; font-variant-numeric: tabular-nums; } .mc-story li.operator_reassign span, .mc-story li.operator_resume_on_track span { color: #9fdfff; } .mc-story li.empty { display: block; color: #8ea6b8; }
+
+/* an empty location panel (nothing to say) takes no space */
+.mc-location:empty, .mc-location:not(:has(p, button, ul, a)) { display: none; }
+
+/* ---- 2. rows: rails and a map of a sensible height (no big blank block) */
+.mc-main { grid-template-columns: minmax(250px, 290px) minmax(0, 1fr) minmax(290px, 340px); align-items: start; height: auto; gap: 20px; }
+.mc-map-frame { position: relative; height: clamp(340px, 56vh, 620px); min-height: 0; background: #07111c; }
+.mc-map-panel .cesium-live-map { height: 100%; min-height: 0; max-height: none; flex: none; }
+.mc-map-empty { position: absolute; inset: auto 16px 16px 16px; padding: 10px 14px; background: rgba(5, 13, 23, .88); border: 1px solid rgba(120, 150, 175, .35); color: #b6c9d6; font-size: 12px; line-height: 1.5; z-index: 4; pointer-events: none; }
+.mc-rail { gap: 20px; max-height: none; overflow: visible; }
+.mc-rail-left, .mc-rail-right { align-self: start; }
+
+/* ---- 3. aircraft as compact cards; details open on click */
+.mc-rail-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.mc-rail-card { position: relative; display: grid; grid-template-columns: 1fr auto; border: 1px solid rgba(120, 150, 175, .2); border-radius: 2px; background: #0c1a29; }
+.mc-rail-card.selected { border-color: #67e8f9; background: #0e2033; } .mc-rail-card.threat { border-color: #f0883a; }
+.mc-rail-main { display: grid; gap: 6px; padding: 10px 12px; border: 0; background: none; color: inherit; text-align: left; cursor: pointer; min-width: 0; }
+.mc-rail-name { display: flex; align-items: center; gap: 8px; } .mc-rail-name b { font-size: 14px; } .mc-rail-role { color: #9fb3c3; font: 10px var(--mono); letter-spacing: .1em; text-transform: uppercase; }
+.mc-rail-facts { display: flex; flex-wrap: wrap; gap: 4px 12px; font: 11px var(--mono); color: #b6c9d6; font-variant-numeric: tabular-nums; }
+.mc-rail-more { border: 0; border-left: 1px solid rgba(120, 150, 175, .16); background: none; color: #9fb3c3; width: 34px; cursor: pointer; }
+.mc-rail-reason { grid-column: 1 / -1; padding: 0 12px 10px; color: #f0c860; line-height: 1.4; }
+.mc-rail-card .mc-drawer { grid-column: 1 / -1; margin: 0; border-top: 1px solid rgba(120, 150, 175, .16); border-radius: 0; background: transparent; }
+.mc-not-verified { margin: 10px 0 0; padding: 0; list-style: none; display: grid; gap: 4px; font-size: 12px; color: #f0c860; }
+
+/* ---- the selected aircraft's controls, clearly separated; the dangerous ones stand apart */
+.mc-operator { gap: 8px; } .mc-operator-buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 0 14px 10px; }
+.mc-operator-buttons button { min-height: 36px; font-size: 10px; }
+.mc-exec-land, .mc-exec-restart, .mc-exec-abort { border-color: rgba(255, 110, 110, .55) !important; color: #ffb0b0 !important; background: rgba(255, 90, 98, .07) !important; }
+.mc-exec-land:hover:not(:disabled), .mc-exec-restart:hover:not(:disabled), .mc-exec-abort:hover:not(:disabled) { background: rgba(255, 90, 98, .16) !important; }
+.mc-danger { background: #ff6b72 !important; border-color: #ff6b72 !important; color: #240608 !important; }
+.mc-action-result { margin: 4px 14px; padding: 8px 10px; border-left: 3px solid #4fcf9a; font-size: 12px; line-height: 1.5; background: rgba(79, 207, 154, .08); }
+.mc-action-result.error { border-left-color: #ff6b72; background: rgba(255, 107, 114, .1); color: #ffc4c8; }
+.mc-modal .mc-action-result { margin: 0; }
+
+/* ---- dialogs for resume, reassign and switch */
+.mc-reassign-list { border: 1px solid rgba(120, 150, 175, .22); border-radius: 2px; padding: 8px 10px; display: grid; gap: 6px; margin: 0; max-height: 260px; overflow: auto; }
+.mc-reassign-list legend { font: 10px var(--mono); letter-spacing: .12em; color: #9fb3c3; padding: 0 6px; }
+.mc-candidate { display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; align-items: start; padding: 6px 4px; border-bottom: 1px solid rgba(120, 150, 175, .12); font-size: 12px; line-height: 1.45; }
+.mc-candidate small { grid-column: 2; color: #f0c860; } .mc-candidate.not-ready span { color: #8ea6b8; }
+.mc-field { display: grid; gap: 4px; font: 10px var(--mono); letter-spacing: .1em; color: #9fb3c3; } .mc-field select { min-height: 34px; background: #0c1a29; color: #e8f1f8; border: 1px solid rgba(120, 150, 175, .35); border-radius: 2px; padding: 0 8px; font: 13px var(--sans, Manrope, sans-serif); }
+.mc-reassign-summary { padding: 10px 12px; border: 1px solid rgba(103, 232, 249, .35); background: rgba(103, 232, 249, .05); font-size: 12px; line-height: 1.5; } .mc-reassign-summary ul { margin: 6px 0; padding-left: 18px; }
+
+/* ---- loading progress and checks */
+.mc-load-progress { display: grid; gap: 8px; margin-top: 8px; max-width: 70ch; } .mc-load-progress ol { margin: 0; padding: 0; list-style: none; display: grid; gap: 4px; font-size: 13px; }
+.mc-load-progress li.done::before { content: '✓ '; color: #4fcf9a; } .mc-load-progress li.running::before { content: '… '; color: #67e8f9; } .mc-load-progress li.pending { color: #8ea6b8; } .mc-load-progress li.failed { color: #ffc4c8; }
+.mc-load-progress.stuck small { color: #f0c860; }
+
+/* ---- diagnostics in tabs, and the details of the detector */
+.mc-diagnostics { display: grid; gap: 0; border: 1px solid rgba(120, 150, 175, .22); border-radius: 2px; background: #0a1623; }
+.mc-tabs { display: flex; flex-wrap: wrap; gap: 4px; padding: 0 14px; border-bottom: 1px solid rgba(120, 150, 175, .22); }
+.mc-tabs button { padding: 12px 14px; border: 0; border-bottom: 2px solid transparent; background: none; color: #9fb3c3; font: 500 11px var(--mono); letter-spacing: .1em; text-transform: uppercase; cursor: pointer; }
+.mc-tabs button.active { color: #e8f1f8; border-bottom-color: #67e8f9; }
+.mc-tabpanel { padding: 16px; display: grid; gap: 16px; min-width: 0; } .mc-tabpanel > .panel { border: 0; background: transparent; padding: 0; }
+.mc-details > summary { cursor: pointer; padding: 14px 18px; font: 500 11px var(--mono); letter-spacing: .12em; text-transform: uppercase; color: #9fdfff; }
+.mc-details[open] > summary { border-bottom: 1px solid rgba(120, 150, 175, .16); } .mc-details .threat-monitor { border: 0; background: transparent; }
+
+@media (max-width: 1280px) { .mc-main { grid-template-columns: minmax(230px, 260px) minmax(0, 1fr); } .mc-rail-right { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); } }
+@media (max-width: 1100px) { .mc-main { display: flex; flex-direction: column; } .mc-rail-right { display: contents; } .mc-map-frame { height: clamp(300px, 50vh, 520px); } .mc-threat-spark { display: none; } }
+@media (max-width: 720px) { .mc-threat-headline { font-size: 24px; } .mc-operator-buttons { grid-template-columns: 1fr; } }

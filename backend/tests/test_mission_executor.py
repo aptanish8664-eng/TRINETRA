@@ -666,3 +666,29 @@ def test_a_long_px4_text_split_into_chunks_is_recorded_as_one_message():
     run(executor, fake, clock, 1)
     texts = [event["message"] for event in executor.events if event["type"] == "px4_message"]
     assert texts[-2:] == ["PX4: Return: start return at 519 m (31 m above destination)", "PX4: Takeoff detected"]
+
+
+# --- a run that begins in the air (hand-over, resume) ------------------------------------------------------------
+
+def test_in_air_must_be_a_boolean_and_is_normalised_into_the_mission():
+    assert ex.validate_mission(mission())["in_air"] is False
+    assert ex.validate_mission(mission(in_air=True))["in_air"] is True
+    for bad in ("yes", 1, None, [True]):
+        with pytest.raises(ex.MissionError):
+            ex.validate_mission(mission(in_air=bad))
+
+
+def test_an_in_air_run_starts_on_an_armed_aircraft_without_arming_it_again():
+    executor, fake, clock = make(mission(in_air=True), armed=True)
+    assert run(executor, fake, clock, 30, until=lambda: executor.state == "executing"), (executor.state, executor.reason)
+    assert executor.state == "executing" and "mission_started" in types(executor)
+    assert not any(entry[0] == "command" and entry[1] == ex.MAV_CMD_COMPONENT_ARM_DISARM for entry in fake.sent)      # it never sent an arm command
+
+
+def test_a_normal_run_on_an_armed_aircraft_is_still_refused_and_in_air_does_not_change_other_checks():
+    executor, fake, clock = make(mission(), armed=True)
+    run(executor, fake, clock, 5, until=lambda: executor.terminal)
+    assert executor.state == "failed" and "already armed" in executor.reason
+    executor, fake, clock = make(mission(in_air=True), vehicle_type=1)           # in_air does not excuse a vehicle that is not the x500
+    run(executor, fake, clock, 5, until=lambda: executor.terminal)
+    assert executor.state == "failed" and "not the x500 quadrotor" in executor.reason

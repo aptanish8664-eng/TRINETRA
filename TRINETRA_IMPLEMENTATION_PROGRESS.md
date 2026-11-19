@@ -1403,3 +1403,12 @@ Status: implemented and unit/API tested; static screenshots taken in headless Ed
 - Files: frontend/src/App.tsx, src/visuals/{VideoBackdrop.tsx, useDescent.ts, overview-descent.css, visuals.css, visuals.test.tsx}.
 - Not met: 95th percentile under 20 ms in the middle third under wheel scrolling on this loaded machine (about 33 ms); not measured on a real-GPU laptop or a production preview.
 - Next exact step: owner review; nothing has been committed.
+
+
+## Run 19 (2026-11-18): load, spawn points, operator control, Mission Control redesign, Overview text
+- Part 0/A: implemented and measured (see docs/FLEET_CAPACITY.md section 7, docs/HOW_TO_START_A_RUN.md section 4, docs/OVERNIGHT_RUN_LOG.md). Not measured: a clean with-browser "after" table; hidden-tab pause live; `--apply-wslconfig` is run once at the end (see below).
+- Parts B/C: implemented; live: 3 cold starts of one 5-aircraft deployment, all connected at 37.7/37.2/38.2 s, Gazebo pose error 0.0 m, pair distances 57-168 m.
+- Part E: implemented with tests; live: pause + resume on track, reassign to a ground standby, reassign to an airborne aircraft, switch primary, continue monitoring, RTL, land here. Not verified live: natural re-raise past 60 %, degraded/failed continuity outcomes, persistence across a backend restart.
+- Part D: Mission Control redesign implemented; screenshots at 1914x826, 1440x900, 1100 px in normal, threat-active (Confirmed, 100 %) and reassign-dialog states. At 826 px the threat panel ends at y=669 (visible without scrolling). An empty bar under the threat panel was fixed in CSS afterwards and not re-screenshotted (the flight had ended).
+- Part F: Overview words/numbers only, in frontend/src/overviewText.ts; screenshots at both sizes.
+- Next exact step: owner review; nothing has been committed.

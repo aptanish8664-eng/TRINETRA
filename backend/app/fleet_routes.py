@@ -11,12 +11,12 @@ from .auth_routes import require_csrf, require_permission
 from .authorization import Permission, has_permission
 from .mission_planning.schemas import MissionPlan
 from .mission_planning.start import (
-    FAR_FROM_AREA_M, HOME_TOLERANCE_M, RELOCATION_NOTICE_M, distance_between_m, mission_start,
+    FAR_FROM_AREA_M, HOME_TOLERANCE_M, RELOCATION_NOTICE_M, distance_between_m, mission_start, takeoff_point,
 )
 from .mission_planning.validation import start_to_area_distance_m
 from .persistence.database import add_audit_event, get_scenario
 from .security import AuthContext
-from .telemetry.fleet_manager import FLEET_CAPACITY, invoke_fleet_manager
+from .telemetry.fleet_manager import FLEET_CAPACITY, STATUS_CACHE_SECONDS, invoke_fleet_manager
 from .mission_planning.quick import capacity_message, capacity_options
 
 router = APIRouter()
@@ -61,7 +61,7 @@ def _fleet_snapshot() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     from .main import gazebo_pose_store, px4_telemetry_store
 
     vehicles = px4_telemetry_store.snapshot(include_trails=False)["vehicles"]
-    models = gazebo_pose_store.snapshot()["models"]
+    models = gazebo_pose_store.snapshot(include_trails=False)["models"]
     return vehicles, models
 
 
@@ -118,6 +118,11 @@ def simulation_location(plan: MissionPlan, vehicles: list[dict[str, Any]]) -> di
     """Where the plan's aircraft are relative to the mission start and area. Reads telemetry only; decides nothing."""
     start = mission_start(plan)
     planned = set(plan.selected_uav_ids) or {item.uav_id for item in plan.aircraft}
+    # Each aircraft is compared with ITS OWN planned start (its take-off point); only an aircraft with no start of its own falls back to the mission start (the primary's).
+    own_start = {}
+    for item in plan.aircraft:
+        point = takeoff_point(item)
+        own_start[item.uav_id] = None if point is None else ({"latitude": point["latitude"], "longitude": point["longitude"]} if isinstance(point, dict) else {"latitude": point.latitude, "longitude": point.longitude})
     rows = []
     for vehicle in sorted(vehicles, key=lambda item: int(item.get("system_id", 0))):
         if planned and vehicle.get("id") not in planned:
@@ -125,10 +130,12 @@ def simulation_location(plan: MissionPlan, vehicles: list[dict[str, Any]]) -> di
         position = vehicle.get("position") or {}
         usable = vehicle.get("status") == "connected" and position.get("valid") is True
         point = {"latitude": position.get("latitude"), "longitude": position.get("longitude")} if usable else None
+        target = own_start.get(vehicle.get("id")) or start
         rows.append({
             "aircraft_id": vehicle.get("id"), "status": vehicle.get("status"),
             "latitude": point["latitude"] if point else None, "longitude": point["longitude"] if point else None,
-            "distance_to_start_m": round(distance_between_m(point, start), 1) if point and start else None,
+            "planned_start": target,
+            "distance_to_start_m": round(distance_between_m(point, target), 1) if point and target else None,
             "distance_to_area_m": round(_distance_to_area_m(plan.operating_area, point), 1)
             if point and plan.operating_area is not None else None,
         })
@@ -297,7 +304,7 @@ def fleet_status(
     context: AuthContext = Depends(require_permission(Permission.MISSION_READ_OWN)),
 ) -> dict[str, Any]:
     vehicles, models = _fleet_snapshot()
-    processes = invoke_fleet_manager("status", timeout_seconds=12)
+    processes = invoke_fleet_manager("status", timeout_seconds=12, max_age_seconds=STATUS_CACHE_SECONDS)
     process_instances = processes.get("instances", []) if not processes.get("failure") else []
     by_system = {int(item["system_id"]): item for item in process_instances}
     present_ids = set(by_system)

@@ -209,6 +209,10 @@ def plan_warnings(aircraft: AircraftPlan, plan: MissionPlan, limits: PlanningLim
     """Things worth showing that do not make the plan invalid. The authoritative errors stay in validate_aircraft."""
     found: list[PlanIssue] = []
     uav = aircraft.uav_id
+    from .start import start_separation_warnings
+    close = start_separation_warnings(plan).get(uav)
+    if close:
+        found.append(PlanIssue(code="start_too_close", uav_id=uav, field="start_location", message=close))
     if plan.operating_area is not None and aircraft.start_location is not None:
         gap = start_to_area_distance_m(plan.operating_area, aircraft.start_location)
         if 0 < gap <= min(limits.max_start_to_area_m, limits.max_planar_extent_m if aircraft.task_type in PLANAR_TASKS else limits.max_start_to_area_m):

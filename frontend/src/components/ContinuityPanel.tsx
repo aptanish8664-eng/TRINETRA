@@ -23,7 +23,7 @@ export function ContinuityPanel() {
     let stopped = false
     const read = () => { void Promise.resolve().then(() => api.reconfigurations()).then(value => { if (!stopped) setItems(value.slice(0, 2)) }).catch(() => undefined) }
     read()
-    const timer = window.setInterval(() => { if (typeof document === 'undefined' || !document.hidden) read() }, 3000)
+    const timer = window.setInterval(() => { if (typeof document === 'undefined' || !document.hidden) read() }, 8000)
     return () => { stopped = true; window.clearInterval(timer) }
   }, [])
   if (items.length === 0) return null

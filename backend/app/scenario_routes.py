@@ -36,7 +36,7 @@ from .security import AuthContext
 from .simulation.engine import SimulationConfig
 from .telemetry.planning import current_planning_aircraft
 from .mission_planning.quick import capacity_message, capacity_options
-from .telemetry.fleet_manager import FLEET_CAPACITY, invoke_fleet_manager
+from .telemetry.fleet_manager import FLEET_CAPACITY, STATUS_CACHE_SECONDS, invoke_fleet_manager
 
 
 router = APIRouter()
@@ -464,7 +464,7 @@ def deploy_scenario(
     if plan_only:
         process_state, running, verified, verified_ids, required_system_ids = {}, set(), [], set(), set()
     else:
-        process_state = invoke_fleet_manager("status", timeout_seconds=12)
+        process_state = invoke_fleet_manager("status", timeout_seconds=12, max_age_seconds=STATUS_CACHE_SECONDS)
         running = {int(item.get("system_id", -1)) for item in process_state.get("instances", [])
                    if isinstance(item, dict) and not process_state.get("failure")}
         from .fleet_routes import _verified_fleet

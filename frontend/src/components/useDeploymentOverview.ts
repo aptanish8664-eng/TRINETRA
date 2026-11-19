@@ -9,12 +9,20 @@ import type { DeploymentOverview } from '../services/auth'
 export function useDeploymentOverview(enabled: boolean, intervalMs = 15_000) {
   const [overview, setOverview] = useState<DeploymentOverview | null>(null)
   const [loaded, setLoaded] = useState(false)
+  const [error, setError] = useState('')
+  const [waiting, setWaiting] = useState(0)
   const inflight = useRef(false)
   const refresh = useCallback(async () => {
     if (inflight.current) return
     inflight.current = true
-    try { setOverview(await api.missionDeployments()) } catch { /* keep the last answer */ } finally { inflight.current = false; setLoaded(true) }
+    try { setOverview(await api.missionDeployments()); setError('') } catch (cause) { setError(cause instanceof Error ? cause.message : 'The deployment could not be read.') /* the last answer is kept */ } finally { inflight.current = false; setLoaded(true) }
   }, [])
+  useEffect(() => {          // how long the first answer has been awaited, so the page can say so instead of sitting on one message
+    if (!enabled || loaded) { setWaiting(0); return }
+    const started = Date.now()
+    const timer = window.setInterval(() => setWaiting(Math.floor((Date.now() - started) / 1000)), 1000)
+    return () => window.clearInterval(timer)
+  }, [enabled, loaded])
   useEffect(() => {
     if (!enabled) return
     void refresh()
@@ -23,5 +31,5 @@ export function useDeploymentOverview(enabled: boolean, intervalMs = 15_000) {
     document.addEventListener('visibilitychange', onVisible)
     return () => { window.clearInterval(timer); document.removeEventListener('visibilitychange', onVisible) }
   }, [enabled, intervalMs, refresh])
-  return { overview, loaded, refresh }
+  return { overview, loaded, refresh, error, waiting }
 }

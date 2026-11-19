@@ -23,7 +23,7 @@ def test_fleet_manager_command_is_fixed_and_argument_validated():
     command = build_fleet_manager_command("activate", count=5)
     assert command[:4] == ["wsl.exe", "--distribution", "Ubuntu", "--exec"]
     assert command[4:7] == ["python3", "/mnt/d/TRINETRA/backend/tools/wsl_fleet_manager.py", "activate"]
-    assert command[-2:] == ["--count", "5"]
+    assert command[command.index("--count"):command.index("--count") + 2] == ["--count", "5"]
     with pytest.raises(ValueError, match="between 1 and 5"):
         build_fleet_manager_command("activate", count=6)
     with pytest.raises(ValueError, match="unsupported"):

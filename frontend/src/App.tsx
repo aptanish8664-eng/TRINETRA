@@ -1,3 +1,4 @@
+import { BUILD_LABEL, OVERVIEW } from './overviewText'
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { motion } from 'framer-motion'
 import { CartesianGrid, Line, LineChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
@@ -104,28 +105,28 @@ function Overview({ onNavigate, onCreate }: { onNavigate: (tab: Tab) => void; on
     <div className="altitude-readout" role="img" aria-label={`Scenic elevation of the footage, from about ${formatElevation(ELEVATION_TOP_M)} metres above sea level at the top of the page down to the valley; not live telemetry`}><small>ELEVATION</small><span className="elevation-value"><span ref={readout}>{`${formatElevation(ELEVATION_TOP_M)} m`}</span></span><small>ASL</small><em>{ELEVATION_CAPTION}</em><span className="elevation-bar"><i/></span></div>
     <section className="hero">
       <motion.div className="hero-content" initial={{ opacity: 0, y: 18 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: .8, ease: 'easeOut' }}>
-        <div className="hero-kicker"><span className="live-dot" /> CYBER-RESILIENT MULTI-UAV RESEARCH PLATFORM</div>
+        <div className="hero-kicker"><span className="live-dot" /> {OVERVIEW.kicker}</div>
         <h1>See the signal.<br /><em>Keep the mission.</em></h1>
-        <p className="hero-descriptor">AUTONOMOUS AERIAL INTELLIGENCE</p>
-        <p className="hero-copy">When navigation data turns uncertain, mission continuity is engineered through sensing, assessment, and adaptation.</p>
+        <p className="hero-descriptor">{OVERVIEW.descriptor}</p>
+        <p className="hero-copy">{OVERVIEW.copy}</p>
         <div className="hero-actions"><button className="button-primary" onClick={onCreate}><Play size={15} fill="currentColor" /> CREATE A LIVE MISSION</button><button className="button-quiet" onClick={() => onNavigate('Research')}>EXPLORE THE RESEARCH <ArrowRight size={15} /></button></div>
-        <div className="hero-wordmark"><BrandMark compact /><span>SURVEIL. DETECT. PROTECT.</span><i /> <span>MISSION CONTINUITY. ENGINEERED.</span></div>
+        <div className="hero-wordmark"><BrandMark compact /><span>{OVERVIEW.wordmark}</span><i /> <span>MISSION CONTINUITY. ENGINEERED.</span></div>
       </motion.div>
-      <div className="hero-telemetry"><span>FIELD MODEL / 00</span><span>SIMULATION READY</span><span>LATENCY —</span></div>
+      <div className="hero-telemetry">{OVERVIEW.heroStatus.map(item => <span key={item}>{item}</span>)}</div>
       <button className="scroll-cue" onClick={() => document.getElementById('story')?.scrollIntoView({ behavior: 'smooth' })}><span>SCROLL TO EXPLORE</span><ArrowDown size={14} /></button>
     </section>
     {gap}
     <section className="overview-fleet ov-waypoint sec" aria-label="Fleet summary"><div className="eyebrow">FLEET NOW <span>— LIVE FROM THE BACKEND</span></div><FleetStrip/></section>
     {gap}
-    <section className="story-intro ov-waypoint sec" id="story"><div className="eyebrow">THE RESILIENCE LOOP <span>— 01 / 04</span></div><h2>One altered coordinate<br />can change the whole picture.</h2><p>TRINETRA is a software-only research demonstrator. It makes position deception visible, evaluates telemetry, and measures what happens when a fleet adapts.</p></section>
+    <section className="story-intro ov-waypoint sec" id="story"><div className="eyebrow">THE RESILIENCE LOOP <span>— 01 / 04</span></div><h2>One altered coordinate<br />can change the whole picture.</h2><p>{OVERVIEW.intro}</p></section>
     {gap}
     <section className="story-grid ov-waypoint">
-      <article className="story-beat"><div className="story-index">01 <span>DEPLOY</span></div><div className="story-graphic fleet-graphic"><img className="story-photo" src="/images/drone-flight.webp" alt="A small camera drone in flight beneath a sunset sky" loading="lazy"/><div className="graphic-grid"/><span className="mini-uav u1">◢</span><span className="mini-uav u2">◢</span><span className="mini-uav u3">◢</span><i className="graphic-route r1"/><i className="graphic-route r2"/><b>FLEET INITIALISED</b><small>WAYPOINTS ASSIGNED · TELEMETRY STREAM</small></div><div className="story-copy"><h3>Mission geometry,<br />made legible.</h3><p>Seeded starts and task locations create repeatable runs on a clearly labelled abstract coordinate plane.</p></div></article>
-      <article className="story-beat"><div className="story-index">02 <span>DETECT</span></div><div className="story-graphic spoof-graphic"><div className="graphic-grid"/><i className="expected-path"/><i className="reported-path"/><span className="spoof-aircraft">◢</span><span className="spoof-pulse"/><b>POSITION DIVERGENCE</b><small>REPORTED GPS / GROUND-TRUTH VIEW</small></div><div className="story-copy"><h3>Deception, shown<br />as evidence.</h3><p>The simulator separates the hidden truth state from reported GPS. Detection consumes reported trajectory and mission telemetry only.</p></div></article>
-      <article className="story-beat"><div className="story-index">03 <span>ADAPT</span></div><div className="story-graphic adapt-graphic"><div className="graphic-grid"/><span className="fleet-node n1">01</span><span className="fleet-node n2">02</span><span className="fleet-node n3">03</span><i className="handoff-line"/><b>CAPACITY-AWARE RESPONSE</b><small>ASSESS · ISOLATE · REASSIGN</small></div><div className="story-copy"><h3>Continuity,<br />measured honestly.</h3><p>Compare baseline and adaptive policies on matched seeds. Results reflect each run; improvement is not assumed.</p></div></article>
+      <article className="story-beat"><div className="story-index">01 <span>DEPLOY</span></div><div className="story-graphic fleet-graphic"><img className="story-photo" src="/images/drone-flight.webp" alt="A small camera drone in flight beneath a sunset sky" loading="lazy"/><div className="graphic-grid"/><span className="mini-uav u1">◢</span><span className="mini-uav u2">◢</span><span className="mini-uav u3">◢</span><i className="graphic-route r1"/><i className="graphic-route r2"/><b>FLEET INITIALISED</b><small>{OVERVIEW.deploy.caption}</small></div><div className="story-copy"><h3>{OVERVIEW.deploy.title[0]}<br />{OVERVIEW.deploy.title[1]}</h3><p>{OVERVIEW.deploy.copy}</p></div></article>
+      <article className="story-beat"><div className="story-index">02 <span>DETECT</span></div><div className="story-graphic spoof-graphic"><div className="graphic-grid"/><i className="expected-path"/><i className="reported-path"/><span className="spoof-aircraft">◢</span><span className="spoof-pulse"/><b>POSITION DIVERGENCE</b><small>{OVERVIEW.detect.caption}</small></div><div className="story-copy"><h3>{OVERVIEW.detect.title[0]}<br />{OVERVIEW.detect.title[1]}</h3><p>{OVERVIEW.detect.copy}</p></div></article>
+      <article className="story-beat"><div className="story-index">03 <span>ADAPT</span></div><div className="story-graphic adapt-graphic"><div className="graphic-grid"/><span className="fleet-node n1">01</span><span className="fleet-node n2">02</span><span className="fleet-node n3">03</span><i className="handoff-line"/><b>CAPACITY-AWARE RESPONSE</b><small>{OVERVIEW.adapt.caption}</small></div><div className="story-copy"><h3>{OVERVIEW.adapt.title[0]}<br />{OVERVIEW.adapt.title[1]}</h3><p>{OVERVIEW.adapt.copy}</p></div></article>
     </section>
     {gap}
-    <section className="overview-cta ov-waypoint sec"><div><span className="eyebrow">ENTER THE SYSTEM</span><h2>A real simulation.<br /><em>A live operational view.</em></h2></div><div><p>Deploy a deterministic fleet, configure a GPS anomaly, inspect its response in 2D or 3D, and replay the recorded run.</p><button className="button-primary" onClick={onCreate}>OPEN MISSION CONTROL <ArrowRight size={15} /></button></div><div className="cta-glow" /></section>
+    <section className="overview-cta ov-waypoint sec"><div><span className="eyebrow">ENTER THE SYSTEM</span><h2>A real simulation.<br /><em>A live operational view.</em></h2></div><div><p>{OVERVIEW.cta}</p><button className="button-primary" onClick={onCreate}>OPEN MISSION CONTROL <ArrowRight size={15} /></button></div><div className="cta-glow" /></section>
     {gap}
     <section className="uav-bay" aria-label="Landing pad" ref={bay}>
       <img className="uav-scene" src="/media/uav-snow-scene.webp" alt="A survey UAV standing on snow beneath a cloudy mountain sky" decoding="async" />
@@ -133,9 +134,9 @@ function Overview({ onNavigate, onCreate }: { onNavigate: (tab: Tab) => void; on
       <div className="uav-copy">
         <BrandMark surface="dark" height={56} />
         <div className="pad" aria-hidden="true"><i/><b>H</b></div>
-        <p>Touchdown. Every run in this simulator ends on the ground, and every number on these pages comes from the backend.</p>
+        <p>{OVERVIEW.touchdown}</p>
       </div>
-      <div className="uav-footer"><span>TRINETRA · SOFTWARE-ONLY RESEARCH DEMONSTRATOR</span><span>MISSION CONTINUITY. ENGINEERED.</span><span className="footage-credit">Footage: “Mountain Landscape With Snow”, Free HD videos · docs/MEDIA_CREDITS.md</span><span>LOCAL SIMULATION BUILD 0.1</span></div>
+      <div className="uav-footer"><span>TRINETRA · SOFTWARE-ONLY RESEARCH DEMONSTRATOR</span><span>MISSION CONTINUITY. ENGINEERED.</span><span className="footage-credit">Footage: “Mountain Landscape With Snow”, Free HD videos · docs/MEDIA_CREDITS.md</span><span>{BUILD_LABEL}</span></div>
     </section>
   </div>
 }
@@ -530,7 +531,7 @@ function App() {
         </section>
       </>}
     </main>}
-    {!accessPage && tab !== 'Overview' && <footer className="footer"><BrandMark compact/><span>TRINETRA · SOFTWARE-ONLY RESEARCH DEMONSTRATOR</span><span>MISSION CONTINUITY. ENGINEERED.</span><span className="footage-credit">Footage: “Mountain Landscape With Snow”, Free HD videos · docs/MEDIA_CREDITS.md</span><span>LOCAL SIMULATION BUILD 0.1</span></footer>}
+    {!accessPage && tab !== 'Overview' && <footer className="footer"><BrandMark compact/><span>TRINETRA · SOFTWARE-ONLY RESEARCH DEMONSTRATOR</span><span>MISSION CONTINUITY. ENGINEERED.</span><span className="footage-credit">Footage: “Mountain Landscape With Snow”, Free HD videos · docs/MEDIA_CREDITS.md</span><span>{BUILD_LABEL}</span></footer>}
   </div>
 }
 

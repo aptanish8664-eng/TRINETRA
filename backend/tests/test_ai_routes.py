@@ -132,7 +132,7 @@ def test_geographic_ai_plan_uses_only_current_aircraft_ids_and_omits_coordinates
     from app import main
 
     class TelemetryStore:
-        def snapshot(self):
+        def snapshot(self, include_trails=True):
             return {"vehicles": [{
                 "id": "px4-7", "status": "connected",
                 "position": {"valid": True},
@@ -159,7 +159,7 @@ def test_geographic_ai_plan_rejects_coordinates_and_provider_aircraft_invention(
     from app import main
 
     class TelemetryStore:
-        def snapshot(self):
+        def snapshot(self, include_trails=True):
             return {"vehicles": [{
                 "id": "px4-7", "status": "connected",
                 "position": {"valid": True},

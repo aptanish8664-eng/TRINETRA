@@ -864,7 +864,7 @@ def test_geographic_mission_is_versioned_and_never_runs_in_abstract_simulator(
     from app import main
 
     class TelemetryStore:
-        def snapshot(self):
+        def snapshot(self, include_trails=True):
             return {"vehicles": [{
                 "id": "px4-7", "status": "connected",
                 "position": {"valid": True},
@@ -943,7 +943,7 @@ def test_geographic_mission_rejects_self_intersecting_zone(operator_client, monk
     from app import main
 
     class TelemetryStore:
-        def snapshot(self):
+        def snapshot(self, include_trails=True):
             return {"vehicles": [{
                 "id": "px4-7", "status": "connected",
                 "position": {"valid": True},

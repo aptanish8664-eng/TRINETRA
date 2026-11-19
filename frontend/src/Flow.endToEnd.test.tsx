@@ -86,6 +86,8 @@ vi.mock('./services/api', () => ({
     px4Telemetry: vi.fn(async () => ({ source: 'px4_mavlink', generated_at: 't', transport: { status: 'receiving' }, capabilities: {}, vehicles: [vehicle()] })),
     px4TelemetrySocket: vi.fn(() => ({ close: vi.fn(), onopen: null, onmessage: null, onerror: null, onclose: null })),
     gazeboPoses: vi.fn(async () => ({ source: 'gazebo_pose_info', world: 'default', generated_at: 't', transport: { status: 'receiving' }, models: [] })),
+    threatSummary: vi.fn(async () => ({ deployment_id: 'd', level: 'clear', headline: 'Clear', probability: 0, aircraft_id: null, tier: null, threat_active: false, suggestion: null, acknowledged: null, raised_again: false, acknowledgements: [], thresholds: { watch: 0.3, act: 0.6, confirmed: 0.85 }, explanation: { clear: 'c', watch: 'w', suspected: 's', confirmed: 'c' }, probability_series: [], story: [], monitor_ready: true, note: '' })),
+    aircraftSummary: vi.fn(async () => ({ deployment_id: 'd', aircraft: [], counts: { with_mission: 0, verified: 0, not_verified: [] }, safe_maximum: 6 })),
     fleetStatus: vi.fn(async () => ({ capacity: 5, verified_count: 1, manager_error: null, bridges: { telemetry: { status: 'running' }, pose: { status: 'running' } },
       instances: [{ aircraft_id: 'px4-1', instance_number: 0, system_id: 1, gazebo_model: 'x500_0', verified: true }] })),
     activateFleet: vi.fn(async (count: number) => ({ required_uav_count: count, activated_uav_count: count, assigned_uav_count: 0, request_id: 'r', verified: true,

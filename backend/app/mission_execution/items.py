@@ -43,7 +43,7 @@ def _finite(value: Any, name: str) -> float:
     return float(value)
 
 
-def build_mission(aircraft: AircraftPlan, execution_id: str) -> dict[str, Any]:
+def build_mission(aircraft: AircraftPlan, execution_id: str, *, in_air: bool = False) -> dict[str, Any]:
     """The payload for `wsl_mission_executor.py start` (validated again there)."""
     route = aircraft.route
     if route is None or len(route.waypoints) < 2:
@@ -81,4 +81,7 @@ def build_mission(aircraft: AircraftPlan, execution_id: str) -> dict[str, Any]:
             raise MissionItemsError(f"route action {waypoint.action!r} cannot be flown")
     if len(items) > MAX_ITEMS:
         raise MissionItemsError(f"the route needs {len(items)} mission items; the limit is {MAX_ITEMS}")
-    return {"execution_id": execution_id, "instance": instance, "system_id": instance + 1, "items": items, "route_total": len(waypoints)}
+    mission = {"execution_id": execution_id, "instance": instance, "system_id": instance + 1, "items": items, "route_total": len(waypoints)}
+    if in_air:
+        mission["in_air"] = True        # the executor may begin on an armed, flying aircraft (hand-over, resume from the air)
+    return mission

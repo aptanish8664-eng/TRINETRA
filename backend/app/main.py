@@ -73,6 +73,8 @@ from .general_scenario_routes import router as general_scenario_router
 from .execution_routes import router as execution_router
 from .response_routes import router as response_router
 from .restart_routes import router as restart_router
+from .summary_routes import router as summary_router
+from .operator_control import router as operator_router
 from .simulation.detector import DETECTOR_VERSION
 from .simulation.engine import SIMULATION_VERSION, Simulation, SimulationConfig
 from .simulation.response import reassignment_block_reason, reassign_tasks
@@ -145,6 +147,8 @@ app.include_router(research_router)
 app.include_router(execution_router)
 app.include_router(response_router)
 app.include_router(restart_router)
+app.include_router(summary_router)
+app.include_router(operator_router)
 app.include_router(general_scenario_router)
 
 
@@ -254,6 +258,7 @@ async def start_px4_telemetry_receiver() -> None:
                 px4_telemetry_store,
                 allowed_source_ip=PX4_UDP_ALLOWED_SOURCE_IP,
                 allowed_source_port=PX4_UDP_ALLOWED_SOURCE_PORT,
+                threaded=True,
             ),
             local_addr=(PX4_UDP_BIND_HOST, PX4_UDP_BIND_PORT),
         )
@@ -499,7 +504,7 @@ def health() -> dict:
             px4_component["error_code"] = px4_udp_error_code
         telemetry_component = {"status": receiver_status, "freshness": "not_available"}
     else:
-        px4_snapshot = px4_telemetry_store.snapshot()
+        px4_snapshot = px4_telemetry_store.snapshot(include_trails=False)
         connected_count = sum(vehicle["status"] == "connected" for vehicle in px4_snapshot["vehicles"])
         stale_count = sum(vehicle["status"] == "stale" for vehicle in px4_snapshot["vehicles"])
         receiving = px4_snapshot["transport"]["status"] == "receiving"
@@ -519,7 +524,7 @@ def health() -> dict:
         if gazebo_pose_udp_error_code is not None:
             gazebo_component["error_code"] = gazebo_pose_udp_error_code
     else:
-        gazebo_snapshot = gazebo_pose_store.snapshot()
+        gazebo_snapshot = gazebo_pose_store.snapshot(include_trails=False)
         gazebo_component = {
             "status": gazebo_snapshot["transport"]["status"],
             "world": gazebo_snapshot["world"],

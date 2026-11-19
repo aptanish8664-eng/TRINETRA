@@ -3,10 +3,13 @@ from __future__ import annotations
 
 import json
 import subprocess
+import threading
+import time
 from typing import Any
 import uuid
 
 from .. import config
+from ._copy import copy_value
 from ..mission_planning.start import validate_home
 
 
@@ -15,7 +18,7 @@ WSL_MANAGER_PATH = "/mnt/d/TRINETRA/backend/tools/wsl_fleet_manager.py"
 PX4_ROOT = "/home/apt8055/uav-sim/PX4-Autopilot"
 # How many aircraft this machine runs reliably (config.SIM_MAX_AIRCRAFT, set from measurements). It limits ACTIVATING and STARTING simulated aircraft only.
 FLEET_CAPACITY = config.SIM_MAX_AIRCRAFT
-_ACTIONS = {"status", "activate", "stop", "relocate", "start", "progress"}
+_ACTIONS = {"status", "activate", "stop", "relocate", "start", "progress", "inventory", "clean"}
 BATCH_RANGE = (1, 16)
 
 
@@ -24,6 +27,21 @@ def _home_arguments(home: dict[str, Any]) -> list[str]:
     latitude, longitude, altitude = validate_home(home.get("latitude"), home.get("longitude"), home.get("altitude_m"))
     # The `=` form keeps a negative number from being read as an option by the WSL-side argument parser.
     return [f"--home-lat={latitude:.7f}", f"--home-lon={longitude:.7f}", f"--home-alt={altitude:.2f}"]
+
+
+def _spawn_arguments(home: dict[str, Any]) -> list[str]:
+    """Each aircraft's spawn offset from the home as `--spawn-pose=INSTANCE:EAST:NORTH` (fixed-format numbers; the WSL manager range-checks them again)."""
+    arguments = []
+    seen: set[int] = set()
+    for pose in home.get("spawn") or []:
+        instance, east, north = pose.get("instance"), pose.get("east_m"), pose.get("north_m")
+        if isinstance(instance, bool) or not isinstance(instance, int) or not 0 <= instance < FLEET_CAPACITY or instance in seen:
+            raise ValueError("spawn instance must be a unique number within fleet capacity")
+        if any(isinstance(value, bool) or not isinstance(value, (int, float)) or not -1_500_000.0 <= value <= 1_500_000.0 for value in (east, north)):
+            raise ValueError("spawn offsets must be numbers within 1,500 km")
+        seen.add(instance)
+        arguments.append(f"--spawn-pose={instance}:{float(east):.2f}:{float(north):.2f}")
+    return arguments
 
 
 def _profile_arguments(profile: dict[str, Any]) -> list[str]:
@@ -86,8 +104,10 @@ def build_fleet_manager_command(action: str, *, count: int | None = None,
                     raise ValueError("bridge ports must be integers from 1024 to 65535")
                 command.extend((option, str(value)))
     if action in {"activate", "relocate", "start"}:
+        command.extend(("--gazebo-gui", "on" if config.GAZEBO_GUI else "off", "--gazebo-config", "light" if config.GAZEBO_LIGHT_CONFIG else "stock"))
         if home is not None:
             command.extend(_home_arguments(home))
+            command.extend(_spawn_arguments(home))
         if profile is not None:
             command.extend(_profile_arguments(profile))
     elif home is not None or profile is not None:
@@ -112,13 +132,47 @@ def build_fleet_manager_command(action: str, *, count: int | None = None,
     return command
 
 
+# `status` starts a Python process inside WSL (about 0.5-3 s, more on a busy machine) and Mission Control's pre-start checks, fleet status and plan checks all ask for it
+# several times a minute. A caller that can tolerate a few seconds of age passes `max_age_seconds`: concurrent callers then share ONE WSL call (single flight), and any
+# action that changes the simulation clears the cache. The default (0) never caches.
+STATUS_CACHE_SECONDS = 4.0
+_STATUS_CACHE: dict[str, Any] = {"at": 0.0, "value": None}
+_STATUS_LOCK = threading.Lock()
+
+
+def clear_status_cache() -> None:
+    with _STATUS_LOCK:
+        _STATUS_CACHE.update(at=0.0, value=None)
+
+
 def invoke_fleet_manager(action: str, *, count: int | None = None,
                          instances: list[int] | None = None,
                          request_id: str | None = None,
                          timeout_seconds: int = 35,
                          home: dict[str, Any] | None = None,
                          stop_first: bool = False,
-                         batch: int | None = None) -> dict[str, Any]:
+                         batch: int | None = None,
+                         max_age_seconds: float = 0.0) -> dict[str, Any]:
+    if action == "status" and max_age_seconds > 0:
+        with _STATUS_LOCK:
+            if _STATUS_CACHE["value"] is not None and time.monotonic() - _STATUS_CACHE["at"] <= max_age_seconds:
+                return copy_value(_STATUS_CACHE["value"])
+            value = _invoke_fleet_manager(action, count=count, instances=instances, request_id=request_id, timeout_seconds=timeout_seconds, home=home, stop_first=stop_first, batch=batch)
+            if not value.get("failure"):
+                _STATUS_CACHE.update(at=time.monotonic(), value=copy_value(value))
+            return value
+    if action in {"activate", "relocate", "start", "stop", "clean"}:
+        clear_status_cache()
+    return _invoke_fleet_manager(action, count=count, instances=instances, request_id=request_id, timeout_seconds=timeout_seconds, home=home, stop_first=stop_first, batch=batch)
+
+
+def _invoke_fleet_manager(action: str, *, count: int | None = None,
+                          instances: list[int] | None = None,
+                          request_id: str | None = None,
+                          timeout_seconds: int = 35,
+                          home: dict[str, Any] | None = None,
+                          stop_first: bool = False,
+                          batch: int | None = None) -> dict[str, Any]:
     ports = None
     profile = None
     if action in {"activate", "relocate", "status", "start", "progress"}:

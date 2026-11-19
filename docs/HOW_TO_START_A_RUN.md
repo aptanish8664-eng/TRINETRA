@@ -36,3 +36,12 @@ What it checks: free space on C: (below 1.5 GB do not start a simulator run) and
 ## 3. What is real and what is not
 
 Every number on screen comes from the backend (REST/WebSocket) or from PX4/Gazebo in the simulator. Simulated GPS faults from the Attack Lab are applied to the threat monitor's own copy of the GPS data only. Nothing here is real flight evidence.
+
+## 4. Run 19 additions (implemented; see TRINETRA_IMPLEMENTATION_PROGRESS.md for what was verified)
+
+* **Gazebo window.** Gazebo now starts headless (server only). To see the Gazebo window set `TRINETRA_GAZEBO_GUI=1` before starting the backend. This costs CPU and memory; it was not measured separately.
+* **Lighter simulation.** `TRINETRA_GAZEBO_LIGHT` (default on) starts the Gazebo server with a reduced system list (no rendering sensors system, optical flow, camera stream, wind, air speed, link wrench, contact). Set `TRINETRA_GAZEBO_LIGHT=0` for the full model. Measured once (single A/B, 5 aircraft): Gazebo server 122 % to 79 % of one core, each PX4 28.8 % to 22.2 %, real-time factor 1.0 in both. The detector inputs are GPS, IMU and PX4 estimates, which the light set keeps; this was checked only by flying, not by a dedicated detector comparison.
+* **Spawn positions.** Every aircraft, including standby ones, spawns at its own planned start. The primary's take-off point is the single PX4 home; the others are offset from it, never closer than 3 m (a plan warning appears if the planned starts are closer).
+* **Stale processes.** `python backend\tools\trinetra_doctor.py` lists stale TRINETRA Gazebo/PX4/bridge processes; `--clean` stops only those (never the live fleet or other programs).
+* **WSL memory.** The doctor recommends a `.wslconfig` sized to the machine. `--apply-wslconfig` writes it only if none exists (otherwise it backs the old one up to `.wslconfig.bak`). `wsl --shutdown` is needed afterwards for it to take effect.
+* **Capacity.** `TRINETRA_SIM_MAX_AIRCRAFT` (default 6, the largest size measured) limits how many aircraft may be started at once; planning any number is allowed. Low free memory also blocks a start with a plain message.

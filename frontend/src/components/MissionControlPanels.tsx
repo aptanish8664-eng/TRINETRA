@@ -17,7 +17,21 @@ export function ConnectionChips({ chips }: { chips: StatusChip[] }) {
     <li key={chip.key} className={`mc-chip ${chip.state}`} title={chip.detail}><i aria-hidden="true"/><span>{chip.label}</span><b>{chip.detail}</b></li>)}</ul>
 }
 
-export function HeaderStrip({ deployment, chips, onOpenScenarioLab, loading = false }: { deployment: MissionDeployment | null; chips: StatusChip[]; onOpenScenarioLab?: () => void; loading?: boolean }) {
+export function LoadProgress({ seconds, error, onRetry }: { seconds: number; error: string; onRetry: () => void }) {
+  const slow = seconds >= 6
+  const stuck = seconds >= 15
+  return <div className={`mc-load-progress ${stuck || error ? 'stuck' : ''}`} role="status" aria-live="polite">
+    <ol>
+      <li className="done">The page opened and signed in.</li>
+      <li className={error ? 'failed' : 'running'}>{error ? `The backend answered with an error: ${error}` : `Asking the backend for the latest deployment${seconds > 0 ? ` (${seconds} s)` : ''}…`}</li>
+      <li className="pending">Then reading the aircraft, the map layers and the threat monitor.</li>
+    </ol>
+    {!error && slow && <small>{stuck ? 'The backend has not answered for 15 s: it may be busy (a simulation start loads the computer) or not running.' : 'Slower than usual: the computer is probably busy.'}</small>}
+    {(error || stuck) && <button type="button" className="button-secondary" onClick={onRetry}>TRY AGAIN</button>}
+  </div>
+}
+
+export function HeaderStrip({ deployment, chips, onOpenScenarioLab, loading = false, loadingSeconds = 0, loadError = '', onRetryLoad }: { deployment: MissionDeployment | null; chips: StatusChip[]; onOpenScenarioLab?: () => void; loading?: boolean; loadingSeconds?: number; loadError?: string; onRetryLoad?: () => void }) {
   const legacy = isLegacyDeployment(deployment)
   const routes = deployment?.intent.mission_plan?.aircraft.filter(item => item.route).length ?? 0
   const scenarioLab = onOpenScenarioLab ? <button type="button" className="inline-link" onClick={onOpenScenarioLab}>Open Scenario Lab</button> : null
@@ -28,6 +42,7 @@ export function HeaderStrip({ deployment, chips, onOpenScenarioLab, loading = fa
       <small>{deployment
         ? `${deploymentVersionLabel(deployment)} · ${legacy ? 'legacy (schema 1), no generated routes' : `schema 2 · ${routes} generated route${routes === 1 ? '' : 's'} on the map`} · hash ${deployment.scenario_version_hash.slice(0, 12)}`
         : loading ? 'Reading the latest deployment from the backend.' : 'Use Deploy to Mission Control in Scenario Lab to load a validated mission here.'}</small>
+      {!deployment && loading && <LoadProgress seconds={loadingSeconds} error={loadError} onRetry={() => onRetryLoad?.()}/>}
       {!deployment && !loading && scenarioLab}
     </div>
     <div className="mc-header-status">
@@ -76,7 +91,7 @@ export function AircraftCards({ rows, selectedId, onSelect, threatTiers = {} }: 
   </section>
 }
 
-export function SystemStatus({ chips, verified, withMission, openAlerts }: { chips: StatusChip[]; verified: number | null; withMission: number; openAlerts: number }) {
+export function SystemStatus({ chips, verified, withMission, openAlerts, notVerified = [] }: { chips: StatusChip[]; verified: number | null; withMission: number; openAlerts: number; notVerified?: Array<{ aircraft_id: string; reason: string }> }) {
   return <section className="panel mc-panel" aria-label="System status">
     <div className="panel-heading"><div><span className="eyebrow">SYSTEM STATUS</span><h3>Services</h3></div></div>
     <ul className="mc-status-list">{chips.map(chip => <li key={chip.key}><span className={`mc-dot ${chip.state}`} aria-hidden="true"/><span>{chip.label}</span><b>{chip.detail}</b></li>)}</ul>
@@ -85,6 +100,7 @@ export function SystemStatus({ chips, verified, withMission, openAlerts }: { chi
       <div><dt>Aircraft with a mission</dt><dd>{withMission}</dd></div>
       <div><dt>Open alerts</dt><dd>{openAlerts}</dd></div>
     </dl>
+    {notVerified.length > 0 && <ul className="mc-not-verified" aria-label="Aircraft that are not verified">{notVerified.map(item => <li key={item.aircraft_id}><b>{item.aircraft_id}</b> is not verified: {item.reason}</li>)}</ul>}
   </section>
 }
 
@@ -164,6 +180,9 @@ export function DetailDrawer({ row }: { row: AircraftRow | null }) {
       {item('Armed', vehicle?.armed === null || vehicle?.armed === undefined ? NO_DATA : vehicle.armed ? 'armed' : 'disarmed')}
       {item('Altitude MSL / rel', `${num(position?.altitude_m, 1, ' m')} / ${num(position?.relative_altitude_m, 1, ' m')}`)}
       {item('Ground speed', num(vehicle?.velocity?.ground_speed_m_s, 2, ' m/s'))}
+      {item('Heading', num(position?.heading_deg, 0, '°'))}
+      {item('Latitude / longitude', position ? `${position.latitude.toFixed(5)}, ${position.longitude.toFixed(5)}` : NO_DATA)}
+      {item('GPS', vehicle?.gps_raw ? (vehicle.gps_raw.valid ? `fix ${vehicle.gps_raw.fix_type} · ${vehicle.gps_raw.satellites_visible ?? '—'} sats` : 'no valid fix') : NO_DATA)}
       {item('Battery', `${num(vehicle?.battery?.remaining_percent, 0, '%')} · ${num(vehicle?.battery?.voltage_v, 2, ' V')}`)}
       {item('Last heartbeat', vehicle?.heartbeat_age_seconds == null ? NO_DATA : `${vehicle.heartbeat_age_seconds.toFixed(1)} s ago`)}
       {item('Role / priority', row.plan ? `${row.plan.role ?? 'none'} / ${row.plan.priority}${row.plan.reassignable ? ' · reassignable' : ''}` : 'not planned')}
